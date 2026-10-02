@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "description": "Synthetic Orders smoke-test fixture. Values and formulas are from the approved plan; no live or customer data. Validate original bytes before making a disposable working copy.",
+  "sheetOrder": ["Orders", "Summary", "Types"],
+  "noMacros": true,
+  "noExternalLinks": true,
+  "noErrors": true,
+  "sheets": {
+    "Orders": {
+      "range": "A1:G5",
+      "cells": {
+        "A1": {"type": "text", "value": "OrderID", "format": "General"},
+        "B1": {"type": "text", "value": "Item", "format": "General"},
+        "C1": {"type": "text", "value": "Quantity", "format": "General"},
+        "D1": {"type": "text", "value": "UnitPrice", "format": "General"},
+        "E1": {"type": "text", "value": "DiscountRate", "format": "General"},
+        "F1": {"type": "text", "value": "LineTotal", "format": "General"},
+        "G1": {"type": "text", "value": "Note", "format": "General"},
+        "A2": {"type": "text", "value": "0001", "format": "@"},
+        "B2": {"type": "text", "value": "Widget", "format": "General"},
+        "C2": {"type": "integer", "value": 2, "format": "0"},
+        "D2": {"type": "number", "value": 12.5, "format": "\"$\"#,##0.00"},
+        "E2": {"type": "number", "value": 0.1, "format": "0%"},
+        "F2": {"type": "formula", "formula": "=ROUND(C2*D2*(1-E2),2)", "cached": 22.5, "format": "\"$\"#,##0.00"},
+        "G2": {"type": "text", "value": "ordinary", "format": "General"},
+        "A3": {"type": "text", "value": "0002", "format": "@"},
+        "B3": {"type": "text", "value": "Zero quantity", "format": "General"},
+        "C3": {"type": "integer", "value": 0, "format": "0"},
+        "D3": {"type": "number", "value": 10, "format": "\"$\"#,##0.00"},
+        "E3": {"type": "number", "value": 0, "format": "0%"},
+        "F3": {"type": "formula", "formula": "=ROUND(C3*D3*(1-E3),2)", "cached": 0, "format": "\"$\"#,##0.00"},
+        "G3": {"type": "empty", "value": null, "format": "General"},
+        "A4": {"type": "text", "value": "0003", "format": "@"},
+        "B4": {"type": "text", "value": "Return", "format": "General"},
+        "C4": {"type": "integer", "value": -1, "format": "0"},
+        "D4": {"type": "number", "value": 8, "format": "\"$\"#,##0.00"},
+        "E4": {"type": "number", "value": 0, "format": "0%"},
+        "F4": {"type": "formula", "formula": "=ROUND(C4*D4*(1-E4),2)", "cached": -8, "format": "\"$\"#,##0.00"},
+        "G4": {"type": "text", "value": "return", "format": "General"},
+        "A5": {"type": "text", "value": "0004", "format": "@"},
+        "B5": {"type": "text", "value": "Café", "format": "General"},
+        "C5": {"type": "integer", "value": 3, "format": "0"},
+        "D5": {"type": "number", "value": 4, "format": "\"$\"#,##0.00"},
+        "E5": {"type": "number", "value": 0.25, "format": "0%"},
+        "F5": {"type": "formula", "formula": "=ROUND(C5*D5*(1-E5),2)", "cached": 9, "format": "\"$\"#,##0.00"},
+        "G5": {"type": "text", "value": "Unicode", "format": "General"}
+      }
+    },
+    "Summary": {
+      "range": "A1:B3",
+      "cells": {
+        "A1": {"type": "text", "value": "Metric", "format": "General"},
+        "B1": {"type": "text", "value": "Value", "format": "General"},
+        "A2": {"type": "text", "value": "Net total", "format": "General"},
+        "B2": {"type": "formula", "formula": "=SUM(Orders!F2:F5)", "cached": 23.5, "format": "\"$\"#,##0.00"},
+        "A3": {"type": "text", "value": "Order count", "format": "General"},
+        "B3": {"type": "formula", "formula": "=COUNTA(Orders!A2:A5)", "cached": 4, "format": "0"}
+      }
+    },
+    "Types": {
+      "range": "A1:C2",
+      "cells": {
+        "A1": {"type": "text", "value": "SampleDate", "format": "General"},
+        "B1": {"type": "text", "value": "IsActive", "format": "General"},
+        "C1": {"type": "text", "value": "Empty", "format": "General"},
+        "A2": {"type": "date", "value": "2026-09-18", "format": "yyyy-mm-dd"},
+        "B2": {"type": "boolean", "value": true, "format": "General"},
+        "C2": {"type": "empty", "value": null, "format": "General"}
+      }
+    }
+  }
+}

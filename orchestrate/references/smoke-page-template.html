@@ -1,0 +1,1438 @@
+<title>{{PAGE_TITLE}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:      #E6EAEB;
+    --surface:     #FBFCFC;
+    --surface-2:   #F0F3F4;
+    --ink:         #12191B;
+    --ink-soft:    #59676B;
+    --ink-faint:   #869599;
+    --rule:        #C9D2D5;
+    --rule-soft:   #DDE4E6;
+    --accent:      #0E5B67;
+    --accent-soft: #D8E8EA;
+    --pass:        #2C6740;
+    --pass-bg:     #DCEBE0;
+    --fail:        #9E2A2A;
+    --fail-bg:     #F3DEDC;
+    --block:       #7E5A12;
+    --block-bg:    #F0E6CE;
+    --shadow:      0 1px 2px rgba(18, 25, 27, .07), 0 6px 20px -12px rgba(18, 25, 27, .22);
+
+    --f-display: "Barlow Condensed", "Arial Narrow", sans-serif;
+    --f-body:    "IBM Plex Sans", -apple-system, "Segoe UI", sans-serif;
+    --f-mono:    "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0E1416;
+      --surface:     #171F22;
+      --surface-2:   #1E282B;
+      --ink:         #DFE7E9;
+      --ink-soft:    #93A3A7;
+      --ink-faint:   #6C7C81;
+      --rule:        #2B383C;
+      --rule-soft:   #222D31;
+      --accent:      #5CBCC8;
+      --accent-soft: #16333A;
+      --pass:        #66B482;
+      --pass-bg:     #17301F;
+      --fail:        #E4817A;
+      --fail-bg:     #351B1A;
+      --block:       #D3A751;
+      --block-bg:    #302614;
+      --shadow:      0 1px 2px rgba(0,0,0,.4), 0 6px 20px -12px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0E1416;
+    --surface:     #171F22;
+    --surface-2:   #1E282B;
+    --ink:         #DFE7E9;
+    --ink-soft:    #93A3A7;
+    --ink-faint:   #6C7C81;
+    --rule:        #2B383C;
+    --rule-soft:   #222D31;
+    --accent:      #5CBCC8;
+    --accent-soft: #16333A;
+    --pass:        #66B482;
+    --pass-bg:     #17301F;
+    --fail:        #E4817A;
+    --fail-bg:     #351B1A;
+    --block:       #D3A751;
+    --block-bg:    #302614;
+    --shadow:      0 1px 2px rgba(0,0,0,.4), 0 6px 20px -12px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  code, .mono { font-family: var(--f-mono); }
+
+  code {
+    font-size: .87em;
+    background: var(--surface-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 3px;
+    padding: .08em .34em;
+    word-break: break-word;
+  }
+
+  em { font-style: italic; color: var(--ink-soft); }
+
+  a { color: var(--accent); }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  /* ---------------------------------------------------------------- header */
+
+  .masthead {
+    background: var(--surface);
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .masthead-in {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 22px 24px 0;
+  }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 6px;
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(30px, 5vw, 46px);
+    line-height: 1.03;
+    letter-spacing: -.005em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    margin: 10px 0 0;
+    max-width: 62ch;
+    color: var(--ink-soft);
+    font-size: 15.5px;
+  }
+
+  /* build facts — a manifest strip, not tiles */
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0;
+    margin: 20px 0 0;
+    border-top: 1px solid var(--rule-soft);
+  }
+
+  .fact {
+    flex: 1 1 150px;
+    min-width: 0;
+    padding: 11px 16px 12px 0;
+    margin-right: 16px;
+    border-right: 1px solid var(--rule-soft);
+  }
+  .fact:last-child { border-right: 0; margin-right: 0; }
+
+  .fact dt {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 3px;
+  }
+
+  .fact dd {
+    margin: 0;
+    font-family: var(--f-mono);
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+
+  .fact dd .was {
+    color: var(--ink-faint);
+    font-weight: 400;
+    text-decoration: line-through;
+  }
+
+  /* progress */
+  .progress-wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 0 24px 18px;
+  }
+
+  .meter {
+    height: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 99px;
+    overflow: hidden;
+    display: flex;
+  }
+  .meter span { display: block; height: 100%; transition: width .3s ease; }
+  .meter .m-pass   { background: var(--pass); }
+  .meter .m-change { background: var(--accent); }
+  .meter .m-fail   { background: var(--fail); }
+  .meter .m-block  { background: var(--block); }
+
+  .tally {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+    margin: 9px 0 0;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    font-variant-numeric: tabular-nums;
+  }
+  .tally b { color: var(--ink); font-weight: 600; }
+  .tally .k-pass  b { color: var(--pass); }
+  .tally .k-fail  b { color: var(--fail); }
+  .tally .k-block b { color: var(--block); }
+  .tally .k-change b { color: var(--accent); }
+
+  /* ----------------------------------------------------------------- shell */
+
+  .shell {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 26px 24px 80px;
+    display: grid;
+    grid-template-columns: 214px minmax(0, 1fr);
+    gap: 38px;
+    align-items: start;
+  }
+
+  /* ------------------------------------------------------------------ rail */
+
+  .rail { position: sticky; top: 18px; }
+
+  .rail h2 {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin: 0 0 10px;
+    font-weight: 500;
+  }
+
+  .rail-nav { display: flex; flex-direction: column; }
+
+  .rail-link {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr) auto;
+    align-items: baseline;
+    gap: 8px;
+    padding: 7px 2px;
+    border-top: 1px solid var(--rule-soft);
+    color: var(--ink);
+    text-decoration: none;
+    font-size: 13.5px;
+    line-height: 1.35;
+  }
+  .rail-link:last-child { border-bottom: 1px solid var(--rule-soft); }
+  .rail-link:hover { color: var(--accent); }
+
+  .rail-link .rn {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+  }
+
+  .rail-link .rc {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .rail-link .rc.done { color: var(--pass); }
+  .rail-link .rc.has-fail { color: var(--fail); }
+
+  .rail-actions { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+
+  .store-note {
+    margin-top: 14px;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--ink-faint);
+    font-family: var(--f-mono);
+  }
+  .store-note.live { color: var(--pass); }
+  .store-note.off  { color: var(--block); }
+
+  /* --------------------------------------------------------------- buttons */
+
+  .btn {
+    font-family: var(--f-body);
+    font-size: 13px;
+    font-weight: 500;
+    padding: 7px 12px;
+    border-radius: 5px;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+    text-align: center;
+    transition: background .12s, border-color .12s;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn:active { transform: translateY(.5px); }
+
+  /* ---------------------------------------------------------------- blocks */
+
+  .section { margin: 0 0 8px; scroll-margin-top: 18px; }
+
+  .section-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 30px 0 10px;
+    border-bottom: 2px solid var(--ink);
+  }
+  .section:first-of-type .section-head { padding-top: 4px; }
+
+  .section-n {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+
+  .section-head h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 27px;
+    line-height: 1.1;
+    margin: 0;
+    flex: 1 1 auto;
+    text-wrap: balance;
+  }
+
+  .tag {
+    font-family: var(--f-mono);
+    font-size: 9.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: 3px 7px;
+    border-radius: 3px;
+    border: 1px solid currentColor;
+    white-space: nowrap;
+  }
+  .tag-data { color: var(--fail); }
+  .tag-step { color: var(--accent); }
+  .tag-pre { color: var(--accent); border-style: dashed; }
+  .step.step-pre .step-do, .step.step-pre .step-pass { opacity: .72; }
+  .step-pre-note { font-size: .86em; opacity: .8; margin: 6px 0 0; }
+
+  .section-lede {
+    margin: 12px 0 0;
+    max-width: 66ch;
+    color: var(--ink-soft);
+    font-size: 14.5px;
+  }
+
+  /* callouts — used sparingly, only where a real constraint exists */
+  .callout {
+    margin: 14px 0 0;
+    padding: 13px 16px;
+    border-radius: 6px;
+    font-size: 14px;
+    max-width: 68ch;
+  }
+  .callout p { margin: 0; }
+  .callout p + p { margin-top: 7px; }
+
+  .callout-order {
+    background: var(--block-bg);
+    border: 1px solid color-mix(in srgb, var(--block) 34%, transparent);
+    color: var(--ink);
+  }
+  .callout-order .co-h {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--block);
+    display: block;
+    margin-bottom: 5px;
+  }
+
+  .callout-need {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 3px solid var(--accent);
+  }
+  .callout-need .co-h {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 5px;
+  }
+
+  /* -------------------------------------------------------- the gate (s0) */
+
+  .gate {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    padding: 22px 24px 24px;
+    margin: 0 0 6px;
+  }
+
+  .gate h3 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 25px;
+    margin: 0;
+    line-height: 1.1;
+  }
+
+  .gate .gate-eyebrow {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--fail);
+    margin: 0 0 5px;
+  }
+
+  .gate p { max-width: 66ch; }
+
+  pre {
+    background: var(--surface-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 5px;
+    padding: 12px 14px;
+    overflow-x: auto;
+    margin: 12px 0;
+    font-family: var(--f-mono);
+    font-size: 12.5px;
+    line-height: 1.65;
+    color: var(--ink);
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; }
+
+  .gate-checks {
+    list-style: none;
+    counter-reset: gc;
+    margin: 16px 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  /* The number hangs in the li's padding, NOT a grid column: grid would split
+     the li's mixed inline content (text + <code>/<strong>) into one anonymous
+     item per run and cram half of it into the 26px number column. */
+  .gate-checks li {
+    counter-increment: gc;
+    position: relative;
+    padding-left: 36px;
+    font-size: 14.5px;
+    max-width: 64ch;
+  }
+  .gate-checks li::before {
+    content: counter(gc);
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 99px;
+    width: 20px; height: 20px;
+    display: grid; place-items: center;
+    position: absolute;
+    left: 0;
+    top: 2px;
+  }
+
+  /* ----------------------------------------------------------------- steps */
+
+  .steps { display: flex; flex-direction: column; }
+
+  .step {
+    display: grid;
+    grid-template-columns: 46px minmax(0, 1fr);
+    gap: 0 14px;
+    padding: 17px 0;
+    border-bottom: 1px solid var(--rule-soft);
+    scroll-margin-top: 18px;
+  }
+  .step:last-child { border-bottom: 0; }
+
+  .step-n {
+    font-family: var(--f-mono);
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+    padding-top: 1px;
+  }
+  .step[data-status="pass"]    .step-n { color: var(--pass); }
+  .step[data-status="fail"]    .step-n { color: var(--fail); }
+  .step[data-status="blocked"] .step-n { color: var(--block); }
+  .step[data-status="change"]  .step-n { color: var(--accent); }
+
+  .step-body { min-width: 0; }
+
+  .step-tags { display: flex; gap: 6px; margin-bottom: 7px; flex-wrap: wrap; }
+
+  .step-do { margin: 0; max-width: 66ch; }
+  .step-do strong { font-weight: 600; }
+
+  .step-pass {
+    margin: 11px 0 0;
+    padding: 9px 0 9px 14px;
+    border-left: 2px solid var(--accent);
+    max-width: 64ch;
+    font-size: 14.5px;
+    color: var(--ink);
+  }
+  .step-pass .pl {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 3px;
+  }
+  .step-pass p { margin: 0; }
+  .step-pass p + p { margin-top: 7px; }
+
+  .step-input { overflow-wrap: anywhere; }
+
+  .step-aside {
+    margin: 10px 0 0;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    max-width: 64ch;
+    padding-left: 14px;
+    border-left: 1px dotted var(--rule);
+  }
+
+  .step-unit {
+    margin: 10px 0 0;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+    background: var(--surface-2);
+    border: 1px solid var(--rule-soft);
+    border-radius: 4px;
+    padding: 7px 10px;
+    max-width: 64ch;
+  }
+  .step-unit b { color: var(--ink); font-weight: 600; }
+
+  /* verdict controls */
+  .verdict {
+    margin: 13px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .vbtn {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    padding: 5px 11px;
+    border-radius: 4px;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    color: var(--ink-soft);
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .vbtn:hover { border-color: var(--ink-faint); color: var(--ink); }
+
+  .vbtn[aria-pressed="true"] { font-weight: 600; }
+  .vbtn.v-pass[aria-pressed="true"]  { background: var(--pass-bg);  border-color: var(--pass);  color: var(--pass); }
+  .vbtn.v-fail[aria-pressed="true"]  { background: var(--fail-bg);  border-color: var(--fail);  color: var(--fail); }
+  .vbtn.v-block[aria-pressed="true"] { background: var(--block-bg); border-color: var(--block); color: var(--block); }
+  /* "Works, but" is not a failure state, so it takes the page's own accent
+     rather than a semantic red or amber. It reads as noted, not wrong. */
+  .vbtn.v-change[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+
+  .vclear {
+    background: none;
+    border: 0;
+    color: var(--ink-faint);
+    font-size: 12px;
+    cursor: pointer;
+    padding: 5px 4px;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .vclear:hover { color: var(--ink); }
+
+  .note-wrap { margin: 10px 0 0; max-width: 64ch; }
+
+  .note-wrap textarea {
+    width: 100%;
+    min-height: 62px;
+    resize: vertical;
+    font-family: var(--f-body);
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 5px;
+    padding: 9px 11px;
+  }
+  .note-wrap textarea::placeholder { color: var(--ink-faint); }
+  .note-wrap label {
+    display: block;
+    font-family: var(--f-mono);
+    font-size: 10px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    margin-bottom: 5px;
+  }
+
+  /* --------------------------------------------------------------- closing */
+
+  .closing {
+    margin-top: 44px;
+    padding: 24px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+  }
+  .closing h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 24px;
+    margin: 0 0 10px;
+  }
+  .closing p { max-width: 66ch; margin: 0 0 10px; }
+  .closing p:last-of-type { margin-bottom: 0; }
+
+  .closing-actions { margin-top: 18px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+  .copied { font-family: var(--f-mono); font-size: 12px; color: var(--pass); }
+
+  /* ------------------------------------------------------------ responsive */
+
+  @media (max-width: 860px) {
+    .shell { grid-template-columns: minmax(0, 1fr); gap: 0; }
+    .rail {
+      position: static;
+      margin-bottom: 26px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--rule);
+    }
+    .rail-nav { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0 16px; }
+    .step { grid-template-columns: 34px minmax(0, 1fr); gap: 0 10px; }
+    .fact { flex-basis: 46%; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+</style>
+
+<header class="masthead">
+  <div class="masthead-in">
+    <p class="eyebrow">{{EYEBROW}}</p>
+    <h1>{{HEADLINE}}</h1>
+    <p class="standfirst">{{STANDFIRST}}</p>
+
+    <dl class="facts">
+{{FACTS_HTML}}
+    </dl>
+  </div>
+
+  <div class="progress-wrap">
+    <div class="meter" role="img" aria-label="Run progress" id="meter">
+      <span class="m-pass"   id="m-pass"   style="width:0%"></span>
+      <span class="m-change" id="m-change" style="width:0%"></span>
+      <span class="m-fail"   id="m-fail"   style="width:0%"></span>
+      <span class="m-block"  id="m-block"  style="width:0%"></span>
+      <span id="m-carried" style="width:0%;background:var(--ink-faint)"></span>
+    </div>
+    <p class="tally">
+      <span class="k-pass">passed <b id="t-pass">0</b></span>
+      <span class="k-fail">failed <b id="t-fail">0</b></span>
+      <span class="k-block">blocked <b id="t-block">0</b></span>
+      <span class="k-change">works, but <b id="t-change">0</b></span>
+      <span>carried over <b id="t-carried">0</b></span>
+      <span>re-run <b id="t-rerun">0</b></span>
+      <span>pre-verified <b id="t-pre">0</b></span>
+      <span>unmarked <b id="t-todo">—</b></span>
+      <span>of <b id="t-total">—</b></span>
+    </p>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="rail">
+    <h2>Sections</h2>
+    <nav class="rail-nav" id="rail"></nav>
+    <div class="rail-actions">
+      <button class="btn" id="btn-next" type="button">Jump to next step to run</button>
+    </div>
+    <p class="store-note" id="store-note">Checking for saved verdicts…</p>
+  </aside>
+
+  <main>
+    <section class="gate" id="run-error" role="alert" hidden>
+      <h3>This smoke page needs correction</h3>
+      <p id="run-error-text"></p>
+    </section>
+    <section class="gate" id="s0">
+{{GATE_BODY}}
+    </section>
+
+    <div id="sections"></div>
+
+    <section class="closing">
+      <h3>The four verdicts</h3>
+      <p><strong>Pass</strong> means it did what the step says. <strong>Fail</strong>
+      means it did something else, and the note should say what.</p>
+      <p><strong>Blocked</strong> means the step could not be performed as written,
+      because a button is not there or a dialog closes when it should not. That is a
+      defect in the step rather than in the app, and it is worth knowing separately.</p>
+      <p><strong>Works, but</strong> means the step passed exactly as described and you
+      want the thing itself to be different. It is not a failure and it does not count
+      against the build. It goes to the backlog.</p>
+      <p>If a section flagged <strong>Touches your data</strong> looks wrong, stop there
+      and say so before continuing.</p>
+      <div class="closing-actions">
+        <button class="btn" id="btn-copy" type="button">Copy results as text</button>
+        <span class="copied" id="copied" hidden>Copied — paste it into the chat.</span>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ------------------------------------------------------------------ data
+     Each step's prose is authored here as HTML. Schema:
+       section: { n, title, steps, lede?, order?, need?, touchesData? }
+         lede        — context paragraph under the section head
+         order       — "Order matters" callout (cross-step constraints)
+         need        — "You need" callout (test data / hardware / accounts)
+         touchesData — true flags the section "Touches your data"
+       step: { n, do, pass, revision?, aside?, unit?, tag?, pre?, inputs? }
+         inputs — stable IDs in the sidecar's inputs registry. The builder validates
+                 their raw disk bytes and supplies resolved inputFiles below.
+         do    — the action, imperative; one step, one action
+         pass  — the acceptance criterion, kept apart from the instruction
+                 because those are two different things to read
+         revision — positive integer, initially 1 (default). Increment when this
+                 step's instructions, criterion or covered behavior changes.
+                 Keep it unchanged across re-issues that do not affect this step.
+         aside — warning or context ("Enter cancels here — click the button")
+         unit  — where a count is involved, define ONE unit in the
+                 operator's words
+         tag   — short hazard label rendered on the step (e.g. "Scanner
+                 safety" for steps that exist because a barcode scanner is a
+                 keyboard that types a code and then presses Enter)
+         pre   — the QA runner already performed this step on the integration
+                 tip before hand-over: { sha, stepRevision, env, evidence }.
+                 sha is full or abbreviated to at least 7 hex characters;
+                 stepRevision is the step's revision when the runner PASSED it.
+                 Keep both with the original evidence on re-issue; only replace
+                 them after a new run. Matching revisions may carry evidence from
+                 an earlier build, labeled as such. Missing/mismatched revisions
+                 require re-verification. Omit pre for human steps. */
+
+  var SECTIONS = {{SECTIONS_JS}};
+  var BUILD_SHA = "{{BUILD_SHA}}";
+
+  // Stop before reading storage, connecting to the store, or enabling verdicts.
+  // An unfilled slot must never become a shared identity across different builds.
+  if (!isFullSha(BUILD_SHA)) {
+    document.getElementById("run-error").hidden = false;
+    document.getElementById("run-error-text").textContent =
+      "This page has no valid build identity. Ask for a corrected smoke page before running these steps. Your saved verdicts have not been changed.";
+    document.getElementById("s0").hidden = true;
+    document.getElementById("btn-copy").disabled = true;
+    document.getElementById("btn-next").disabled = true;
+    setStoreNote("Run unavailable — this smoke page needs correction.", "off");
+    return;
+  }
+  BUILD_SHA = BUILD_SHA.toLowerCase();
+
+  var TOTAL = SECTIONS.reduce(function (a, s) { return a + s.steps.length; }, 0);
+
+  /* FOUR verdicts, not three. A run sheet with only pass/fail/blocked gives
+     the operator nowhere to say "this works and I want it different", so
+     passes get recorded as blocked and the orchestrator triages prose
+     instead of verdicts. "change" (Works, but) is that fourth verdict: not a
+     failure, never counts against the build, goes to the backlog. */
+  var STATES = ["pass", "fail", "blocked", "change"];
+
+  var LABEL = {
+    pass: "Pass", fail: "Fail", blocked: "Blocked", change: "Works, but"
+  };
+  var HINT = {
+    pass: "It did what the step says.",
+    fail: "It did something else. Say what.",
+    blocked: "The step could not be performed as written — a button is missing, a dialog closes early. A defect in the step, not the app.",
+    change: "It worked exactly as described, and you want it different. Not a defect; goes to the backlog."
+  };
+
+  /* --------------------------------------------------------------- storage
+     One document per step in `{{CKPT_KEY}}-steps`, so a tick is a single
+     small write with no read-modify-write race, and the whole run reads back
+     as one collection listing. `db` may be null — the page is fully usable
+     without it, it saves only in this browser when localStorage is available. */
+
+  var db = null;
+  var local = {};           // n -> {status, note, buildSha, stepRevision, at}
+  var noteTimers = {};
+  var pendingRemote = {};   // newer whole records deferred while a note has focus
+
+  function recordTime(rec) {
+    if (!rec || typeof rec.at !== "string") return -Infinity;
+    var time = Date.parse(rec.at);
+    return isFinite(time) && new Date(time).toISOString() === rec.at ? time : -Infinity;
+  }
+
+  function stamp(n) {
+    // Advance even for rapid edits, a clock rollback, or an observed future update.
+    local[n].at = new Date(Math.max(Date.now(), recordTime(local[n]) + 1,
+      recordTime(pendingRemote[n]) + 1)).toISOString();
+  }
+
+  function cancelNoteWrite(n) {
+    clearTimeout(noteTimers[n]);
+    delete noteTimers[n];
+  }
+
+  function applyRemote(n, rec) {
+    // Equal timestamps (including echoes) keep the local record. Untimed data can
+    // populate an empty browser, but cannot replace an existing record.
+    if (local[n] && recordTime(rec) <= recordTime(local[n])) return false;
+    cancelNoteWrite(n);
+    local[n] = rec;
+    return true;
+  }
+
+  function loadLocal() {
+    try {
+      var raw = window.localStorage.getItem("{{CKPT_KEY}}-run");
+      if (raw) local = JSON.parse(raw) || {};
+    } catch (e) { local = {}; }
+  }
+
+  function saveLocal() {
+    try {
+      window.localStorage.setItem("{{CKPT_KEY}}-run", JSON.stringify(local));
+    } catch (e) { /* private window, blocked storage — the page still works */ }
+  }
+
+  function persist(n) {
+    var rec = local[n];
+    if (!db || !rec) return;
+    var body = {
+      n: n,
+      section: sectionOf(n),
+      status: rec && rec.status ? rec.status : "",
+      note: rec && rec.note ? rec.note : "",
+      buildSha: rec && rec.buildSha ? rec.buildSha : "",
+      stepRevision: rec && rec.stepRevision ? rec.stepRevision : "",
+      at: rec.at || ""
+    };
+    db.doc("{{CKPT_KEY}}-steps/" + n).set(body).catch(function (e) {
+      setStoreNote("Not saving to the page right now (" + (e && e.code ? e.code : "error") + "). Your marks are kept in this browser.", "off");
+    });
+  }
+
+  function sectionOf(n) {
+    for (var i = 0; i < SECTIONS.length; i++) {
+      var s = SECTIONS[i];
+      for (var j = 0; j < s.steps.length; j++) if (s.steps[j].n === n) return s.n;
+    }
+    return 0;
+  }
+
+  function stepOf(n) {
+    for (var i = 0; i < SECTIONS.length; i++) {
+      for (var j = 0; j < SECTIONS[i].steps.length; j++) {
+        if (SECTIONS[i].steps[j].n === n) return SECTIONS[i].steps[j];
+      }
+    }
+    return null;
+  }
+
+  function revisionOf(step) { return String(step.revision || 1); }
+
+  function isFullSha(sha) {
+    return typeof sha === "string" && /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(sha);
+  }
+
+  function sameBuild(sha) { return isFullSha(sha) && sha.toLowerCase() === BUILD_SHA; }
+
+  function preState(step) {
+    var pre = step.pre;
+    if (!pre) return "none";
+    if (typeof pre.sha !== "string" || !/^[0-9a-f]{7,64}$/i.test(pre.sha) ||
+        pre.sha.length > BUILD_SHA.length || String(pre.stepRevision) !== revisionOf(step) ||
+        typeof pre.env !== "string" || !pre.env.trim() ||
+        typeof pre.evidence !== "string" || !pre.evidence.trim()) return "stale";
+    return BUILD_SHA.slice(0, pre.sha.length) === pre.sha.toLowerCase() ? "current" : "carried";
+  }
+
+  function preLabel(step) {
+    return "pre-verified by agent @" + step.pre.sha +
+      (preState(step) === "carried" ? " (carried over; unchanged step)" : "");
+  }
+
+  function stepState(step) {
+    var rec = local[step.n] || {};
+    var marked = STATES.indexOf(rec.status) !== -1;
+    // A saved verdict remains applicable only while the step's revision matches.
+    // Missing provenance is never silently assigned to the current build/revision.
+    var applicable = marked && isFullSha(rec.buildSha) && rec.stepRevision === revisionOf(step);
+    var agent = preState(step);
+    var kind = applicable ? (sameBuild(rec.buildSha) ? "current" : "carried")
+      : agent === "current" || agent === "carried" ? "pre"
+      : marked || agent === "stale" ? "rerun" : "todo";
+    return { record: rec, marked: marked, kind: kind };
+  }
+
+  function carriedLabel(rec) {
+    var label = rec.status === "change" ? "WORKS, BUT" : rec.status.toUpperCase();
+    return label + " (carried over from build " + (rec.buildSha || "unknown") + ")";
+  }
+
+  function counts() {
+    var c = { pass: 0, fail: 0, blocked: 0, change: 0, carried: 0, rerun: 0, pre: 0, todo: 0 };
+    SECTIONS.forEach(function (s) { s.steps.forEach(function (step) {
+      var state = stepState(step);
+      if (state.kind === "current") c[state.record.status]++;
+      else c[state.kind]++;
+    }); });
+    return c;
+  }
+
+  function setStoreNote(text, cls) {
+    var el = document.getElementById("store-note");
+    el.textContent = text;
+    el.className = "store-note" + (cls ? " " + cls : "");
+  }
+
+  /* ---------------------------------------------------------------- render */
+
+  function inputURL(path) {
+    return path.split('/').map(function (part) {
+      return encodeURIComponent(part).replace(/[!'()*]/g, function (c) {
+        return '%' + c.charCodeAt(0).toString(16).toUpperCase();
+      });
+    }).join('/');
+  }
+
+  function inputDetails(body, files) {
+    (files || []).forEach(function (input) {
+      var block = document.createElement('div');
+      block.className = 'step-input';
+      var label = document.createElement('p');
+      label.className = 'step-aside';
+      label.textContent = 'Input ' + input.id + ' (' + input.mode + '): ';
+      var link = document.createElement('a');
+      link.textContent = input.path;
+      link.setAttribute('href', inputURL(input.path));
+      label.appendChild(link);
+      block.appendChild(label);
+      ['Requirements: ' + input.requirements, 'Use: ' + input.use, 'Reset: ' + input.reset,
+        'SHA-256: ' + input.sha256 + ' · ' + input.size + ' bytes'].forEach(function (text) {
+        var p = document.createElement('p'); p.className = 'step-aside'; p.textContent = text;
+        block.appendChild(p);
+      });
+      var evidence = document.createElement('p'); evidence.className = 'step-aside';
+      evidence.textContent = 'Input validation: ' + input.validation.result + ' (' + input.validation.env +
+        '; exit ' + input.validation.exitCode + ') — ';
+      var proof = document.createElement('a'); proof.textContent = input.validation.path;
+      proof.setAttribute('href', inputURL(input.validation.path)); evidence.appendChild(proof);
+      block.appendChild(evidence);
+      body.appendChild(block);
+    });
+  }
+
+  function stepEl(step) {
+    var wrap = document.createElement("div");
+    wrap.className = "step";
+    wrap.id = "step-" + step.n;
+    wrap.setAttribute("data-step", String(step.n));
+
+    var num = document.createElement("div");
+    num.className = "step-n";
+    num.textContent = String(step.n);
+    wrap.appendChild(num);
+
+    var body = document.createElement("div");
+    body.className = "step-body";
+
+    var agent = preState(step);
+    if (step.tag || step.pre) {
+      var tags = document.createElement("div");
+      tags.className = "step-tags";
+      if (step.tag) {
+        var t = document.createElement("span");
+        t.className = "tag tag-step";
+        t.textContent = step.tag;
+        tags.appendChild(t);
+      }
+      if (step.pre) {
+        var tp = document.createElement("span");
+        tp.className = agent === "stale" ? "tag tag-step" : "tag tag-pre";
+        tp.textContent = agent === "stale" ? "Agent evidence needs re-verification"
+          : agent === "carried" ? "Pre-verified by agent — carried over" : "Pre-verified by agent";
+        tags.appendChild(tp);
+        if (agent !== "stale") wrap.className += " step-pre";
+      }
+      body.appendChild(tags);
+    }
+
+    var doP = document.createElement("p");
+    doP.className = "step-do";
+    doP.innerHTML = step.do;
+    body.appendChild(doP);
+
+    var passBox = document.createElement("div");
+    passBox.className = "step-pass";
+    passBox.innerHTML = '<span class="pl">Pass</span><p>' + step.pass + "</p>";
+    body.appendChild(passBox);
+    inputDetails(body, step.inputFiles);
+
+    if (step.aside) {
+      var a = document.createElement("p");
+      a.className = "step-aside";
+      a.innerHTML = step.aside;
+      body.appendChild(a);
+    }
+
+    if (step.unit) {
+      var u = document.createElement("p");
+      u.className = "step-unit";
+      u.innerHTML = "<b>Counting:</b> " + step.unit;
+      body.appendChild(u);
+    }
+
+    if (step.pre) {
+      var pn = document.createElement("p");
+      pn.className = "step-pre-note";
+      pn.textContent = agent === "stale"
+        ? "Earlier agent evidence @" + (step.pre.sha || "unknown") +
+          " is incomplete or belongs to another step revision; it does not count as verification."
+        : preLabel(step) + " (" + step.pre.env + ") — evidence: " + step.pre.evidence +
+          ". Run it again if you like; your verdict replaces the agent's.";
+      body.appendChild(pn);
+    }
+
+    // verdict controls
+    var v = document.createElement("div");
+    v.className = "verdict";
+
+    STATES.forEach(function (st) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "vbtn v-" + (st === "blocked" ? "block" : st);
+      b.setAttribute("aria-pressed", "false");
+      b.setAttribute("data-state", st);
+      b.textContent = LABEL[st];
+      b.title = HINT[st];
+      b.setAttribute("aria-label", LABEL[st] + " step " + step.n);
+      b.addEventListener("click", function () { mark(step.n, st); });
+      v.appendChild(b);
+    });
+
+    var clr = document.createElement("button");
+    clr.type = "button";
+    clr.className = "vclear";
+    clr.textContent = "clear";
+    clr.setAttribute("aria-label", "Clear the verdict on step " + step.n);
+    clr.addEventListener("click", function () { mark(step.n, ""); });
+    v.appendChild(clr);
+
+    body.appendChild(v);
+
+    var history = document.createElement("p");
+    history.className = "step-aside step-history";
+    history.hidden = true;
+    body.appendChild(history);
+
+    // note — shown once a verdict exists, required in spirit for fail/blocked
+    var nw = document.createElement("div");
+    nw.className = "note-wrap";
+    nw.hidden = true;
+    var lab = document.createElement("label");
+    lab.setAttribute("for", "note-" + step.n);
+    lab.textContent = "What you actually saw";
+    var ta = document.createElement("textarea");
+    ta.id = "note-" + step.n;
+    ta.placeholder = "What happened instead?";
+    ta.addEventListener("input", function () {
+      local[step.n] = local[step.n] || { status: "" };
+      local[step.n].note = ta.value;
+      stamp(step.n);
+      saveLocal();
+      cancelNoteWrite(step.n);
+      noteTimers[step.n] = setTimeout(function () {
+        delete noteTimers[step.n];
+        persist(step.n);
+      }, 700);
+    });
+    ta.addEventListener("blur", function () {
+      var rec = pendingRemote[step.n];
+      delete pendingRemote[step.n];
+      if (rec && applyRemote(step.n, rec)) {
+        saveLocal();
+        paintStep(step.n, true);
+        paintTotals();
+        setStoreNote("Newer results from the page applied.", "live");
+      } else if (rec) {
+        setStoreNote("Your newer edit was kept; the earlier page update was ignored.", "live");
+      }
+    });
+    nw.appendChild(lab);
+    nw.appendChild(ta);
+    body.appendChild(nw);
+
+    wrap.appendChild(body);
+    return wrap;
+  }
+
+  function buildSections() {
+    var host = document.getElementById("sections");
+    var rail = document.getElementById("rail");
+
+    SECTIONS.forEach(function (s) {
+      var sec = document.createElement("section");
+      sec.className = "section";
+      sec.id = "sec-" + s.n;
+
+      var head = document.createElement("div");
+      head.className = "section-head";
+      head.innerHTML =
+        '<span class="section-n">Section ' + s.n + "</span>" +
+        "<h3>" + s.title + "</h3>" +
+        (s.touchesData ? '<span class="tag tag-data">Touches your data</span>' : "");
+      sec.appendChild(head);
+
+      if (s.lede) {
+        var l = document.createElement("p");
+        l.className = "section-lede";
+        l.innerHTML = s.lede;
+        sec.appendChild(l);
+      }
+
+      if (s.order) {
+        var o = document.createElement("div");
+        o.className = "callout callout-order";
+        o.innerHTML = '<span class="co-h">Order matters</span><p>' + s.order + "</p>";
+        sec.appendChild(o);
+      }
+
+      if (s.need) {
+        var nd = document.createElement("div");
+        nd.className = "callout callout-need";
+        nd.innerHTML = '<span class="co-h">You need</span><p>' + s.need + "</p>";
+        sec.appendChild(nd);
+      }
+
+      var steps = document.createElement("div");
+      steps.className = "steps";
+      s.steps.forEach(function (st) { steps.appendChild(stepEl(st)); });
+      sec.appendChild(steps);
+
+      host.appendChild(sec);
+
+      // rail entry
+      var a = document.createElement("a");
+      a.className = "rail-link";
+      a.href = "#sec-" + s.n;
+      a.innerHTML =
+        '<span class="rn">' + s.n + "</span>" +
+        "<span>" + s.title + "</span>" +
+        '<span class="rc" id="rc-' + s.n + '">0/' + s.steps.length + "</span>";
+      rail.appendChild(a);
+    });
+  }
+
+  /* ----------------------------------------------------------------- state */
+
+  function mark(n, status) {
+    var step = stepOf(n);
+    if (!step) return;
+    var cur = local[n] || { status: "", note: "" };
+    // Re-selecting an old verdict confirms a re-run; only a current verdict toggles off.
+    var current = sameBuild(cur.buildSha) && cur.stepRevision === revisionOf(step);
+    cur.status = current && cur.status === status ? "" : status;
+    cur.buildSha = BUILD_SHA;
+    cur.stepRevision = revisionOf(step);
+    local[n] = cur;
+    stamp(n);
+    cancelNoteWrite(n);
+    saveLocal();
+    persist(n);
+    paintStep(n);
+    paintTotals();
+  }
+
+  function paintStep(n, forceNote) {
+    var el = document.getElementById("step-" + n);
+    if (!el) return;
+    var state = stepState(stepOf(n));
+    var rec = state.record;
+    var applicable = state.kind === "current" || state.kind === "carried";
+
+    el.setAttribute("data-status", applicable ? rec.status : "");
+
+    var btns = el.querySelectorAll(".vbtn");
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].setAttribute("aria-pressed", applicable && btns[i].getAttribute("data-state") === rec.status ? "true" : "false");
+    }
+
+    var history = el.querySelector(".step-history");
+    history.hidden = !state.marked || state.kind === "current";
+    history.textContent = history.hidden ? "" : carriedLabel(rec) + ". " +
+      (state.kind === "carried" ? "Step unchanged; kept without re-running. Select a verdict after re-running to record a new result."
+        : state.kind === "pre" ? "Agent evidence applies to this step revision; see its build and evidence above."
+        : "Step changed or its earlier build/revision is unknown. Run it again and select a verdict.");
+
+    var nw = el.querySelector(".note-wrap");
+    var ta = el.querySelector("textarea");
+    var lab = el.querySelector(".note-wrap label");
+    var wantNote = rec.status === "fail" || rec.status === "blocked" ||
+      rec.status === "change" || !!rec.note;
+    nw.hidden = !wantNote;
+    if (lab) {
+      lab.textContent = rec.status === "change"
+        ? "What would you rather it did?"
+        : "What you actually saw";
+    }
+    if (ta) {
+      ta.placeholder = rec.status === "change"
+        ? "It works as described. Describe the change you want."
+        : "What happened instead?";
+    }
+    if (ta && (forceNote || document.activeElement !== ta) && ta.value !== (rec.note || "")) ta.value = rec.note || "";
+  }
+
+  function paintTotals() {
+    var c = counts();
+
+    document.getElementById("t-pass").textContent = c.pass;
+    document.getElementById("t-fail").textContent = c.fail;
+    document.getElementById("t-block").textContent = c.blocked;
+    document.getElementById("t-change").textContent = c.change;
+    document.getElementById("t-carried").textContent = c.carried;
+    document.getElementById("t-rerun").textContent = c.rerun;
+    document.getElementById("t-pre").textContent = c.pre;
+    document.getElementById("t-todo").textContent = c.todo;
+    document.getElementById("t-total").textContent = TOTAL;
+
+    var total = TOTAL || 1;
+    document.getElementById("m-pass").style.width   = (c.pass    / total * 100) + "%";
+    document.getElementById("m-change").style.width = (c.change  / total * 100) + "%";
+    document.getElementById("m-fail").style.width   = (c.fail    / total * 100) + "%";
+    document.getElementById("m-block").style.width  = (c.blocked / total * 100) + "%";
+    document.getElementById("m-carried").style.width = (c.carried / total * 100) + "%";
+
+    SECTIONS.forEach(function (s) {
+      var done = 0, bad = 0;
+      s.steps.forEach(function (st) {
+        var state = stepState(st);
+        var applicable = state.kind === "current" || state.kind === "carried";
+        if (applicable || state.kind === "pre") done++;
+        // A change request is NOT a bad outcome — the step passed. Only a
+        // real fail or a step the user could not perform reddens the section.
+        if (applicable && (state.record.status === "fail" || state.record.status === "blocked")) bad++;
+      });
+      var el = document.getElementById("rc-" + s.n);
+      if (!el) return;
+      el.textContent = done + "/" + s.steps.length;
+      el.className = "rc" + (bad ? " has-fail" : done === s.steps.length ? " done" : "");
+    });
+  }
+
+  function paintAll() {
+    SECTIONS.forEach(function (s) {
+      s.steps.forEach(function (st) { paintStep(st.n); });
+    });
+    paintTotals();
+  }
+
+  /* --------------------------------------------------------------- actions */
+
+  document.getElementById("btn-next").addEventListener("click", function () {
+    for (var i = 0; i < SECTIONS.length; i++) {
+      var s = SECTIONS[i];
+      for (var j = 0; j < s.steps.length; j++) {
+        var n = s.steps[j].n;
+        var kind = stepState(s.steps[j]).kind;
+        if (kind === "todo" || kind === "rerun") {
+          var el = document.getElementById("step-" + n);
+          if (el) { el.scrollIntoView({ behavior: "smooth", block: "center" }); }
+          return;
+        }
+      }
+    }
+  });
+
+  document.getElementById("btn-copy").addEventListener("click", function () {
+    var lines = ["{{COPY_HEADER}}", "Current build: " + BUILD_SHA, ""];
+    var c = counts();
+
+    SECTIONS.forEach(function (s) {
+      lines.push("Section " + s.n + " — " + s.title);
+      s.steps.forEach(function (st) {
+        var state = stepState(st);
+        var r = state.record;
+        var status = state.kind === "current" ? (r.status === "change" ? "WORKS, BUT" : r.status.toUpperCase())
+          : state.kind === "carried" ? carriedLabel(r) + " — unchanged step"
+          : state.kind === "rerun" ? "NOT RE-RUN" +
+            (state.marked ? " — previous " + carriedLabel(r) : "") +
+            (preState(st) === "stale" ? "; agent evidence @" + (st.pre.sha || "unknown") + " is stale or incomplete" : "") +
+            "; re-run required"
+          : state.kind === "pre" ? preLabel(st) +
+            (state.marked ? "; previous " + carriedLabel(r) + " has an earlier or unknown build/revision" : "")
+          : "NOT RUN";
+        var line = "  " + st.n + ". " + status;
+        if (r.note && r.note.trim()) line += " — " + r.note.trim().replace(/\s+/g, " ");
+        lines.push(line);
+        (st.inputFiles || []).forEach(function (input) {
+          lines.push('    Input ' + input.id + ': ' + input.path + ' (' + input.mode + ', ' + input.size +
+            ' bytes; SHA-256 ' + input.sha256 + ')');
+          lines.push('    Requirements: ' + input.requirements, '    Use: ' + input.use, '    Reset: ' + input.reset);
+          lines.push('    Input validation: ' + input.validation.path + ' — ' + input.validation.result +
+            '; command: ' + input.validation.command + '; exit ' + input.validation.exitCode + '; ' + input.validation.env);
+        });
+      });
+      lines.push("");
+    });
+
+    lines.push("Current-build verdicts: passed " + c.pass + " · failed " + c.fail + " · blocked " + c.blocked +
+      " · works-but " + c.change + " · carried over (unchanged) " + c.carried +
+      " · needs re-run " + c.rerun + " · pre-verified only " + c.pre + " · not run " + c.todo + " of " + TOTAL);
+
+    var text = lines.join("\n");
+    var done = function () {
+      var f = document.getElementById("copied");
+      f.hidden = false;
+      setTimeout(function () { f.hidden = true; }, 3200);
+    };
+
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text, done); });
+    } else {
+      fallbackCopy(text, done);
+    }
+  });
+
+  function fallbackCopy(text, done) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); done(); } catch (e) { /* nothing to do */ }
+    document.body.removeChild(ta);
+  }
+
+  /* ------------------------------------------------------------------ boot */
+
+  loadLocal();
+  buildSections();
+  paintAll();
+
+  if (window.claude && typeof window.claude.use === "function") {
+    window.claude.use("db").then(function (ns) {
+      if (!ns) {
+        setStoreNote("Saving to this browser only — this view cannot reach the page's store.", "off");
+        return;
+      }
+      db = ns;
+      db.collection("{{CKPT_KEY}}-steps").onSnapshot(function (snap) {
+        var changed = false, retained = false, deferred = false;
+        snap.docs.forEach(function (d) {
+          var v = d.data() || {};
+          var n = Number(v.n != null ? v.n : d.id);
+          if (!stepOf(n)) return;
+          var rec = {
+            status: v.status || "",
+            note: v.note || "",
+            buildSha: v.buildSha || "",
+            stepRevision: v.stepRevision || "",
+            at: v.at || ""
+          };
+          var cur = local[n];
+          if (cur && recordTime(rec) <= recordTime(cur)) {
+            if (recordTime(rec) < recordTime(cur)) retained = true;
+            return;
+          }
+          var ta = document.getElementById("note-" + n);
+          if (ta && document.activeElement === ta) {
+            // Never combine a remote verdict/provenance with the active local note.
+            // On blur the newer whole record wins, unless typing advanced local time.
+            if (!pendingRemote[n] || recordTime(rec) > recordTime(pendingRemote[n])) pendingRemote[n] = rec;
+            cancelNoteWrite(n);
+            deferred = true;
+            return;
+          }
+          if (applyRemote(n, rec)) changed = true;
+        });
+        if (changed) { saveLocal(); paintAll(); }
+        setStoreNote(deferred ? "A page update is waiting until you finish editing this note."
+          : retained ? "Newer results kept in this browser; an older page update was ignored."
+          : "Connected to the page's store.", "live");
+      }, function (e) {
+        setStoreNote("Saving to this browser only (" + (e && e.code ? e.code : "error") + ").", "off");
+      });
+    }, function () {
+      setStoreNote("Saving to this browser only.", "off");
+    });
+  } else {
+    setStoreNote("Saving to this browser only.", "off");
+  }
+})();
+</script>

@@ -1,0 +1,8 @@
+/tests/fixtures/smoke-inputs/orders.xlsx binary -eol -filter -ident -working-tree-encoding
+/tests/fixtures/smoke-inputs/orders.requirements.json -text -eol -filter -ident -working-tree-encoding
+/tests/fixtures/smoke-inputs/generate-orders.py -text -eol -filter -ident -working-tree-encoding
+/tests/fixtures/smoke-inputs/validate-orders.py -text -eol -filter -ident -working-tree-encoding
+/.agents/changes/*/evidence/C*/inputs/** -text -eol -filter -ident -working-tree-encoding
+/.agents/archive/*/evidence/C*/inputs/** -text -eol -filter -ident -working-tree-encoding
+/.agents/changes/*/evidence/C*/inputs/**/*.xlsx binary -eol -filter -ident -working-tree-encoding
+/.agents/archive/*/evidence/C*/inputs/**/*.xlsx binary -eol -filter -ident -working-tree-encoding
