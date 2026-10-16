@@ -34,6 +34,7 @@ const SKELETONS = [
     opens: 'You are the QA RUNNER for checkpoint C[N]' },
   { heading: '## Artifact proofer (checkpoint post-page)', type: 'qa-runner',
     opens: 'You are the ARTIFACT PROOFER for checkpoint C[N]' },
+  { heading: '## Census (scaffold time — read-only)', type: 'census', opens: 'You are a read-only CENSUS agent for ONE planned batch' },
   { heading: '## Plan pre-flight (scaffold time — read-only)', type: 'reviewer',
     opens: 'You are the independent PRE-FLIGHT reviewer of a change plan' },
   { heading: '## Convergence (change-complete — read-only)', type: 'reviewer',
@@ -176,7 +177,7 @@ test('every named type resolves to a shipped definition', () => {
   // The assertion this whole change exists for. Strict: a named type with no definition
   // is a spawn that errors, so this is never softened to a skip or a conditional.
   const named = new Set(doc.spawns.map(s => s.type));
-  assert.deepEqual([...named].sort(), ['implementer', 'qa-runner', 'reviewer', 'test-hunter']);
+  assert.deepEqual([...named].sort(), ['census', 'implementer', 'qa-runner', 'reviewer', 'test-hunter']);
   for (const type of named) {
     const file = '.claude/agents/' + type + '.md';
     assert.ok(fs.existsSync(path.join(ROOT, file)),
@@ -218,21 +219,34 @@ test('§Degraded environments documents the undefined-agent-types fallback', () 
     'no bare README.md pointer, backticked or not — it dangles for every reader outside the skill repo');
 });
 
-// Without the definitions these three lines are the ONLY thing holding a read-only role
+// Without the definitions these lines are the ONLY thing holding a read-only role
 // to read-only, so the capability boundary never licenses deleting them. The two gate lines
 // name the Write tool the user granted (2026-09-23) only as their OUTPUT carve-out scopes it,
-// so the rule and the grant a few lines below it no longer contradict each other.
+// so the rule and the grant a few lines below it no longer contradict each other. The map's
+// keys are bound to the document: every heading that calls its skeleton read-only.
 const PROSE = new Map([
   ['## Reviewer (the gate — read-only)',
     'You did not write this code. Use only Read/Grep/Glob and read-only git (diff, log, show, status), '
       + 'and the `Write` tool only for what OUTPUT below names. You never edit a file.'],
   ['## Test hunter (optional gate agent — read-only)',
     'Use only Read/Grep/Glob and read-only git, and the `Write` tool only for what OUTPUT below names; edit nothing.'],
+  ['## Census (scaffold time — read-only)',
+    'Use only Read/Grep/Glob, read-only git and read-only commands; edit nothing, and write only disposable scratch under your session scratchpad.'],
   ['## Plan pre-flight (scaffold time — read-only)',
     'Use only Read/Grep/Glob; edit nothing.'],
+  ['## Convergence (change-complete — read-only)',
+    'converged with its plan. Read-only.'],
 ]);
+// The headings, read outside any fence, that call their skeleton read-only: the domain PROSE covers.
+const readOnlyHeadings = parsed => parsed.headings.map(h => h.line).filter(line => /read-only/i.test(line));
 
 test('the prose read-only rules survive in every read-only skeleton', () => {
+  assert.deepEqual([...PROSE.keys()].sort(), readOnlyHeadings(doc).sort(),
+    'every heading that calls its skeleton read-only needs its prose rule in PROSE, and PROSE names no other');
+  // Live control: a read-only heading planted in the document is one PROSE does not cover.
+  const planted = '## Planted (scaffold time — read-only)';
+  assert.deepEqual(readOnlyHeadings(parse(prompts + '\n' + planted + '\n')).filter(h => !PROSE.has(h)), [planted],
+    'the domain must be read from the document\'s headings');
   for (const [heading, rule] of PROSE) {
     assert.ok(flow(doc.section(heading)).includes(rule),
       heading + ' lost its prose read-only rule: ' + rule);

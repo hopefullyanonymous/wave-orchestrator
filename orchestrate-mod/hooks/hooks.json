@@ -1,0 +1,1 @@
+{ "description": "orchestrate-mod hooks module", "modules": ["./register.js"] }

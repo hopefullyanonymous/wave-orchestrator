@@ -29,7 +29,8 @@ The fence: modify NOTHING else; need more? report `NEEDS_FENCE`.
      them (the reconcile table reads them) and append `- [ ] polish: <ask>` lines only
      when the orchestrator sends a polish pass. Nothing else in this file is theirs to
      edit. The orchestrator is the one other writer: the commit that applies a prose
-     ASK's replacement text appends its item, already ticked, and an unticked item for
+     ASK's replacement text (for a smoke step's, applied on the integration branch, the
+     batch-branch commit after it) appends its item, already ticked, and an unticked item for
      each ask it leaves to the polish pass. An appended item may wrap; its header
      starts at column 0 and every
      continuation line is indented under it — an indented checkbox is a new item,

@@ -31,7 +31,11 @@ implementer per batch, each on its own branch in an isolated git worktree, stack
 serially onto an **integration branch**. The gates, in the order a batch meets them:
 
 1. **A locked plan, pre-flighted.** Scope is agreed up front and written down. Every
-   request item maps to exactly one batch, or to an exclusion you signed off on. Before
+   request item maps to exactly one batch, or to an exclusion you signed off on. Each
+   drafted batch first gets its own read-only census agent, whose report opens with where
+   the draft is wrong or incomplete, then names the tests that read every file the batch
+   changes and what the backlog and old ledgers already record about them; each opening
+   item is logged as carried or rejected. Before
    you see the plan, an independent read-only sub-agent checks it: items covered both
    ways, same-wave fences really disjoint, fences *complete* (a grep census of every
    symbol a batch touches, tests and docs included), no contradictions, criteria that a
@@ -137,9 +141,9 @@ git clone https://github.com/hopefullyanonymous/wave-orchestrator.git; New-Item 
 
 The link above puts `orchestrate/` in your skills folder, and a skill directory cannot
 carry agent definitions — Claude Code reads those only from `~/.claude/agents/` (every
-project) or `<project>/.claude/agents/` (one project). So the four tool-restricted
+project) or `<project>/.claude/agents/` (one project). So the five tool-restricted
 definitions this repo ships in `.claude/agents/` — `implementer`, `reviewer`,
-`test-hunter`, `qa-runner` — do **not** arrive with the skill install. Copy them
+`test-hunter`, `qa-runner`, `census` — do **not** arrive with the skill install. Copy them
 yourself, or every spawn silently inherits the full tool catalog they exist to trim.
 
 macOS / Linux:
@@ -178,19 +182,113 @@ updated copy stops that ledger's next session and asks.
 
 | Command | What it does |
 |---|---|
-| `/orchestrate new <description>` | Interview, plan the batches, sweep the backlog, pre-flight the plan, scaffold the ledger, stop for your approval |
-| `/orchestrate continue` | Run to the next checkpoint: validate the tip, open the wave, implement its batches concurrently, gate + integrate each as it lands, repeat — then pre-verify what an agent can and stop with one combined smoke page |
+| `/orchestrate new <description>` | Offer a fresh conversation first when this one already holds much earlier work; then interview, plan the batches, run a census of each batch, sweep the backlog, pre-flight the plan, scaffold the ledger, stop for your approval |
+| `/orchestrate continue [<id>]` | Run to the next checkpoint: validate the tip, open the wave, implement its batches concurrently, gate + integrate each as it lands, repeat — then pre-verify what an agent can and stop with one combined smoke page. Naming a ledger's `<id>` picks that ledger when more than one is active |
 | `/orchestrate status` | Read-only: reconcile every row against git (including ledgers that live only on a branch) and report what's actually true |
 | `/orchestrate close` | Record your checkpoint verdict; on the final pass run convergence, distill, and finish the change |
 
 You can also just talk to it — "where are we on the batch work", "batch 3 is broken, the
 sidebar doesn't open", "continue" — and it routes to the right mode.
 
+## Mods
+
+`orchestrate-mod/` is an optional Claude Code mod beside the skill: a `/ledger` pane, a band line
+above the prompt, and a per-request cost log of every session it loads in, one JSONL file per
+session (a long session continues in `<session>.1.jsonl`, `<session>.2.jsonl`, …) under
+`~/.claude/orchestrate-costs/`. No orchestrate step depends on it: step 8 of the skill's session
+algorithm calls the mod's `schedule_clear` when a session has it, and keeps its 10-minute timer
+otherwise (§Clear and continue).
+
+### Install
+
+From the root of your clone, copy the plugin to `~/.claude/orchestrate-mod/`.
+
+macOS / Linux:
+
+```bash
+git archive HEAD orchestrate-mod | tar -x -C ~/.claude
+```
+
+Windows (PowerShell), through a file rather than a byte pipe, which Windows PowerShell 5.1 and
+pwsh before 7.4 corrupt:
+
+```powershell
+git archive -o $HOME/.claude/orchestrate-mod.tar HEAD orchestrate-mod
+tar -x -f $HOME/.claude/orchestrate-mod.tar -C $HOME/.claude
+Remove-Item $HOME/.claude/orchestrate-mod.tar
+```
+
+Then add two keys to the `env` object of `~/.claude/settings.json`, beside the keys already
+there — never replace the object:
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_DIRS": "<home>/.claude/orchestrate-mod", "CLAUDE_CODE_ENABLE_FUNCTION_HOOKS": "1" } }
+```
+
+While hooks modules are in early access, Claude Code loads the mod's hooks only with
+`CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` set. The `CLAUDE_CODE_PLUGIN_DIRS` value is an absolute path:
+write your home directory in place of `<home>` — on Windows with forward slashes
+(`C:/Users/<you>`): JSON reads a backslash as an escape. Several plugin directories are joined
+with `:` (`;` on Windows). A session reads the setting when it starts, so
+only sessions started afterwards load the mod. Re-run the copy command after a `git pull` to update
+the copy. To undo, take the mod's entry out of `CLAUDE_CODE_PLUGIN_DIRS` (remove the key if it was
+the only entry), remove `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` when no other mod still needs it, and
+delete `~/.claude/orchestrate-mod/`. The setting names the
+installed copy, never the clone: loading a mod writes generated files into the directory it loads
+from.
+
+### Use
+
+- `/ledger` opens the pane: the active ledger's batches, the running agents, the conductor's
+  context and the dollars spent. Where nothing draws a pane (a `claude -p` run, or an app that
+  places no panes) it prints the same lines as text.
+- The band line above the prompt condenses the pane to one line while the session's repository
+  has exactly one active ledger.
+- Each cost record is one JSON line, its keys in this order:
+  `v`, `ts`, `session`, `agent`, `parent`, `type`, `ledger`, `batch`, `role`, `model`, `in`, `out`, `cr`, `cw`.
+- `cost-report.mjs` totals the records by ledger, batch and role, by model and by session; an
+  unpriced model's dollars are shown as unknown (`+?`), never as $0:
+
+```bash
+node orchestrate-mod/tools/cost-report.mjs [--dir <dir>] [--ledger <id>] [--session <id>] [--format text|json]
+```
+
+### Clear and continue
+
+The mod registers the tool `schedule_clear`, which the model calls by its full name
+`mcp__orchestrate-mod__schedule_clear`. At the points that step 8 of the pinned `references/protocol.md`
+§Session algorithm names, the conductor commits a PROGRESS session-log row naming the LOG heading
+of the work since the row before, then calls the tool in place of its 10-minute timer.
+
+- The mod declines when the band line does not show that ledger (the session is untagged, or tagged
+  with another), the ledger's pinned protocol does not name the tool, the integration tip has moved,
+  the ledger's directory holds uncommitted files, an agent is in flight, or a clear is already
+  scheduled. The conductor then runs its timer as before.
+- Otherwise the conductor posts the line the mod answers with and ends its turn. A two-minute
+  countdown then runs in the band line: `clearing in M:SS · type anything to keep this conversation`.
+  Any message keeps the conversation; a local command such as `/ledger` starts no turn, so it does
+  not. A turn that is interrupted, or ends in a refusal or an error, drops the clear as well.
+- At zero the mod runs `/clear`, then `/orchestrate continue <id> after-clear`. The earlier
+  conversation vanishes from view and the fresh one boots from the ledger; its first answer names
+  the LOG heading that the ledger's newest PROGRESS session-log row names, the run's record of the
+  work before the clear.
+- Background work still running when the turn ends, or a scheduled task (a cron), skips the clear,
+  since its notice would wake the fresh conversation; so does an app that reports neither, and an
+  agent found running at zero. A skipped clear continues the run in this conversation with
+  `/orchestrate continue <id>`; should the app refuse that command, or the one that follows a clear,
+  the band line names it for you to type.
+- `/ledger` lists each clear, with its time and the context it cleared, and a run total across the
+  conversations the clears link.
+- To turn the clear off, remove the mod as Install above describes; the 10-minute timer is the
+  skill's own and needs no mod.
+
 ## Requirements
 
 - Claude Code, in a **git repository** (the protocol is git-native and won't scaffold
   without one).
-- Sub-agents are used for implementers, reviewers, gate agents and the QA runner, but
+- The test suite needs the Claude Code CLI on PATH (`claude`, or `claude.exe` on Windows) for
+  `claude plugin validate` and `claude plugin test`; no sign-in is needed.
+- Sub-agents are used for census agents, implementers, reviewers, gate agents and the QA runner, but
   aren't required — without them the orchestrator implements a wave's batches one at a
   time in the main checkout and still runs the review as a separate adversarial pass per
   batch. Checkpoint placement is unchanged.
@@ -208,8 +306,8 @@ orchestrate/
 ├── references/
 │   ├── protocol.md                 canonical spec, severity/round accounting, legacy interop, degraded environments
 │   ├── execution-models.md         the waved stack: wave map, checkpoints, integration
-│   ├── scaffolding.md              detection heuristics, interview, backlog sweep, pre-flight, placeholder registry
-│   ├── subagent-prompts.md         implementer / reviewer / test hunter / QA runner / pre-flight / convergence / fix-up skeletons
+│   ├── scaffolding.md              detection heuristics, interview, census, backlog sweep, pre-flight, placeholder registry
+│   ├── subagent-prompts.md         implementer / reviewer / test hunter / QA runner / artifact proofer / census / pre-flight / convergence / fix-up skeletons
 │   ├── smoke-page.md               the checkpoint hand-over format: assembly, pre-verified steps, publishing, verdict triage
 │   └── smoke-page-template.html    the smoke page itself, with slots for the run-specific content
 ├── templates/                      the six ledger files, with placeholders
@@ -238,6 +336,27 @@ input bytes before writing the page. Existing ledgers keep their frozen rules;
 unsupported helper shapes use the manual read-only fallback in the pinned
 `references/protocol.md`. A mechanical PASS never replaces review.
 
+```
+orchestrate-mod/                    the optional mod (§Mods), beside the skill and not part of it
+├── .claude-plugin/plugin.json      the plugin manifest
+├── tsconfig.json                   extends the types Claude Code generates where it loads the plugin
+├── hooks/
+│   ├── hooks.json                  names register.js as the hooks module
+│   ├── register.js                 the hooks module: every $ call, the /ledger command, the pane, the band line, the cost log, the clear
+│   ├── clear.js                    pure: the tool's names, the countdown, the commands, the decision on a call, the turn's end, the run
+│   ├── cost.js                     pure: attribution, the record format, the session's ledger tag, the totals
+│   ├── prices.js                   pure: USD per million tokens by exact model id; an unpriced model is never $0
+│   └── view.js                     pure: the pane's lines, the band line and the text fallback
+├── tools/
+│   ├── cost-report.mjs             totals the cost log by ledger, batch and role, by model and by session
+│   └── ledger-view.mjs             one JSON view of the repository's active ledgers, which the pane reads
+└── tests/
+    ├── clear.test.tsx              kit test of the clear and continue, run by claude plugin test
+    ├── cost.test.tsx               kit test of the cost log, run by claude plugin test
+    └── pane.test.tsx               kit test of the pane, the band line and the text fallback
+docs/                               longer reference notes and the findings of past experiments
+```
+
 Run all repository suites from the root with this PowerShell validation recipe:
 
 ```powershell
@@ -254,6 +373,8 @@ argument). Node's default discovery is separate from the explicit recursive Full
 ordering, empty-suite guard and failure propagation above; keep the full recipe for
 ledger validation. Protocol tests execute both forms against a nested failing then
 passing disposable sentinel and check the primary recipe's empty-discovery failure.
+The plugins' kit tests are `*.test.tsx`, which bare `node --test` skips; both forms run them through
+`tests/mod-plugins.test.cjs`, which runs `claude plugin test` on each plugin directory.
 The smoke-page tests run the template's JavaScript with a minimal DOM and artifact-store
 adapter, including checkpoint re-issues and verdict provenance. The Git-contract tests
 require Git on PATH and create disposable local repos and bare remotes with isolated

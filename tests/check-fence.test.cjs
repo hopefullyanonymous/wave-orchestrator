@@ -6,12 +6,14 @@ const { makeRepo, MAIN, LEDGER } = require('./support/git-fixture.cjs');
 const api = import('../orchestrate/tools/check-fence.mjs');
 const INT = 'refs/heads/integration', BATCH = 'refs/heads/batch-one', BATCHFILE = `${LEDGER}/02-batches-01-work.md`;
 const makeBatch = files => `# B01 — Work (feature, —)\n\n**Branch**: \`batch-one\`\n**Files**: ${files.map(p => `\`${p}\``).join(', ')}\n\n## Checklist\n\n- [ ] Implement behavior.\n- [x] Keep completed item.\n\n## Acceptance\n\nPreserve this text.\n`;
-function fixture(t, paths = ['allowed.txt'], missing = []) {
+function fixture(t, paths = ['allowed.txt'], missing = [], seed = {}) {
   const repo = makeRepo(t), batchText = makeBatch(paths);
   const plan = `# Plan\n\n| # | Batch | Branch | Files (fence) |\n|---|---|---|---|\n| B01 | Work | batch-one | ${paths.map(p => `\`${p}\``).join(', ')} |\n`;
   const progress = `# Progress\n\n## Batches\n\n| # | Branch | Notes |\n|---|---|---|\n| B01 | batch-one | — |\n\n## Session log\n\n| Date | Detail |\n|---|---|\n`;
   repo.write(`${LEDGER}/01-plan.md`, plan); repo.write(`${LEDGER}/PROGRESS.md`, progress); repo.write(BATCHFILE, batchText);
   for (const file of paths) if (!missing.includes(file)) repo.write(file, 'Initial unique contents for ' + file + '\n');
+  // Extra base files a case names, an empty one included, committed with the authority below.
+  for (const [file, content] of Object.entries(seed)) repo.write(file, content);
   repo.write('outside.txt', 'Outside unique contents, keep both rename endpoints\n'); const base = repo.commit('authority'); repo.git('branch', 'integration');
   const wt = path.join(repo.root, 'batch worktree'); repo.git('worktree', 'add', '-b', 'batch-one', wt);
   const candidate = repo.at(wt), opts = { repo: repo.cwd, integration: INT, batch: BATCH, ledger: 'FIXTURE', 'batch-id': 'B01', 'batch-file': BATCHFILE, env: repo.env };
@@ -23,6 +25,25 @@ function state(result, expected, code) {
   assert.equal(result.status, expected, JSON.stringify(result));
   if (code) assert.ok([...result.violations, ...result.unknowns].some(d => d.code === code), JSON.stringify(result));
 }
+// Live control: the fixture's own name-status diff under -M -C plus `extra` flags, run without
+// orchestrate/tools/check-fence.mjs `checkFence`, so a case shows what the same commits read under other flags.
+function rawChanges(f, ...extra) {
+  const tokens = f.repo.git('diff', '--no-ext-diff', '--no-textconv', '--name-status', '-z', '-M', '-C', ...extra, `${INT}...${BATCH}`, '--').split('\0');
+  assert.equal(tokens.pop(), '', 'name-status -z output ends in a NUL');
+  const changes = [];
+  for (let i = 0; i < tokens.length;) { const status = tokens[i++]; changes.push({ status, paths: tokens.slice(i, i += /^[RC]/.test(status) ? 2 : 1) }); }
+  return changes;
+}
+// A new file copied from one the batch never changed is a single addition and holds no other path to
+// the fence, while --find-copies-harder on the same commits still pairs it with that source.
+function copyOfUntouched(f, r, source, copy) {
+  state(r, 'PASS'); assert.deepEqual(r.evidence.changes, [{ status: 'A', paths: [copy] }]);
+  const raw = rawChanges(f, '--find-copies-harder');
+  assert.deepEqual(raw.map(c => [c.status[0], ...c.paths]), [['C', source, copy]], JSON.stringify(raw));
+}
+// Whether the own-file lookup in orchestrate/tools/check-fence.mjs `checkFence` raised its batch-type,
+// matched by message so no other batch-type diagnostic can satisfy a case that lookup must decide.
+const ownFileLookup = r => r.violations.some(d => d.code === 'batch-type' && d.message === 'Own batch file cannot be added, deleted, renamed, copied or type-replaced');
 
 test('actual fence CLI PASS is read-only and imported result agrees', async t => {
   const f = fixture(t); f.candidate.write('allowed.txt', 'implemented\n'); f.candidate.write(BATCHFILE, f.batchText.replace('- [ ]', '- [x]')); const sha = f.candidate.commit('implement');
@@ -49,14 +70,39 @@ test('adds modifications deletions and type changes obey literal fence', async t
     assert.ok(r.evidence.changes.some(c => c.status === ({ add: 'A', modify: 'M', delete: 'D', type: 'T' })[operation]));
   });
 });
-test('both rename directions and copy sources enforce both raw endpoints', async t => {
+test('both rename directions enforce both raw endpoints, and a byte copy of an untouched file is an addition', async t => {
   for (const [from, to, copy] of [['outside.txt', 'allowed.txt', false], ['allowed.txt', 'outside-new.txt', false], ['outside.txt', 'allowed.txt', true]]) await t.test(`${from} -> ${to} copy=${copy}`, async t => {
     const f = fixture(t, ['allowed.txt'], from === 'outside.txt' ? ['allowed.txt'] : []);
     if (copy) fs.copyFileSync(path.join(f.candidate.cwd, from), path.join(f.candidate.cwd, to));
     else f.candidate.git('mv', '--', from, to);
     f.candidate.commit('rename or copy'); const r = (await api).checkFence(f.opts);
+    if (copy) { copyOfUntouched(f, r, from, to); return; }
     state(r, 'VIOLATION', 'outside-fence'); assert.ok(r.violations.some(d => d.path === (from === 'outside.txt' ? from : to)));
     assert.ok(r.evidence.changes.some(c => /^[RC]/.test(c.status) && c.paths.includes(from) && c.paths.includes(to)), JSON.stringify(r.evidence.changes));
+  });
+});
+test('a copy of an untouched empty or adapted file is an addition that holds no source to the fence', async t => {
+  const lines = ['First line of an untouched source.', 'Second line of an untouched source.', 'Third line of an untouched source.', 'Fourth line of an untouched source.'];
+  const text = list => list.map(l => l + '\n').join('');
+  const cases = [
+    ['empty', 'empty.txt', '', 'new-empty.txt', ''],
+    ['adapted', 'source.txt', text(lines), 'adapted.txt', text([lines[0], 'Second line, adapted for this batch.', ...lines.slice(2)])],
+  ];
+  for (const [name, from, seeded, to, written] of cases) await t.test(name, async t => {
+    const f = fixture(t, ['allowed.txt', to], [to], { [from]: seeded });
+    f.candidate.write(to, written); f.candidate.commit(name);
+    copyOfUntouched(f, (await api).checkFence(f.opts), from, to);
+  });
+});
+test('a copy of a file the batch also changes still pairs with it, and the copy alone is held to the fence', async t => {
+  for (const fenced of [true, false]) await t.test(fenced ? 'fenced copy' : 'copy outside the fence', async t => {
+    const f = fixture(t, fenced ? ['allowed.txt', 'copy.txt'] : ['allowed.txt'], ['copy.txt']);
+    fs.copyFileSync(path.join(f.candidate.cwd, 'allowed.txt'), path.join(f.candidate.cwd, 'copy.txt'));
+    f.candidate.write('allowed.txt', 'modified unique content\n'); f.candidate.commit('modify and copy');
+    const r = (await api).checkFence(f.opts);
+    assert.deepEqual(r.evidence.changes.map(c => [c.status[0], ...c.paths]), [['M', 'allowed.txt'], ['C', 'allowed.txt', 'copy.txt']], JSON.stringify(r.evidence.changes));
+    if (fenced) state(r, 'PASS');
+    else { state(r, 'VIOLATION', 'outside-fence'); assert.deepEqual(r.violations.map(d => [d.code, d.path]), [['outside-fence', 'copy.txt']]); }
   });
 });
 test('raw spaces Unicode and option-like filenames are never trimmed or option parsed', async t => {
@@ -262,7 +308,26 @@ test('own batch rejects every forbidden structural edit with line diagnostics', 
 test('batch deletion and rename cannot be treated as permitted own-file edits', async t => {
   for (const rename of [false, true]) await t.test(rename ? 'rename' : 'delete', async t => {
     const f = fixture(t); if (rename) f.candidate.git('mv', BATCHFILE, `${LEDGER}/02-batches-01-new.md`); else f.candidate.git('rm', BATCHFILE); f.candidate.commit('remove batch');
-    state((await api).checkFence(f.opts), 'VIOLATION', 'batch-type');
+    const r = (await api).checkFence(f.opts); state(r, 'VIOLATION', 'batch-type'); assert.ok(ownFileLookup(r), JSON.stringify(r.violations));
+  });
+});
+test("a copy whose source is the batch file leaves the own-file check to the batch file's own entry", async t => {
+  const before = `${LEDGER}/01-notes.md`, after = `${LEDGER}/03-notes.md`, renamed = `${LEDGER}/04-renamed.md`;
+  const cases = [
+    ['a near-copy sorting before the ticked batch file', before, false, [['C', BATCHFILE, before], ['M', BATCHFILE]]],
+    ['a near-copy sorting after it', after, false, [['M', BATCHFILE], ['C', BATCHFILE, after]]],
+    ['the batch file renamed beside a near-copy sorting first', before, true, [['C', BATCHFILE, before], ['R', BATCHFILE, renamed]]],
+  ];
+  for (const [name, copy, rename, shape] of cases) await t.test(name, async t => {
+    const f = fixture(t, ['allowed.txt', copy, renamed], [copy, renamed]), ticked = f.batchText.replace('- [ ] Implement', '- [x] Implement');
+    assert.notEqual(ticked, f.batchText);
+    f.candidate.write(BATCHFILE, ticked); f.candidate.write(copy, '# Notes on the work\n' + ticked.slice(ticked.indexOf('\n') + 1));
+    if (rename) f.candidate.git('mv', '--', BATCHFILE, renamed);
+    f.candidate.commit(name); const r = (await api).checkFence(f.opts), raw = rawChanges(f);
+    // Live control: the raw -M -C diff of these commits has this shape and order, and the tool read the same.
+    assert.deepEqual(raw.map(c => [c.status[0], ...c.paths]), shape, JSON.stringify(raw)); assert.deepEqual(r.evidence.changes, raw);
+    if (!rename) { state(r, 'PASS'); return; }
+    state(r, 'VIOLATION', 'batch-type'); assert.ok(ownFileLookup(r), JSON.stringify(r.violations));
   });
 });
 test('UNKNOWN takes precedence while preserving known violations; invalid CLI flags are structured', async t => {
@@ -288,6 +353,7 @@ test('own batch type replacement is rejected even with identical blob bytes', as
   const f = fixture(t); f.candidate.git('config', 'core.symlinks', 'false');
   const blob = f.candidate.git('hash-object', '-w', '--', BATCHFILE); f.candidate.git('update-index', '--cacheinfo', `120000,${blob},${BATCHFILE}`); f.candidate.git('commit', '-m', 'replace own file type');
   const r = (await api).checkFence(f.opts); state(r, 'VIOLATION', 'batch-type'); assert.ok(r.evidence.changes.some(c => c.status === 'T' && c.paths[0] === BATCHFILE));
+  assert.ok(ownFileLookup(r), JSON.stringify(r.violations));
 });
 test('candidate with no associated worktree and missing integration objects are UNKNOWN', async t => {
   const f = fixture(t); f.candidate.git('checkout', '--detach');

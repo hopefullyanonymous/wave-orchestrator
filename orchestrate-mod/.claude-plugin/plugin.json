@@ -1,0 +1,6 @@
+{
+  "name": "orchestrate-mod",
+  "version": "0.1.0",
+  "description": "Ledger pane and per-request cost log for the orchestrate skill",
+  "author": { "name": "hopefullyanonymous" }
+}

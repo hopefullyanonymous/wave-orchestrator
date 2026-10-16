@@ -18,8 +18,11 @@ export const TABLE_DRIFT = "UNKNOWN protocol.md §Recovery table does not match 
 const HELP = [
   'reconcile.mjs discovery --repo <repo>',
   '  One line per ledger id: `<id> State=<value> at <locations> → <mode>`, mode continue (ACTIVE), close (AT-CHECKPOINT C<n>),',
-  '  status (USER-BLOCKED, or no State line) or none (COMPLETE). Copies of one id that disagree on State print',
-  "  `→ AMBIGUOUS (State differs: <location>=<value>, …)`: apply SKILL.md §Discovery's provenance rules to",
+  '  status (USER-BLOCKED, or no State line) or none (COMPLETE). Copies of one id that disagree on State settle on the',
+  "  State their integration branch holds when every copy's contract names that branch, its tip holds a copy, and every",
+  '  other copy is proven older than that tip as an archive proves one below (a remote-tracking copy of that branch with',
+  '  its own tip an ancestor too); otherwise, a checkout of that branch with an uncommitted ledger edit included, they',
+  "  print `→ AMBIGUOUS (State differs: <location>=<value>, …)`: apply SKILL.md §Discovery's provenance rules to",
   "  git-evidence.mjs discovery --repo <repo>. An id whose .agents/archive/<id>/ a ref's commit or a checkout holds is",
   "  looked up at the shipment target its copies' contracts record, `local <ref>` or `remote <name> <ref>` (a remote is",
   "  asked now, never fetched). Archived there, with every copy's last ledger-changing commit an ancestor of the latest",
@@ -285,9 +288,11 @@ function rowFacts(ctx, row, kind) {
     if (f.checklist.ticked > 0) throw new Unknown('wave base', 'the tip lies on the integration history yet its checklist has a ticked item');
     return true;
   });
+  // The row's dirt is read only in the trees holding its branch, the main checkout among them only while it
+  // holds that branch: dirt on any other branch is none of this row's work.
   onBranch('dirty', () => {
     if (ctx.worktreesUnknown) throw new Unknown('dirty', ctx.worktreesUnknown);
-    const trees = ctx.worktrees.filter(w => !w.bare && (w.path === ctx.mainCheckout || w.branch === `refs/heads/${name}`));
+    const trees = ctx.worktrees.filter(w => w.branch === `refs/heads/${name}`);
     if (trees.some(w => w.cleanliness === 'unknown')) throw new Unknown('dirty', 'a worktree status cannot be read');
     return trees.some(w => w.cleanliness === 'dirty');
   });
@@ -390,7 +395,7 @@ export function reconcileRows({ repo, ledger, integration, protocolText, env, li
     ctx.worktreesUnknown = ctx.worktrees.length ? null : 'git could not list the worktrees';
     const common = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'], ctx.options);
     const commonDir = common.ok ? common.text.trim() : null;
-    // The main checkout: the worktree holding the common .git directory; its dirt counts for every row.
+    // The main checkout: the worktree holding the common .git directory, never a worktree to prune.
     const mainDir = commonDir && path.basename(commonDir) === '.git' ? real(path.dirname(commonDir)) : null;
     ctx.mainCheckout = mainDir ? ctx.worktrees.find(w => !w.bare && real(w.path) === mainDir)?.path ?? null : null;
     const reconciled = ctx.rows.map(row => ({ row, kind: statusKind(row.Status) })).filter(r => !SKIPPED.includes(r.kind));
@@ -457,6 +462,24 @@ function targetTip(repo, target, options) {
   if (resolve(repo, records[0][0], options) !== records[0][0]) throw new Unknown('target', `${named(target)} is at ${records[0][0].slice(0, 7)}, not a commit here`);
   return records[0][0];
 }
+// A checkout's copy stands for its branch's while no uncommitted change touches .agents/changes/<id>/: a status read
+// with no entry, or with none whose path or rename source lies under the ledger. Read by `olderThan`.
+const untouched = (l, id) => l.cleanliness === 'clean' || (l.cleanliness === 'dirty' && !l.status.some(s => [s.path, s.originalPath].some(p => p?.startsWith(`.agents/changes/${id}/`))));
+// orchestrate/SKILL.md §Discovery's proof that a copy is older than `commit`, memoised per copy: a ref's copy when its
+// last ledger-changing commit holds the subtree the ref holds and is an ancestor of `commit` (a null field or an
+// unknown answer proves nothing); a checkout's copy through its branch's copy at its HEAD while `untouched`.
+// `archives` proves against an archive's adding commit, `ownerState` against the integration tip.
+function olderThan(repo, id, locations, commit, options) {
+  const known = new Map();
+  const proven = l => {
+    if (!known.has(l)) {
+      const p = l.provenance, twin = l.kind === 'worktree' && locations.find(t => t.kind === 'ref' && t.ref === l.branch && t.sha === l.head);
+      known.set(l, l.kind === 'ref' ? p?.lastChangeTree === p?.tree && ancestryCaptured(repo, p?.lastChange, commit, [], options) === 'contained' : Boolean(twin) && untouched(l, id) && proven(twin));
+    }
+    return known.get(l);
+  };
+  return proven;
+}
 // Supersession by an archive. orchestrate/SKILL.md §Discovery resolves the owning contract's shipment target and
 // inspects only this id there: `.agents/archive/<id>/` there supersedes proven older ledger copies, while unknown
 // provenance, newer ledger commits, uncommitted ledger edits and missing target evidence leave them visible. This reads
@@ -493,23 +516,36 @@ function archives(result, options) {
     // empty read leaves every copy unproven.
     const log = git(result.repo, ['log', '-1', '--no-follow', '--no-renames', '--diff-filter=A', '--format=%H', tip, '--', `.agents/archive/${id}/PROGRESS.md`], options);
     const added = log.ok ? log.text.trim() : null;
-    const known = new Map(), under = `.agents/changes/${id}/`;
-    const untouched = l => l.cleanliness === 'clean' || (l.cleanliness === 'dirty' && !l.status.some(s => [s.path, s.originalPath].some(p => p?.startsWith(under))));
-    const proven = l => {
-      if (!known.has(l)) {
-        const p = l.provenance, twin = l.kind === 'worktree' && locations.find(t => t.kind === 'ref' && t.ref === l.branch && t.sha === l.head);
-        known.set(l, l.kind === 'ref' ? p?.lastChangeTree === p?.tree && ancestryCaptured(result.repo, p?.lastChange, added, [], options) === 'contained' : Boolean(twin) && untouched(l) && proven(twin));
-      }
-      return known.get(l);
-    };
-    const unproven = locations.filter(l => !proven(l));
+    const proven = olderThan(result.repo, id, locations, added, options), unproven = locations.filter(l => !proven(l));
     // Every copy older, yet the target still holds a ledger under this id: an archive beside it closed nothing.
     if (!unproven.length && open !== 'missing') { facts.set(id, { at: named(target), why: `${named(target)} also holds .agents/changes/${id}/PROGRESS.md` }); continue; }
     facts.set(id, { at: named(target), unproven });
   }
   return { facts, diagnostics };
 }
-// One line per ledger id; `options.env` (optional) is the environment the archive probes run under.
+// The State a live ledger's copies settle on when their States differ, or null for the State-differs line:
+// orchestrate/SKILL.md §Discovery's proven-older rule applied to the ledger's own copies, its integration branch the
+// owner. Every copy's contract must name one integration branch, `refs/heads/` stripped, read before any git call so
+// evidence carrying no contract asks git nothing; that branch must resolve here, a git failure settling nothing; its
+// ref's copy, at that tip, gives the State; and every copy, that one included, must be proven no newer than the tip. A
+// remote-tracking copy of that branch also needs its own tip there: a remote integration branch with commits of its
+// own is divergent. A checkout's copy must also hold the State discovery read in its branch's copy at its HEAD: git
+// status says nothing of an edit made under assume-unchanged or skip-worktree, or made after the status was read.
+function ownerState(repo, id, locations, seen, options) {
+  const names = locations.map(l => { try { return gitModel(contractOf(l)).integration?.replace(/^refs\/heads\//, ''); } catch { return null; } });
+  if (names.some(n => !n) || new Set(names).size !== 1) return null;
+  const branch = names[0], ref = `refs/heads/${branch}`;
+  let tip;
+  try { tip = resolve(repo, ref, options); } catch (e) { if (!(e instanceof Unknown)) throw e; return null; }
+  const owner = locations.findIndex(l => l.ref === ref && l.sha === tip);
+  if (owner < 0) return null;
+  const proven = olderThan(repo, id, locations, tip, options);
+  const remote = l => l.kind === 'ref' && l.ref.startsWith('refs/remotes/') && l.ref.endsWith(`/${branch}`);
+  const twin = l => seen[locations.findIndex(t => t.kind === 'ref' && t.ref === l.branch && t.sha === l.head)]?.state;
+  const older = (l, i) => proven(l) && (l.kind === 'ref' || seen[i].state === twin(l)) && (!remote(l) || ancestryCaptured(repo, l.sha, tip, [], options) === 'contained');
+  return locations.every(older) ? seen[owner].state : null;
+}
+// One line per ledger id; `options.env` (optional) is the environment the archive and `ownerState` probes run under.
 export function summarize(result, options = {}) {
   const { facts, diagnostics: probes } = archives(result, options), diagnostics = [...result.diagnostics, ...probes], lines = [];
   let doubt = result.completeness !== 'complete' || probes.length > 0;
@@ -523,10 +559,11 @@ export function summarize(result, options = {}) {
     const why = archive?.why ?? (archive?.unproven.length ? `not proven older: ${listed(archive.unproven)}` : null);
     if (why) { doubt = true; lines.push(`${id} at ${where} → AMBIGUOUS (archived at ${archive.at}; ${why})`); continue; }
     if (archive) { lines.push(`${id} State=archived at ${archive.at} → none (older copies: ${listed(locations)})`); continue; }
-    if (states.length > 1) { doubt = true; lines.push(`${id} at ${where} → AMBIGUOUS (State differs: ${seen.map(s => `${s.where}=${s.state}`).join(', ')})`); continue; }
-    const mode = MODES.find(([re]) => re.test(states[0]))?.[1];
+    const state = states.length > 1 ? ownerState(result.repo, id, locations, seen, options) : states[0];
+    if (state === null) { doubt = true; lines.push(`${id} at ${where} → AMBIGUOUS (State differs: ${seen.map(s => `${s.where}=${s.state}`).join(', ')})`); continue; }
+    const mode = MODES.find(([re]) => re.test(state))?.[1];
     if (!mode) doubt = true;
-    lines.push(`${id} State=${states[0]} at ${where} → ${mode ?? `UNKNOWN (State ${states[0]} is in no accepted form)`}`);
+    lines.push(`${id} State=${state} at ${where} → ${mode ?? `UNKNOWN (State ${state} is in no accepted form)`}`);
   }
   return { code: doubt ? 2 : 0, lines: lines.map(oneLine) };
 }

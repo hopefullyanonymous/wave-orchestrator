@@ -2,10 +2,12 @@
 // inherits the whole tool catalog, MCP servers included, which is the cost these files
 // exist to remove — so every list is asserted literally.
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { makeRepo } = require('./support/git-fixture.cjs');
 const ROOT = path.resolve(__dirname, '..');
 // One normalization behind every read, so a CRLF checkout and an LF checkout hand every
 // assertion below the same text. The EOL test writes its own two fixtures through this door
@@ -17,9 +19,11 @@ const TOOLS = {
   'reviewer': 'Read, Write, Glob, Grep, Bash',
   'test-hunter': 'Read, Write, Glob, Grep, Bash',
   'qa-runner': 'Read, Write, Edit, Glob, Grep, Bash, mcp__Claude_Browser__*',
+  'census': 'Read, Glob, Grep, Bash',
 };
 // The gate pair: read-only toward the repository, with Write for the findings file and
-// scratchpad scratch their prompts name (user decision 2026-09-23) and never Edit.
+// scratchpad scratch their prompts name (user decision 2026-09-23) and never Edit. The census
+// holds neither the grant nor its caveat (`censusFaults` below).
 const READ_ONLY = ['reviewer', 'test-hunter'];
 const CAVEAT = 'Write and Bash can still write, so "read-only" stays partly conventional; '
   + 'withholding Edit closes the easy path, not every path.';
@@ -122,7 +126,7 @@ function frontmatterField(line) {
   return { key: field[1], value };
 }
 
-// The frontmatter block parse, taken over document text: the four shipped definitions and
+// The frontmatter block parse, taken over document text: the shipped definitions and
 // the one-line documents in FRONTMATTER_CASES reach the predicate through this one door,
 // so a predicate the consumer has stopped calling cannot stay green.
 function frontmatterFields(text, file) {
@@ -151,14 +155,15 @@ function definition(name) {
 // The three forms the earlier guard accepted, the properly quoted colon it must keep
 // accepting — the rule is YAML validity, not a ban on colons — and the no-space form the
 // strictness was written for. Every case is run twice — through the predicate, and as a
-// one-line document through the same `frontmatterFields()` the four definitions go
+// one-line document through the same `frontmatterFields()` the shipped definitions go
 // through — so neither a validator that loosens nor a consumer that stops calling it stays green.
 const FRONTMATTER_CASES = [
   { line: 'name: qa-runner', field: { key: 'name', value: 'qa-runner' } },
   { line: 'tools: Read, Glob, Grep, Bash',
     field: { key: 'tools', value: 'Read, Glob, Grep, Bash' } },
-  // The gate pair's effort line, exactly as its two definitions carry it.
+  // The gate pair's effort line, exactly as its two definitions carry it, and the census's.
   { line: 'effort: max', field: { key: 'effort', value: 'max' } },
+  { line: 'effort: medium', field: { key: 'effort', value: 'medium' } },
   { line: 'description: "Runs the steps: quickly"',
     field: { key: 'description', value: '"Runs the steps: quickly"' } },
   { line: "description: 'it''s fine: really'",
@@ -487,7 +492,7 @@ test('a CRLF definition parses identically to its LF twin', t => {
 
 // Every other test iterates the known roles, so an unlisted file would never be read.
 // The README's `cp .claude/agents/*.md ~/.claude/agents/` installs whatever is in the
-// directory for every project, so a fifth definition — with no `tools:` line, inheriting
+// directory for every project, so an unlisted definition — with no `tools:` line, inheriting
 // the whole catalog — has to fail here or it ships unnoticed. The walk recurses because
 // that glob is not the only reader: it leaves a nested definition on the floor, while a
 // build that loads nested definitions picks up the very file the install skipped.
@@ -517,7 +522,7 @@ function assertKnownDefinitions(base) {
     + (present.join(', ') || 'nothing'));
 }
 
-test('the directory holds exactly the four known definitions', () => {
+test('the directory holds exactly the five known definitions', () => {
   assertKnownDefinitions(path.join(ROOT, '.claude/agents'));
 });
 
@@ -585,6 +590,99 @@ test('the read-only pair lists Write for its scoped writes and never Edit', () =
   }
 });
 
+// The census is read-only by its tool list rather than by a scoped grant: what its definition text
+// holds that this forbids, no tools: line at all (which inherits every tool, Write included), each
+// writing tool its tools: line lists, any other tool outside CENSUS_TOOLS, a body other than
+// CENSUS_BODY, and the gate pair's Write caveat in its body, which is false for a role with no Write.
+const WRITING = ['Write', 'Edit', 'NotebookEdit', 'MultiEdit'];
+// The census's whole tool list, held fail-closed: a tool that writes by another route (`Agent` spawns
+// a sub-agent that may hold Write; an MCP server writes through its own tools) is outside it though
+// WRITING does not name it. Each tool a list holds past it is one fault, named by its family.
+const CENSUS_TOOLS = ['Read', 'Glob', 'Grep', 'Bash'];
+const censusToolFaults = (where, tools) => [
+  ...tools.filter(t => WRITING.includes(t)).map(t => where + ' lists ' + t + ', a writing tool'),
+  ...tools.filter(t => !WRITING.includes(t) && !CENSUS_TOOLS.includes(t))
+    .map(t => where + ' lists ' + t + ', outside ' + CENSUS_TOOLS.join(', ') + '; widening the census is a user decision')];
+// The census body as its batch shipped it, whitespace-collapsed, before its preplan line: the
+// definition's own bound on Bash, the one tool it keeps that can write.
+const CENSUS_BODY = 'You are a read-only census agent for one planned batch. Read files and run read-only commands only: '
+  + 'never edit a file, change git state or write inside the repository; disposable scratch under your session scratchpad '
+  + 'is the one place you may write, for a measurement. Report exactly in the shape your prompt asks for.';
+function censusFaults(text, file) {
+  const { fields, body } = frontmatterFields(text, file);
+  const tools = (fields.get('tools') || '').split(',').map(t => t.trim()).filter(Boolean);
+  return [...(fields.has('tools') ? [] : [file + ' declares no tools: line, so it inherits every tool, Write included']),
+    ...censusToolFaults(file, tools),
+    ...(flow(body).trim() === CENSUS_BODY + ' ' + PREPLAN ? [] : [file + ' body is not the census body as written, its preplan line last']),
+    ...(flow(body).includes(CAVEAT) ? [file + ' carries the gate pair\'s Write caveat'] : [])];
+}
+
+test('the census holds only Read, Glob, Grep and Bash, its body as written, and no Write caveat', () => {
+  const { file, text } = definition('census');
+  assert.deepEqual(TOOLS.census.split(', ').filter(t => WRITING.includes(t)), [],
+    'TOOLS lists a writing tool for the census: it holds none of ' + WRITING.join(', ') + ', and widening it is a user decision');
+  assert.deepEqual(censusToolFaults('TOOLS.census', TOOLS.census.split(', ')), [],
+    'TOOLS widens the census past ' + CENSUS_TOOLS.join(', ') + ', and widening it is a user decision');
+  assert.deepEqual(censusFaults(text, file), [], file + ' must hold no tool past ' + CENSUS_TOOLS.join(', ')
+    + ', its body as written, and no caveat for a Write it lacks');
+  // Live controls: each writing tool, `Agent` and an MCP tool added to the definition's tools: line and
+  // to the TOOLS list, each reported once by its own family; the line dropped; the body's bound on Bash
+  // reversed; and the caveat appended to the body.
+  const outside = ' outside ' + CENSUS_TOOLS.join(', ') + '; widening the census is a user decision';
+  for (const [tool, family] of [...WRITING.map(t => [t, ' a writing tool']), ['Agent', outside], ['mcp__Claude_Browser__*', outside]]) {
+    const widened = text.replace('tools: Read, ', () => 'tools: Read, ' + tool + ', ');
+    assert.notEqual(widened, text, 'the control anchor must exist');
+    assert.deepEqual(censusFaults(widened, file), [file + ' lists ' + tool + ',' + family], 'a census given ' + tool);
+    assert.deepEqual(censusToolFaults('TOOLS.census', [...TOOLS.census.split(', '), tool]), ['TOOLS.census lists ' + tool + ',' + family],
+      'TOOLS widened with ' + tool);
+  }
+  const dropped = text.replace(/^tools: .*\n/m, () => '');
+  assert.notEqual(dropped, text, 'the control anchor must exist');
+  assert.deepEqual(censusFaults(dropped, file), [file + ' declares no tools: line, so it inherits every tool, Write included'],
+    'a census with no tools: line');
+  const reversed = text.replace('never edit a file, change git state or write inside the repository;',
+    () => 'edit any file the draft names and commit the fix when one is obvious;');
+  assert.notEqual(reversed, text, 'the control anchor must exist');
+  assert.deepEqual(censusFaults(reversed, file), [file + ' body is not the census body as written, its preplan line last'],
+    'the body\'s bound on Bash reversed');
+  assert.deepEqual(censusFaults(text + '\n' + CAVEAT + '\n', file), [file + ' body is not the census body as written, its preplan line last',
+    file + ' carries the gate pair\'s Write caveat'], 'the caveat appended to the body');
+});
+
+// detect.mjs offers a definition whose description is review-shaped as a gate agent wherever the
+// definitions are copied (orchestrate/tools/detect.mjs `gateAgents`), and the census is no gate agent.
+// Judged by that reader itself, run as a command over a work tree; its GATE_AGENTS line's items.
+// A child's output depends on the terminal, so any ANSI sequence goes before a line is read.
+const ESC = String.fromCharCode(27);
+const stripAnsi = text => text.replace(new RegExp(ESC + '\\[[0-?]*[ -/]*[@-~]', 'g'), '');
+function gateAgentItems(cwd, env) {
+  const childEnv = { ...env };
+  delete childEnv.NODE_TEST_CONTEXT;
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'orchestrate/tools/detect.mjs'), '--repo', cwd],
+    { cwd, env: childEnv, encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, 'detect.mjs must read ' + cwd + ': ' + r.stdout + r.stderr);
+  const line = stripAnsi(r.stdout).split('\n').find(l => l.startsWith('GATE_AGENTS: ') && l.includes(' — '));
+  assert.ok(line, 'detect.mjs prints a GATE_AGENTS line with its source: ' + r.stdout);
+  return line.slice('GATE_AGENTS: '.length, line.lastIndexOf(' — ')).split(/(?<=\)); /);
+}
+
+test('detect.mjs reads the shipped census as not review-shaped', t => {
+  assert.equal(stripAnsi(ESC + '[1;32mGATE_AGENTS: ' + ESC + '[0mcensus'), 'GATE_AGENTS: census', 'a coloured line reads as its plain text');
+  const item = verdict => 'census (tools: ' + TOOLS.census + '; ' + verdict + ')';
+  const items = gateAgentItems(ROOT, process.env);
+  assert.ok(items.includes(item('not review-shaped')), 'detect.mjs must not offer the census as a gate agent; it reads: ' + items.join(' | '));
+  // Live control: the same definition in a fixture work tree, as shipped and with its description
+  // saying "check", one of detect.mjs's review words.
+  const repo = makeRepo(t), text = read('.claude/agents/census.md');
+  const checked = text.replace('Read-only fact finding', () => 'Read-only fact check');
+  assert.notEqual(checked, text, 'the control anchor must exist');
+  for (const [definitionText, verdict] of [[text, 'not review-shaped'], [checked, 'review-shaped']]) {
+    repo.write('.claude/agents/census.md', definitionText);
+    assert.deepEqual(gateAgentItems(repo.cwd, repo.env), [item(verdict)], 'a fixture census reads as ' + verdict);
+  }
+});
+
 test('no definition pins a model or reaches past the browser MCP server', () => {
   for (const name of Object.keys(TOOLS)) {
     const { file, fields, tools } = definition(name);
@@ -596,18 +694,20 @@ test('no definition pins a model or reaches past the browser MCP server', () => 
   }
 });
 
-// Effort by role (the user's decision, 2026-09-27): the reviewer, which also runs the plan
-// pre-flight, and the test hunter run at max whatever the session's effort; the implementer and
-// the QA runner declare none, so they run at the session's. Judged on what definition() parses.
-const EFFORT = { implementer: null, reviewer: 'max', 'test-hunter': 'max', 'qa-runner': null };
+// Effort by role: the reviewer, which also runs the plan pre-flight, and the test hunter run at max
+// whatever the session's effort (the user's decision, 2026-09-27); the census runs at medium (the
+// user's standing choice since 2026-10-07, confirmed 2026-10-13); the implementer and the QA runner
+// declare none, so they run at the session's. Judged on what definition() parses.
+const EFFORT = { implementer: null, reviewer: 'max', 'test-hunter': 'max', 'qa-runner': null, census: 'medium' };
 // What a parsed frontmatter says about effort that the role's verdict forbids: any key naming
-// effort but the one `effort` a max role declares, and that key's value if it is not exactly max.
+// effort but the one `effort` a role with a level declares, and that key's value if it is not
+// exactly that level.
 const effortFaults = (fields, expected) => {
   const faults = [...fields.keys()].filter(key => /effort/i.test(key) && (key !== 'effort' || expected === null)).map(key => 'declares ' + key + ':');
   if (expected !== null && fields.get('effort') !== expected) faults.push('effort is ' + JSON.stringify(fields.get('effort')) + ', not ' + expected);
   return faults;
 };
-test('the gate pair declares effort: max, and the implementer and the QA runner declare no effort', () => {
+test('the gate pair declares effort: max, the census effort: medium, and the implementer and the QA runner declare no effort', () => {
   assert.deepEqual(Object.keys(EFFORT).sort(), Object.keys(TOOLS).sort(), 'every known definition has its effort verdict');
   for (const [name, expected] of Object.entries(EFFORT)) {
     const { file, fields } = definition(name);
@@ -616,10 +716,13 @@ test('the gate pair declares effort: max, and the implementer and the QA runner 
   // Both sides of the boundary, each through the same document parse.
   const fieldsOf = line => frontmatterFields('---\nname: x\n' + line + '\n---\n\nbody\n', 'synthetic.md').fields;
   assert.deepEqual(effortFaults(fieldsOf('effort: max'), 'max'), [], 'a max role declaring effort: max passes');
+  assert.deepEqual(effortFaults(fieldsOf('effort: medium'), 'medium'), [], 'a medium role declaring effort: medium passes');
   assert.deepEqual(effortFaults(fieldsOf('tools: Read'), null), [], 'a role declaring no effort passes');
   for (const [line, expected] of [['effort: high', 'max'], ['effort: "max"', 'max'], ['tools: Read', 'max'], ['Effort: max', 'max'],
-    ['reasoning_effort: low', 'max'], ['effort: max', null], ['effort: low', null], ['Effort: max', null], ['reasoning_effort: max', null]]) {
-    assert.ok(effortFaults(fieldsOf(line), expected).length >= 1, 'must be caught for ' + (expected ? 'a max role' : 'a role with no effort') + ': ' + line);
+    ['reasoning_effort: low', 'max'], ['effort: medium', 'max'], ['effort: low', 'medium'], ['effort: high', 'medium'], ['effort: max', 'medium'],
+    ['effort: "medium"', 'medium'], ['tools: Read', 'medium'], ['Effort: medium', 'medium'], ['reasoning_effort: medium', 'medium'],
+    ['effort: max', null], ['effort: low', null], ['effort: medium', null], ['Effort: max', null], ['reasoning_effort: max', null]]) {
+    assert.ok(effortFaults(fieldsOf(line), expected).length >= 1, 'must be caught for ' + (expected ? 'a ' + expected + ' role' : 'a role with no effort') + ': ' + line);
   }
 });
 
@@ -759,10 +862,10 @@ test('every definition but the implementer ends on the preplan line, once, witho
   for (const old of ['re-sends the whole conversation', 'the number of turns, not the number of tool calls']) {
     assert.notDeepEqual(stricterIn(old), [], 'the markers must still catch what the earlier pair caught: ' + old);
   }
-  // The domain is `definitionFiles()`'s listing of the checkout, never a hand list; the four shipped
+  // The domain is `definitionFiles()`'s listing of the checkout, never a hand list; the shipped
   // names are a floor, so an emptied or moved directory goes red rather than passing on nothing.
   const listing = definitionFiles(path.join(ROOT, '.claude/agents')).sort();
-  assert.ok(['implementer', 'reviewer', 'test-hunter', 'qa-runner'].every(name => listing.includes(name + '.md')),
+  assert.ok(['implementer', 'reviewer', 'test-hunter', 'qa-runner', 'census'].every(name => listing.includes(name + '.md')),
     'the listing must read the shipped definitions; found ' + (listing.join(', ') || 'nothing'));
   assert.ok(NO_PREPLAN.every(rel => listing.includes(rel)), 'every exempt name must be a shipped definition');
   const faults = listing.filter(rel => !NO_PREPLAN.includes(rel))

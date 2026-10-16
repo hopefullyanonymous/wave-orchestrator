@@ -80,6 +80,9 @@ ledgers may be parked in a sibling `.agents/archive/` directory; discovery never
   close-out, writing `evidence/C<n>/`.
 - **Plan pre-flight** (scaffold time) and **convergence** (change-complete) — one fresh
   read-only sub-agent each; see `scaffolding.md` and §Two close-outs.
+- **Census** (scaffold time, and again on the triggers in §Fence changes and §Session algorithm
+  step 4) — one read-only `census` agent per batch, never one for several batches; see
+  `scaffolding.md` step 3 and `subagent-prompts.md` §Census.
 - **Tiers** — the contract words them model-agnostically: the reviewer never runs on a
   less capable model than the implementer; L-weight reviews and the fresh implementer of
   an authorized third round use the most capable model the session can spawn (the
@@ -125,6 +128,17 @@ checkpoint is recorded (`escaped` counts every fail across re-runs).
   and one unticked `- [ ] polish:` item per ask it leaves to the polish pass, so a crash
   before that pass meets a partial checklist in §Recovery; the polish pass takes those,
   and none left means none runs.
+  A smoke-step ASK is the exception to where that edit lands: its text lives in the batch
+  file's Smoke section, and the batch branch changes that file only by ticks, `polish:`
+  appends and a recorded Files line (6a), so the orchestrator applies it through the
+  integration worktree, in the ledger commit that records the verdict, never on the batch
+  branch. That commit comes first; the batch-branch commit that lists the asks follows it,
+  the smoke ask already ticked. After a crash, wherever §Recovery meets a `SHIP … asks=`
+  tip with no `polish:` item listed yet — its worktree clean or holding the unfinished
+  list edit — the orchestrator completes that list commit before any polish pass or
+  resume, ticking each ask whose text the integration branch's batch file already
+  carries; a discarded polish reverts only the batch branch and leaves that text, its ask
+  closed.
   Once the polish has landed, the orchestrator classifies its diff:
   `node "<skill-dir>/tools/prose-only-diff.mjs" --repo <batch worktree> --base <pre-polish sha> --head <polish tip>`.
   `PROSE-ONLY` exempts the JavaScript files it counts from the fix-diff-only re-review,
@@ -349,6 +363,14 @@ returns to `🟢` when the continuation integrates. If two batches need
 the same region, the question goes in the STOP hand-off. The fence check's allowed set is the plan's fence ∪ recorded
 extensions ∪ the batch's own file — never the implementer's Files line alone.
 
+A recorded extension, or a change to a batch's plan the user authorizes (recorded verbatim in
+PROGRESS, as the locked-map rule requires), that adds a file, a hook or a behaviour runs the batch's
+`census` agent again before its implementer resumes or starts. Every correction it carries is committed
+to the batch file's notes on the integration branch — for a running implementer before its resume,
+which also carries it — and each opening item is recorded in LOG.md as carried or rejected; a
+correction that needs a path outside the fence passes this section's test first, and one that adds a
+checklist item or an acceptance criterion needs the user's words, recorded verbatim in PROGRESS.
+
 ### Complete checkpoint inputs
 
 The conductor inventories required files per smoke step at planning and checkpoint
@@ -547,7 +569,8 @@ integrated? (`git merge-base --is-ancestor <branch> <integration>`), shipped?
 (`git merge-base --is-ancestor <integration-sha> <shipment-sha>` only after source
 resolution above), commits ahead
 (`git log <integration>..<branch> --oneline`), dirty trees (`git status --porcelain`
-in the main checkout AND each worktree from `git worktree list`), and the checklist
+in each worktree from `git worktree list` that holds the row's branch — the main
+checkout only when it holds that branch), and the checklist
 state inside the batch file on that branch (`git show <branch>:./<path>`, from the root).
 Rows are matched top to bottom; the first match wins.
 `node "<skill-dir>/tools/reconcile.mjs" rows --repo <repo> --ledger <id> --integration <full-ref>`
@@ -586,6 +609,10 @@ prints as `UNKNOWN` is reconciled by hand from this table.
 
 Prune worktrees of integrated batches (`git worktree remove`). Log every
 reconciliation: one line in the PROGRESS Session log, detail in LOG.md.
+
+Before any polish pass or resume at a `SHIP … asks=` tip whose batch file lists no
+`polish:` item yet, its worktree clean or dirty, the orchestrator completes the list
+commit, as §Severity and round accounting says for a smoke-step ASK.
 
 ## §Session algorithm ("continue")
 
@@ -667,7 +694,20 @@ reconciliation: one line in the PROGRESS Session log, detail in LOG.md.
 3. If any batch is `🧪`: a checkpoint is open — ask the user for its verdict (passed /
    failed / waive). Never open the next wave past an unanswered checkpoint.
 4. Open the next wave: the earliest wave that still has `⬜` batches (or a recorded
-   deferral) whose deps are all `🟢`/`✅`. From the integration tip: cut every member's branch, create every
+   deferral) whose deps are all `🟢`/`✅`. From the second wave on, before the cut, run the
+   `census` agent again for each member whose fence path a test added or changed by an
+   earlier wave names — the path itself, its basename or a directory holding it — taking the
+   tests among the files
+   `git diff --name-only --no-renames --diff-filter=AM <W1's base, from the session log>..<the integration tip>`
+   lists (a listing that fails counts as a match), and commit the corrections it carries into
+   the member's batch file on the integration branch, each opening item recorded in LOG.md
+   as carried or rejected, so every member branch starts from them. A correction that needs a
+   path outside the member's fence is first recorded as an extension under §Fence changes'
+   test, and one that adds a checklist item or an acceptance criterion needs the user's
+   words, recorded verbatim in PROGRESS. Once a member branch of this wave exists at the
+   integration tip — an open that crashed after its cut began — no census runs again at
+   this open, so the cut below adopts the branches cut from the corrected tip.
+   From the integration tip: cut every member's branch, create every
    worktree (setup: the ledger's per-worktree setup), then commit the wave-open PROGRESS flip
    (rows → 🔄, wave base SHA in the session log, `**State**: ACTIVE`).
    The cut is idempotent: a member branch that already exists with its tip equal to the
@@ -780,6 +820,22 @@ reconciliation: one line in the PROGRESS Session log, detail in LOG.md.
    notice shows the task's description, not its output, so the description carries the
    reminder, verbatim:
    `Compaction window over: if this session was compacted, run the boot sequence and the reconcile before any transition`.
+   When this session's tools include `mcp__orchestrate-mod__schedule_clear`
+   (orchestrate-mod's), the orchestrator calls it at that point in place of that line and
+   the timer, with the ledger id and the integration tip's full SHA, once no background
+   command of its own is running either and a committed PROGRESS session-log row names the
+   LOG heading that records the work since the row before it. An answer that begins
+   `scheduled` gives the one line to post: the orchestrator posts it and ends its turn, and
+   the mod clears the conversation two minutes later unless a message arrives first, then
+   runs `/orchestrate continue <id> after-clear`; a mod that finds it cannot clear runs
+   `/orchestrate continue <id>` in this conversation instead. Any other answer, or no such
+   tool, takes the line and the timer above. A conversation that goes on after a
+   `scheduled` answer, because a message or a notice arrived first, is not cleared and
+   carries on. One that `/orchestrate continue <id> after-clear` opened boots as any
+   `continue` does; its first message to the user opens with one line saying it continued
+   after an automatic clear and naming the LOG heading that the newest session-log row
+   names, and it ignores a task notice for a task it did not start, whose output file sits
+   under another session's folder.
    A compacted session is resumed early only through `continue`, which starts this
    algorithm at step 1. A STOP that already waits for the user (⛔ verdicts, checkpoints),
    past about 300K, carries the context size and `/compact` now in its message
@@ -879,6 +935,7 @@ Never rewrite a legacy ledger into the new format — drive it under its own con
   time in the main checkout (worktrees unnecessary). The reviewer gate still runs per
   batch — a separate adversarial pass over each finished diff, with the same
   hunk-mapping duty, before integration. Checkpoint placement is unchanged.
+  The census is the orchestrator's own pass, one batch at a time, in the same report shape.
 - **No agent definitions installed** (the skeletons' `subagent_type:` lines name types
   this environment does not define): the spawn ERRORS — `Agent type '<name>' not found` —
   it does not degrade on its own, so the ORCHESTRATOR substitutes the general-purpose

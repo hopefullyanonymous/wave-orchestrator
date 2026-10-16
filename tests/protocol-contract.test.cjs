@@ -184,7 +184,7 @@ const REWORDED = [
     ['shipped? (git merge-base --is-ancestor <integration-sha> <shipment-sha> only after source resolution above)']],
   ['git log {{INTEGRATION_BRANCH}}..<branch> --oneline', 'protocol', ['commits ahead (git log <integration>..<branch> --oneline)']],
   ['git worktree list && git status --porcelain', 'protocol',
-    ['dirty trees (git status --porcelain in the main checkout AND each worktree from git worktree list)']],
+    ["dirty trees (git status --porcelain in each worktree from git worktree list that holds the row's branch — the main checkout only when it holds that branch)"]],
   ['git show <branch>:./{{LEDGER_DIR}}/02-batches-NN-<slug>.md', 'protocol',
     ['the checklist state inside the batch file on that branch (git show <branch>:./<path>, from the root)']],
   ['Log every reconciliation in the PROGRESS Session log (one line)', 'protocol',
@@ -611,6 +611,22 @@ function walkFiles(dir, prefix = '') {
 }
 const shippedSkillFiles = () => walkFiles(path.join(ROOT, 'orchestrate')).map(rel => 'orchestrate/' + rel);
 const collapsed = file => read(file).replace(/\s+/g, ' ');
+// The files git tracks under orchestrate/, at any depth: what the skill ships, so an untracked or ignored file there is
+// none of it. A listing that fails stops the run rather than read as empty.
+function trackedSkillFiles(cwd = ROOT, env = process.env) {
+  const r = spawnSync('git', ['ls-files', '-z', '--', 'orchestrate'], { cwd, env, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, 'git ls-files must list orchestrate/: ' + r.stderr);
+  return r.stdout.split('\0').filter(Boolean).sort();
+}
+// Each way a pinned list of the skill's non-Markdown files parts from the checkout: a tracked non-Markdown file it does
+// not name, a name that is no tracked non-Markdown file, and a name the sweeps' walk does not reach.
+function nonMarkdownFaults(listed, tracked, walked) {
+  const shipped = tracked.filter(file => !file.endsWith('.md'));
+  return [...shipped.filter(file => !listed.includes(file)).map(file => file + ': tracked, not listed'),
+    ...listed.filter(file => !shipped.includes(file)).map(file => file + ': listed, no tracked non-Markdown file'),
+    ...listed.filter(file => !walked.includes(file)).map(file => file + ': listed, the walk misses it')];
+}
 
 test('the shipped-skill domain both rule sweeps use recurses and filters no file type', t => {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'skill-domain-walk-'));
@@ -630,8 +646,9 @@ test('the shipped-skill domain both rule sweeps use recurses and filters no file
   assert.equal(new Set(shipped).size, shipped.length, 'the shipped listing must not repeat a path');
   // Signature 1: three SAMPLED members left the domain itself unpinned — a new tool could
   // join the skill and never be swept, and dropping a member here and from `orchestrate/`
-  // together stayed green. The list is compared against the actual non-Markdown listing,
-  // and its own size is pinned so the both-at-once edit reddens too.
+  // together stayed green. The list is compared against the non-Markdown files git tracks
+  // under `orchestrate/`, each of which the walk must reach, and its own size is pinned so
+  // the both-at-once edit reddens too.
   const NON_MARKDOWN = ['orchestrate/references/smoke-page-template.html',
     'orchestrate/tools/build-smoke-page.mjs', 'orchestrate/tools/check-fence.mjs',
     'orchestrate/tools/check-ledger.mjs', 'orchestrate/tools/detect.mjs', 'orchestrate/tools/env-facts.mjs',
@@ -641,8 +658,27 @@ test('the shipped-skill domain both rule sweeps use recurses and filters no file
     'orchestrate/tools/scaffold.mjs', 'orchestrate/tools/smoke-inputs.mjs',
     'orchestrate/tools/validate.mjs'];
   assert.equal(NON_MARKDOWN.length, 17, 'the pinned non-Markdown domain must not shrink to a sample');
-  assert.deepEqual(shipped.filter(file => !file.endsWith('.md')), NON_MARKDOWN,
+  assert.deepEqual(nonMarkdownFaults(NON_MARKDOWN, trackedSkillFiles(), shipped), [],
     'the sweeps must reach every non-Markdown shipped file, not only *.md; add a new tool to this list deliberately');
+  // Live, on a fixture: an untracked and an ignored file under its orchestrate/ ship nothing, while a tracked file the
+  // list does not name, a Markdown name and a listed file gone from the tree are each reported.
+  const repo = makeRepo(t);
+  repo.write('.gitignore', '*.log\n');
+  repo.write('orchestrate/SKILL.md', 'top\n');
+  repo.write('orchestrate/tools/deeper/x.mjs', 'x\n');
+  repo.commit('skill');
+  repo.write('orchestrate/tools/untracked.mjs', 'x\n');
+  repo.write('orchestrate/tools/scratch.log', 'x\n');
+  const fixture = listed => nonMarkdownFaults(listed, trackedSkillFiles(repo.cwd, repo.env),
+    walkFiles(path.join(repo.cwd, 'orchestrate')).map(rel => 'orchestrate/' + rel));
+  assert.deepEqual(fixture(['orchestrate/tools/deeper/x.mjs']), [], 'an untracked or ignored file under orchestrate/ is no shipped file');
+  assert.deepEqual(fixture(['orchestrate/tools/deeper/x.mjs', 'orchestrate/SKILL.md']), ['orchestrate/SKILL.md: listed, no tracked non-Markdown file']);
+  repo.write('orchestrate/tools/y.mjs', 'y\n');
+  repo.git('add', '--', 'orchestrate/tools/y.mjs');
+  repo.git('commit', '-m', 'a new tool');
+  fs.rmSync(path.join(repo.cwd, 'orchestrate/tools/deeper/x.mjs'));
+  assert.deepEqual(fixture(['orchestrate/tools/deeper/x.mjs']),
+    ['orchestrate/tools/y.mjs: tracked, not listed', 'orchestrate/tools/deeper/x.mjs: listed, the walk misses it']);
   // Shape, never a pinned total: the skill grows. Only that it is bigger than either
   // rule's carrier set, so neither sweep can be satisfied by its own subjects alone.
   assert.ok(shipped.length > 10, 'shipped skill listing collapsed to ' + shipped.length + ' files');
@@ -1427,5 +1463,128 @@ test('every document instructing a block read from the artifact also requires th
     const flagged = splitClauses(collapsed(file)).filter(isDowngrade);
     assert.deepEqual(flagged, [],
       file + ': a clause elsewhere in the document licenses the file text, grep or a static read as a substitute for the rendered DOM');
+  }
+});
+
+// ===== BL-065: a row's dirt is read only in the trees holding its branch ==========
+// reconcile.mjs read the main checkout's dirt for every row, as protocol.md's gather list said ("in
+// the main checkout AND each worktree"), so one untracked file of the user's there read every 🔄 row
+// as dirty. Fail-closed over every shipped file of any type, a unit at a time: a unit that names the
+// main checkout, or ties dirt to every row or every worktree, is doubt unless DIRT_UNITS lists it word
+// for word, and DIRT_UNITS lists exactly the units the checkout holds, so a new or edited one is read
+// before it is listed. A unit is a sentence or `;` clause of a paragraph once code ticks, emphasis,
+// line-leading `//` and the seams of a wrapped string are gone: a quote, a comma and a line break, then
+// a quote; or a quote, a `+` before or after any line break, then a quote.
+// The words the sweep selects on; a planted claim below goes unseen without each one.
+const DIRT_WORDS = {
+  main: ['main', 'primary'], tree: ['checkout', 'worktree', 'working[\\s-]+tree'],
+  dirt: ['dirt\\w*', 'untracked', 'uncommitted', 'clean\\w*', 'git\\s+status', 'porcelain'], every: ['every', 'each', 'all'],
+};
+// Three selectors: a unit naming the main checkout, whatever it says of it; dirt beside every row; and
+// dirt beside every worktree, the main checkout among them in `git worktree list`.
+function dirtSelectors(words = DIRT_WORDS) {
+  const any = list => '(?:' + list.join('|') + ')', dirt = new RegExp(`\\b${any(words.dirt)}\\b`, 'i');
+  const main = new RegExp(`\\b${any(words.main)}[\\s-]+${any(words.tree)}\\b`, 'i');
+  const every = noun => new RegExp(`\\b${any(words.every)}\\s+(?:\\S+\\s+){0,2}?${noun}s?\\b`, 'i');
+  const rows = every('row'), trees = every(any(words.tree));
+  return { mainCheckout: unit => main.test(unit), everyRow: unit => rows.test(unit) && dirt.test(unit), everyTree: unit => trees.test(unit) && dirt.test(unit) };
+}
+const DIRT_SELECT = dirtSelectors();
+const tiesDirt = (unit, selectors = DIRT_SELECT) => Object.values(selectors).some(select => select(unit));
+const dirtUnits = text => text.replace(/\r\n/g, '\n').replace(/^[ \t]*\/\//gm, '').replace(/['"],[ \t]*\n[ \t]*['"]/g, ' ').replace(/['"]\s*\+\s*['"]/g, '')
+  .split(/\n\n/).flatMap(paragraph => paragraph.replace(/[`*]/g, '').replace(/\s+/g, ' ').split(/(?<=[.;])\s+/));
+// [file, a unit there word for word]: each says whose dirt a row reads as the rule now has it, names the
+// main checkout for another reason, or reads every worktree for another fact.
+const DIRT_UNITS = [
+  ['orchestrate/SKILL.md', "Never switch the main checkout and never copy ledger files into another branch's tree."],
+  ['orchestrate/SKILL.md', 'The orchestrator never switches the main checkout: it reads with git show and writes through an integration worktree under the session scratchpad.'],
+  ['orchestrate/references/execution-models.md', 'The main checkout is never switched.'],
+  ['orchestrate/references/execution-models.md', "- No sub-agent support → the orchestrator implements a wave's batches one at a time in the main checkout (worktrees unnecessary);"],
+  ['orchestrate/references/protocol.md', 'Never switches the main checkout: reads any branch with git show <branch>:./<path> (keep the ./ — Git Bash on Windows mangles branch:path;'],
+  ['orchestrate/references/protocol.md', 'also inspect .agents/changes directly in each worktree from git worktree list --porcelain.'],
+  ['orchestrate/references/protocol.md', "Inspect every worktree's porcelain status including untracked files and both rename endpoints."],
+  ['orchestrate/references/protocol.md', "For each PROGRESS row not ✅/👤/⛔ (dropped), gather: branch exists? (git rev-parse --verify), integrated? (git merge-base --is-ancestor <branch> <integration>), shipped? (git merge-base --is-ancestor <integration-sha> <shipment-sha> only after source resolution above), commits ahead (git log <integration>..<branch> --oneline), dirty trees (git status --porcelain in each worktree from git worktree list that holds the row's branch — the main checkout only when it holds that branch), and the checklist state inside the batch file on that branch (git show <branch>:./<path>, from the root)."],
+  ['orchestrate/references/protocol.md', "- No sub-agents available: the orchestrator implements a wave's batches one at a time in the main checkout (worktrees unnecessary)."],
+  ['orchestrate/references/subagent-prompts.md', 'Stay inside the worktree — do not create or switch branches, never push, never touch the main checkout, never leave untracked files in the worktree (scratch goes under [SCRATCHPAD_PATH]).'],
+  ['orchestrate/references/subagent-prompts.md', 'Main-checkout variant (degraded environments, or a width-1 wave run directly in the repo): replace the worktree paragraph with "Work on the CURRENT branch ([BATCH_BRANCH]) — do not create or switch branches, never push." A rendered file takes no such edit, so this variant is always the manual procedure (§Spawning rules).'],
+  ['orchestrate/templates/00-READBEFORE.md', 'Never switch the main checkout.'],
+  ['orchestrate/templates/00-READBEFORE.md', 'Read ledger files from any branch with git show <branch>:./<path> (the ./ is required — Git Bash on Windows mangles branch:path otherwise) and write to the ledger through an integration worktree (git worktree add <scratchpad>/wt-int {{INTEGRATION_BRANCH}}), using the main checkout only if it already has {{INTEGRATION_BRANCH}} checked out.'],
+  ['orchestrate/tools/reconcile.mjs', "The row's dirt is read only in the trees holding its branch, the main checkout among them only while it holds that branch: dirt on any other branch is none of this row's work."],
+  ['orchestrate/tools/reconcile.mjs', 'The main checkout: the worktree holding the common .git directory, never a worktree to prune.'],
+  ['README.md', "- Sub-agents are used for census agents, implementers, reviewers, gate agents and the QA runner, but aren't required — without them the orchestrator implements a wave's batches one at a time in the main checkout and still runs the review as a separate adversarial pass per batch."],
+];
+const dirtClaims = (file, text) => dirtUnits(text).filter(unit => tiesDirt(unit) && !DIRT_UNITS.some(([owner, listed]) => owner === file && listed === unit));
+test('no shipped file says the main checkout\'s dirt counts for every row', () => {
+  const agents = fs.readdirSync(path.join(ROOT, '.claude/agents')).map(name => '.claude/agents/' + name);
+  const files = [...shippedSkillFiles(), 'README.md', ...agents];
+  assert.ok(agents.length > 0 && [...shippedSkillFiles(), 'README.md', ...agents].every(file => files.includes(file)), 'the sweep reads every shipped file, README and the agent definitions');
+  // The checkout's units, set-equal to DIRT_UNITS: one added or edited is doubt until it is read and listed,
+  // and a listed one that is gone is stale.
+  const held = files.flatMap(file => dirtUnits(read(file)).filter(unit => tiesDirt(unit)).map(unit => file + ' :: ' + unit));
+  assert.deepEqual(held.sort(), DIRT_UNITS.map(([file, unit]) => file + ' :: ' + unit).sort(),
+    'the units naming the main checkout, or tying dirt to every row or every worktree, must be exactly DIRT_UNITS: read a new one, then list it word for word');
+  const sweep = readFile => files.flatMap(file => dirtClaims(file, readFile(file)).map(claim => file + ' :: ' + claim));
+  // Armed on the whole domain at once: the claim appended to every file is reported once per file, whatever its type.
+  assert.deepEqual(sweep(file => read(file) + '\n\nThe main checkout\'s dirt counts for every row.\n').map(hit => hit.split(' :: ')[0]), files,
+    'a claim appended to any swept file must be reported, once');
+  // Live controls, planted in real carriers and read the same way; a control's text anchor is found once.
+  const plant = (file, anchor, replacement, eol = text => text) => {
+    const text = read(file), planted = text.replace(anchor, () => replacement);
+    if (typeof anchor === 'string') assert.equal(text.split(anchor).length - 1, 1, file + ': the control anchor must be found once — ' + anchor);
+    assert.notEqual(planted, text, file + ': the control found no anchor');
+    return dirtClaims(file, eol(planted));
+  };
+  const PROTOCOL_MD = 'orchestrate/references/protocol.md', RECONCILE_MJS = 'orchestrate/tools/reconcile.mjs';
+  // The change reverted: protocol.md's old gather list, then reconcile.mjs's old comment.
+  const reverted = plant(PROTOCOL_MD, /in each worktree from `git worktree list` that holds the row's branch — the main\ncheckout only when it holds that branch\)/,
+    'in the main checkout AND each worktree from `git worktree list`)');
+  assert.ok(reverted.length === 1 && reverted[0].includes('dirty trees (git status --porcelain in the main checkout AND each worktree from git worktree list)'),
+    'protocol.md\'s old gather list must be reported: ' + reverted.join(' || '));
+  assert.deepEqual(plant(RECONCILE_MJS, '// The main checkout: the worktree holding the common .git directory, never a worktree to prune.',
+    '// The main checkout: the worktree holding the common .git directory; its dirt counts for every row.'),
+    ['The main checkout: the worktree holding the common .git directory;', 'its dirt counts for every row.'], 'reconcile.mjs\'s old comment must be reported');
+  // A listed unit edited anywhere is listed no more: here a clause that leans on the gather list's own "dirty trees".
+  assert.equal(plant(PROTOCOL_MD, '--oneline`), dirty trees (`git status --porcelain`', '--oneline`), the main checkout\'s for every row and the other dirty trees (`git status --porcelain`').length, 1,
+    'a clause borrowing a listed unit\'s dirt must be reported');
+  // The rule restated in a sentence of its own, with a dirt word the list lacks, and with none.
+  for (const claim of ["The main checkout's local changes count for every row.", 'The main checkout counts for every row too.']) {
+    assert.deepEqual(plant(PROTOCOL_MD, 'from the root).\nRows are matched top to bottom', 'from the root). ' + claim + '\nRows are matched top to bottom'), [claim], 'protocol.md must report: ' + claim);
+  }
+  // A unit is listed for its own file: the template's sentence copied into README is doubt there.
+  assert.deepEqual(plant('README.md', /\n*$/, '\n\nNever switch the main checkout.\n'), ['Never switch the main checkout.'], 'a listed unit copied into another file must be reported');
+  // Wrapped across two comment lines, and across two --help strings at each seam the reader joins (a comma,
+  // and a `+` after or before the line break; either quote on either side), in LF and CRLF checkouts alike.
+  // Only the joined name ties these to the rule, so only a joined seam reports them.
+  const HELP_END = "'  AMBIGUOUS or INCOMPLETE line, or an invalid invocation.',", CUT = 'AMBIGUOUS or INCOMPLETE line, or an invalid invocation. The main';
+  const WRAPS = [[/\n*$/, '\n// The main\n// checkout counts for every row too.\n'],
+    [HELP_END, `'  ${CUT}',\n  "checkout counts for every row too.",`], [HELP_END, `"  ${CUT}",\n  'checkout counts for every row too.',`],
+    [HELP_END, `"  ${CUT} " +\n    "checkout counts for every row too.",`],
+    ["otherwise the header reads shipment=not-needed.',", "otherwise the header reads shipment=not-needed. The main '\n    + 'checkout counts for every row too.',"]];
+  for (const [checkout, eol] of [['LF', text => text], ['CRLF', text => text.replace(/\n/g, '\r\n')]]) {
+    for (const [anchor, wrapped] of WRAPS) assert.equal(plant(RECONCILE_MJS, anchor, wrapped, eol).length, 1, checkout + ': must be reported — ' + wrapped);
+  }
+  // Written as an author would put the old rule back, not read off the patterns. Each selector owns a claim the
+  // others miss and each word one that goes unseen without it, so none can be dropped while the corpus still
+  // reads as reported; its size is pinned, so a word cannot leave together with its claim.
+  const CLAIMS = ["The main checkout's dirt counts for every row.", 'One untracked file in the main checkout reads every 🔄 row as dirty.',
+    'Read git status --porcelain in the main checkout AND each worktree.', 'Its dirt counts for every row.', 'The main checkout counts for every row too.',
+    "The main checkout's local changes count for every row.", 'Uncommitted changes in the primary worktree count too.', "Read the main working tree's status too.",
+    'Read the main-checkout status too.', 'Untracked files count for every row.', 'Uncommitted changes count against all rows.', 'Every row needs a clean tree.',
+    'Each row runs git status.', 'All rows read the porcelain listing.', 'Each PROGRESS row reads as dirty.',
+    'Dirty trees: git status --porcelain in each worktree from git worktree list.', 'All checkouts are read for dirt.', 'Each working tree is read with git status.'];
+  assert.equal(CLAIMS.length, 18, 'the corpus keeps all eighteen claims');
+  assert.equal(new Set(CLAIMS).size, CLAIMS.length, 'no claim repeats to pad the corpus');
+  for (const claim of CLAIMS) {
+    assert.equal(plant('README.md', /\n*$/, '\n\n' + claim + '\n').length, 1, 'README.md must report: ' + claim);
+    assert.equal(plant(RECONCILE_MJS, /\n*$/, '\n// ' + claim + '\n').length, 1, 'reconcile.mjs must report: ' + claim);
+  }
+  for (const name of Object.keys(DIRT_SELECT)) {
+    assert.ok(CLAIMS.some(claim => Object.keys(DIRT_SELECT).filter(key => DIRT_SELECT[key](claim)).join() === name), name + ': no claim is caught by it alone');
+  }
+  for (const [part, words] of Object.entries(DIRT_WORDS)) {
+    for (const word of words) {
+      const without = dirtSelectors({ ...DIRT_WORDS, [part]: words.filter(other => other !== word) });
+      assert.ok(CLAIMS.some(claim => !tiesDirt(claim, without)), part + ' ' + word + ': no claim needs it, so dropping it goes unseen');
+    }
   }
 });

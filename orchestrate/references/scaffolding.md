@@ -13,6 +13,17 @@
 4. **Effort.** A session running at max effort → before scaffolding, ask the user to set it
    to high, with the reason in one sentence: at max, one measured scaffold spent 54% of its
    output on thinking. Never change the setting yourself.
+5. **Context.** A `new` that arrives after other work in this conversation → first read this
+   session's context size: the input, cache-read and cache-creation tokens summed in the newest `usage`
+   entry of its transcript that is not all zeros (an API error logs one that is), the transcript being
+   `<session id>.jsonl` in a subdirectory of the `.claude/projects/` directory of the user's home
+   (`CLAUDE_CODE_SESSION_ID` holds the id). Past about 200K, or when the size cannot be read, offer to
+   scaffold in a fresh conversation, with the reason in one sentence: a scaffold adds about 500–800K by
+   itself, and a conversation summarized automatically mid-scaffold loses the work in flight. On a yes,
+   write the request verbatim, and whatever this conversation established that the scaffold needs, into
+   a note under the session scratchpad, never the repository; once nothing this conversation started
+   still runs in the background, the user runs `/clear`, then `/orchestrate new` naming the note. Never
+   clear the conversation yourself.
 
 ## Procedure
 
@@ -51,6 +62,14 @@
    synthetic generation, immutable issue paths and working-copy/reset directions.
    Name actual private-data/credential/access prerequisites; do not defer ordinary
    input construction to the tester or invent a pre-verified result.
+   **Census** — once the batches are drafted, spawn one `census` agent per batch, never one agent
+   for several batches, with the `subagent-prompts.md` §Census skeleton filled with the batch's
+   planned change and the facts it must find. Each report opens with where the draft is wrong or
+   incomplete; before the pre-flight, record every one of those items in LOG.md as carried (the
+   batch-file line that now holds it) or rejected (the reason). Whenever a later planning step — a
+   pre-flight fix, an accepted fold-in or an adjustment at approval — adds a file, a hook or a
+   behaviour to a batch, run the batch's `census` agent again and record its items the same way
+   before the fill.
 
 4. **Backlog sweep** — read the repo's backlog / feature / bug files and propose
    fold-ins. Eligible only if ALL hold: (a) the item's files are a SUBSET of one draft

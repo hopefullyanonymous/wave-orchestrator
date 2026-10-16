@@ -1,7 +1,7 @@
 ---
 name: orchestrate
-description: Ledger-based orchestration for multi-batch code changes. Scaffolds and drives file-based ledgers in .agents/changes/ — locked plan with a wave map (file-disjoint batches run concurrently, one git branch per batch, worktree implementers), a mechanical fence check plus an independent hunk-to-finding reviewer gate per batch, validation on the integration tip after every merge, user smoke tests only at planned checkpoints (after hands-on-risk waves plus one final — never per batch by default), and crash-safe PROGRESS reconciliation where git is truth. Use when the user asks to plan or orchestrate a multi-item or multi-batch change as a ledger; says "continue", "resume the batch work", asks for ledger status, or gives a smoke-test verdict in a repo that has a .agents/changes/ directory; or asks to set a repo up for ledger-driven orchestration. Modes: new <description> | continue | status | close.
-argument-hint: new <description> | continue | status | close
+description: Ledger-based orchestration for multi-batch code changes. Scaffolds and drives file-based ledgers in .agents/changes/ — locked plan with a wave map (file-disjoint batches run concurrently, one git branch per batch, worktree implementers), a mechanical fence check plus an independent hunk-to-finding reviewer gate per batch, validation on the integration tip after every merge, user smoke tests only at planned checkpoints (after hands-on-risk waves plus one final — never per batch by default), and crash-safe PROGRESS reconciliation where git is truth. Use when the user asks to plan or orchestrate a multi-item or multi-batch change as a ledger; says "continue", "resume the batch work", asks for ledger status, or gives a smoke-test verdict in a repo that has a .agents/changes/ directory; or asks to set a repo up for ledger-driven orchestration. Modes: new <description> | continue [<id>] | status | close.
+argument-hint: new <description> | continue [<id>] | status | close
 ---
 
 # Ledger orchestration
@@ -26,7 +26,9 @@ changes how it runs. Full spec:
 First word of the arguments:
 
 - `new <description>` → scaffold a ledger
-- `continue` → run the session algorithm on the active ledger
+- `continue [<id>]` → run the session algorithm on the active ledger, or on ledger `<id>`
+  when one is named; `continue <id> after-clear` is the form orchestrate-mod sends after it
+  clears the conversation (protocol.md §Session algorithm step 8)
 - `status` → read-only reconcile + report
 - `close` → process smoke verdicts / finish the change
 - empty or anything else → run Discovery, then route by message shape: a smoke verdict
@@ -189,7 +191,7 @@ Ordinary synthetic preparation adds no user gate.
 ## Mode: new
 
 Read [references/scaffolding.md](references/scaffolding.md) and the files in
-[templates/](templates/), then: preconditions (git repo; tree state) → detect repo
+[templates/](templates/), then: preconditions (git repo; tree state; context) → detect repo
 facts (validation commands and their quiet form, versioning, gate agents, runners,
 backlog id scheme; `node "<skill-dir>/tools/detect.mjs" --repo <repo>` and
 `node "<skill-dir>/tools/env-facts.mjs" --repo <repo>` print the candidates) → interview (back-to-back AskUserQuestion calls, as many as
@@ -198,7 +200,9 @@ table with weights and file fences; item→batch coverage) → structure for thr
 [references/execution-models.md](references/execution-models.md): reshape fences for
 disjointness, build the wave map (widest safe waves), classify each batch hands-on vs
 machine-verifiable and each smoke step `Runner: agent | human`, place the smoke
-checkpoints (fewest possible — hands-on waves + one final) → backlog sweep (propose
+checkpoints (fewest possible — hands-on waves + one final) → per-batch census (one
+`census` agent per drafted batch; each item its report opens with is recorded in LOG.md
+as carried or rejected, per scaffolding.md) → backlog sweep (propose
 eligible fold-ins per scaffolding.md; the user picks at plan approval) → plan checks on
 a draft (`node "<skill-dir>/tools/scaffold.mjs" --answers <draft answers> --repo <scratch worktree>`
 writes the draft ledger into a scratch worktree of the base, and `check-ledger.mjs` runs
@@ -225,7 +229,9 @@ runs all of these at once) → scaffold commit on
 
 ## Mode: continue
 
-1. Discovery → exactly one ACTIVE ledger (else ask).
+1. Discovery → the ledger `<id>` names, when one is named (its line must route to
+   `continue` or `close`; AMBIGUOUS, INCOMPLETE, UNKNOWN, `status` or `none` → ask), else
+   exactly one ACTIVE ledger (else ask).
 2. Read the ledger's OWN contract (`00-READBEFORE.md`; legacy names per protocol.md;
    contract absent → protocol.md fills the gaps, ask before acting on ambiguity).
 3. Boot (a pinned contract verifies its skill pin first) + reconcile (for a pinned contract
@@ -236,7 +242,8 @@ runs all of these at once) → scaffold commit on
    only on `SKILL MATCH` — then run the pinned protocol.md's (or a
    legacy contract's own) §Session
    algorithm: repairs (❌ / red tip) first as mini-batches → unanswered 🧪 checkpoint →
-   open the next wave (cut branches + worktrees, spawn ALL of the wave's implementers
+   open the next wave (re-run the `census` agent of any member an earlier wave's tests
+   reach, cut branches + worktrees, spawn ALL of the wave's implementers
    concurrently) → per batch as each lands: fence check → failing-on-base → reviewer +
    gate agents → polish / fix rounds → integrate (dry run, merge, tip validation) →
    next wave, repeating until a checkpoint → per-checkpoint close-out (tip validation,
@@ -302,9 +309,9 @@ Drift corrections happen in `continue`, not here.
 - [references/execution-models.md](references/execution-models.md) — the waved stack:
   building the wave map, placing checkpoints, integration mechanics
 - [references/scaffolding.md](references/scaffolding.md) — detection heuristics,
-  interview, backlog sweep, pre-flight, placeholder registry, self-check
+  interview, census, backlog sweep, pre-flight, placeholder registry, self-check
 - [references/subagent-prompts.md](references/subagent-prompts.md) — implementer /
-  reviewer / test hunter / QA runner / pre-flight / convergence / fix-up skeletons
+  reviewer / test hunter / QA runner / artifact proofer / census / pre-flight / convergence / fix-up skeletons
 - [references/smoke-page.md](references/smoke-page.md) — the checkpoint hand-over
   format: filling and publishing
   [references/smoke-page-template.html](references/smoke-page-template.html),

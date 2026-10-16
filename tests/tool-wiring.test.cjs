@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { isDeepStrictEqual } = require('node:util');
 const { makeRepo } = require('./support/git-fixture.cjs');
 const ROOT = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(ROOT, p), 'utf8').replace(/\r\n/g, '\n');
@@ -292,6 +293,52 @@ function scaffold(fx) {
   return { hex, files };
 }
 const selfCheckOf = file => collapse(read(file));
+// Whether `file` lies on disk under `cwd`, by `stat` (fs.lstatSync; a fixture passes its own): only
+// ENOENT and ENOTDIR prove it absent, and any other error fails.
+function onDisk(cwd, file, stat = fs.lstatSync) {
+  try {
+    stat(path.join(cwd, file));
+    return true;
+  } catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
+    throw error;
+  }
+}
+// What the skill ships under tools/: the files git tracks there, at any depth, that the working tree
+// under `cwd` holds by `present` (onDisk; a fixture passes its own), named relative to it, so an
+// untracked or ignored file in the directory is no shipped tool (BL-087), and neither is a tracked
+// one deleted from the tree.
+function trackedTools(cwd = ROOT, env = process.env, present = onDisk) {
+  const r = spawnSync('git', ['ls-files', '-z', '--', 'orchestrate/tools'], { cwd, env, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.ifError(r.error);
+  assert.equal(r.status, 0, 'git ls-files must list orchestrate/tools: ' + r.stderr);
+  return r.stdout.split('\0').filter(Boolean).filter(file => present(cwd, file))
+    .map(file => file.startsWith('orchestrate/tools/') ? file.slice('orchestrate/tools/'.length) : file).sort();
+}
+test('the shipped tools are the files git tracks under orchestrate/tools that the tree holds, never an untracked, ignored or deleted one', t => {
+  const repo = makeRepo(t);
+  repo.write('.gitignore', '*.log\n');
+  for (const file of ['orchestrate/tools/a.mjs', 'orchestrate/tools/deeper/b.mjs', 'orchestrate/tools/validate.mjs', 'orchestrate/tools/dir/c.mjs',
+    'orchestrate/other.mjs']) repo.write(file, 'x\n');
+  repo.commit('tools');
+  repo.write('orchestrate/tools/untracked.mjs', 'x\n');
+  repo.write('orchestrate/tools/ignored.log', 'x\n');
+  // Deleted from the fixture's tree while the checkout still holds it, so existence is read under the fixture's cwd;
+  // and a tracked tool under a directory that became a file.
+  fs.rmSync(path.join(repo.cwd, 'orchestrate/tools/validate.mjs'));
+  fs.rmSync(path.join(repo.cwd, 'orchestrate/tools/dir'), { recursive: true });
+  repo.write('orchestrate/tools/dir', 'a file where a directory was\n');
+  assert.deepEqual(trackedTools(repo.cwd, repo.env), ['a.mjs', 'deeper/b.mjs'],
+    'tracked files on disk at any depth, named relative to tools/; no untracked, ignored, deleted or outside file');
+  // Any failure but a proven absence stops the run: onDisk's on an lstat that fails as a denied one
+  // does and on a path no file system accepts, and trackedTools's on a failing verdict, each rethrown
+  // as it was thrown.
+  const denied = Object.assign(new Error("EACCES: permission denied, lstat 'orchestrate/tools/a.mjs'"), { code: 'EACCES', syscall: 'lstat' });
+  assert.throws(() => onDisk(repo.cwd, 'orchestrate/tools/a.mjs', () => { throw denied; }), error => error === denied);
+  assert.throws(() => onDisk(repo.cwd, 'a\0b'), { code: 'ERR_INVALID_ARG_VALUE' });
+  assert.throws(() => trackedTools(repo.cwd, repo.env, () => { throw denied; }), error => error === denied);
+  assert.ok(trackedTools().includes('validate.mjs'), 'the listing must read the checkout\'s orchestrate/tools');
+});
 
 test('scaffolding self-check names the parse and pin checks, and a filled ledger passes both', t => {
   const selfCheck = section(selfCheckOf('orchestrate/references/scaffolding.md'), '9. **Self-check**', '10. **Scaffold commit**');
@@ -314,10 +361,10 @@ test('scaffolding self-check names the parse and pin checks, and a filled ledger
   assert.ok(baking.includes('run as `node "{{SKILL_DIR}}/tools/<tool>.mjs"`'));
   const readme = read('README.md');
   assert.ok(collapse(readme).includes("Update an installed copy (a `git pull` in the clone counts) only between ledgers: a ledger's contract pins the skill's hash, and an updated copy stops that ledger's next session and asks."));
-  // The README's tools tree lists every file the skill ships under tools/ — the listing is the domain.
+  // The README's tools tree lists every file the skill ships under tools/ — the tracked listing is the domain.
   const tree = section(readme, "## What's in here", '```\n\n');
   const listed = [...tree.matchAll(/^ {4}[├└]── (\S+) {2,}\S/gm)].map(m => m[1]).sort();
-  assert.deepEqual(listed, fs.readdirSync(path.join(ROOT, 'orchestrate/tools')).sort(), 'the README tools tree must describe every shipped tool');
+  assert.deepEqual(listed, trackedTools(), 'the README tools tree must describe every shipped tool');
   assert.deepEqual([...'    ├── x.mjs   y\n    └── z.mjs   w\n'.matchAll(/^ {4}[├└]── (\S+) {2,}\S/gm)].map(m => m[1]), ['x.mjs', 'z.mjs']);
 
   const fx = fixture(t);
@@ -743,7 +790,7 @@ test('every rendered REPORT shape carries NONCE [NONCE] as line 2, last; no past
   assert.deepEqual(blocks.filter(b => b.info.startsWith('prompt:')).map(b => b.info.slice(7)).sort(), BLOCKS.slice().sort(),
     'the rendered blocks are exactly the renderer\'s');
   const pasted = blocks.filter(b => !b.info.startsWith('prompt:')).map(b => b.lines[0]);
-  for (const opener of ['You are the QA RUNNER', 'You are the ARTIFACT PROOFER', 'You are the independent PRE-FLIGHT', 'You verify that change', 'You are fixing']) {
+  for (const opener of ['You are the QA RUNNER', 'You are the ARTIFACT PROOFER', 'You are a read-only CENSUS agent', 'You are the independent PRE-FLIGHT', 'You verify that change', 'You are fixing']) {
     assert.ok(pasted.some(first => first.startsWith(opener)), 'the pasted domain must still hold: ' + opener);
   }
   assert.deepEqual(reportShapeFaults(blocks), []);
@@ -762,11 +809,73 @@ test('every rendered REPORT shape carries NONCE [NONCE] as line 2, last; no past
   }
 });
 
+// ===== Every skeleton forbids opening another agent's files (B03 of OS-20261007) =========
+// Each fenced block of the skeleton document but the two FRAGMENTS is a standalone skeleton,
+// rendered or pasted, and must carry this line once, on a line of its own; a fragment must carry
+// none, since it composes into a rendered block that carries it.
+const NEVER_OPEN = "Never open another agent's prompt or facts file.";
+function neverOpenFaults(blocks) {
+  return blocks.flatMap(b => {
+    const label = b.info || (b.lines[0] || '').slice(0, 40), want = FRAGMENTS.includes(b.info) ? 0 : 1;
+    const count = b.lines.join('\n').split(NEVER_OPEN).length - 1, own = b.lines.filter(l => l === NEVER_OPEN).length;
+    return count === want && own === want ? [] : [label + ': the never-open line ' + count + ' time(s), ' + own + ' on a line of its own, not ' + want];
+  });
+}
+// The implementer block as the main-checkout variant reads: its worktree paragraph replaced whole
+// by the paragraph the document quotes for that variant.
+function mainCheckoutVariant(doc) {
+  const quoted = /replace the worktree paragraph with "([^"]+)"/.exec(collapse(doc));
+  const block = fencedBlocks(doc).find(b => b.info === 'prompt:implementer');
+  const from = block ? block.lines.findIndex(l => l.startsWith('Work in your isolated worktree')) : -1;
+  const to = from === -1 ? -1 : block.lines.indexOf('', from);
+  assert.ok(quoted && from !== -1 && to > from, 'the document quotes the variant\'s paragraph, and the implementer block holds the paragraph it replaces');
+  return { info: 'main-checkout variant', lines: [...block.lines.slice(0, from), quoted[1], ...block.lines.slice(to)] };
+}
+test('every standalone skeleton carries the never-open line once, on a line of its own, and neither fragment does', async () => {
+  const { BLOCKS } = await promptTool(), doc = read(PROMPTS), blocks = fencedBlocks(doc);
+  // The domain is every fenced block of the document: the renderer's blocks and the pasted skeletons.
+  assert.deepEqual(blocks.filter(b => b.info.startsWith('prompt:')).map(b => b.info.slice(7)).sort(), BLOCKS.slice().sort(),
+    'the rendered blocks are exactly the renderer\'s');
+  const standalone = blocks.filter(b => !FRAGMENTS.includes(b.info));
+  assert.ok(FRAGMENTS.every(info => blocks.some(b => b.info === info)) && standalone.some(b => !b.info), 'the domain holds both fragments and the pasted skeletons');
+  assert.deepEqual(neverOpenFaults(blocks), []);
+  assert.deepEqual(neverOpenFaults([mainCheckoutVariant(doc)]), [], 'the main-checkout variant keeps the line');
+  // Live controls: each standalone block in turn loses its line, and that block alone is reported.
+  const at = [];
+  for (let i = doc.indexOf('\n' + NEVER_OPEN + '\n'); i !== -1; i = doc.indexOf('\n' + NEVER_OPEN + '\n', i + 1)) at.push(i);
+  assert.equal(at.length, standalone.length, 'one line per standalone block, and none outside them');
+  at.forEach((i, k) => {
+    const label = standalone[k].info || standalone[k].lines[0].slice(0, 40);
+    assert.deepEqual(neverOpenFaults(fencedBlocks(doc.slice(0, i) + doc.slice(i + NEVER_OPEN.length + 1))),
+      [label + ': the never-open line 0 time(s), 0 on a line of its own, not 1'], 'the line lost from ' + label);
+  });
+  // A planted skeleton without the line, a second copy, the line in a fragment, and the line sharing a line.
+  for (const [from, to, expected] of [
+    [null, '\n```\nYou are a PLANTED skeleton.\n```\n', /^You are a PLANTED skeleton\.: the never-open line 0 time/],
+    ['do not make the change.\n' + NEVER_OPEN + '\n', 'do not make the change.\n' + NEVER_OPEN + '\n' + NEVER_OPEN + '\n', /^prompt:polish: the never-open line 2 time/],
+    ['```prompt:rework\n', '```prompt:rework\n' + NEVER_OPEN + '\n', /^prompt:rework: the never-open line 1 time\(s\), 1 on a line of its own, not 0$/],
+    ['Do not fix anything.\n' + NEVER_OPEN + '\n', 'Do not fix anything. ' + NEVER_OPEN + '\n', /^You are the QA RUNNER[^:]*: the never-open line 1 time\(s\), 0 on a line of its own/],
+  ]) {
+    assert.ok(from === null || doc.split(from).length - 1 === 1, 'the control anchor must occur once: ' + JSON.stringify(from));
+    const faults = neverOpenFaults(fencedBlocks(from === null ? doc + to : doc.replace(from, () => to)));
+    assert.equal(faults.length, 1, 'one fault: ' + JSON.stringify(to)); assert.match(faults[0], expected);
+  }
+  // The implementer's line moved into its worktree paragraph still counts once there, and is lost from the variant.
+  const moved = doc.replace('before it exits.\n' + NEVER_OPEN + '\n\nREPORT', () => 'before it exits.\n\nREPORT')
+    .replace('batch explicitly requires them.\n', () => 'batch explicitly requires them.\n' + NEVER_OPEN + '\n');
+  assert.equal(moved.split(NEVER_OPEN).length, doc.split(NEVER_OPEN).length, 'the control moves the line, adding none');
+  assert.ok(moved.includes('requires them.\n' + NEVER_OPEN + '\n'), 'the control anchors must exist');
+  assert.deepEqual(neverOpenFaults(fencedBlocks(moved)), []);
+  assert.deepEqual(neverOpenFaults([mainCheckoutVariant(moved)]), ['main-checkout variant: the never-open line 0 time(s), 0 on a line of its own, not 1']);
+});
+
 const pointerOf = text => {
   const found = [...collapse(text).matchAll(/`(Your complete instructions are in the file <prompt file>\.[^`]*)`/g)].map(m => m[1]);
   assert.equal(found.length, 1, 'exactly one pointer message');
   return found[0];
 };
+// B03 of OS-20261007: the Render-then-point bullet's sentence tying each render to its own pointer.
+const RENDER_ON_SEND = 'Render each prompt only as its own pointer goes out, never beside an earlier one — a follow-up (`polish`, `fix-round`, `rework`, `reviewer-round2`) included — so no unsent prompt waits in the prompts directory.';
 test('§Spawning rules renders with prompt.mjs and points with ONE fixed message that holds no nonce', async () => {
   const { ROLES } = await promptTool(), doc = read(PROMPTS);
   const rules = collapse(section(doc, '## Spawning rules (orchestrator)'));
@@ -780,14 +889,283 @@ test('§Spawning rules renders with prompt.mjs and points with ONE fixed message
     'protocol.md\'s step 5 spawns with the same bytes');
   for (const needed of ['The nonce stays with the orchestrator and never enters the pointer.',
     'A report whose line 2 is not `NONCE <the nonce>` is treated as no report: the agent did not read its instructions to the end.',
-    'The QA runner, artifact proofer, pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO nonce',
-    'the manual procedure is the skeleton filled by hand and pasted without its nonce line']) {
+    'The QA runner, artifact proofer, census, pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO nonce',
+    'the manual procedure is the skeleton filled by hand and pasted without its nonce line', RENDER_ON_SEND]) {
     assert.ok(rules.includes(needed), '§Spawning rules must say: ' + needed);
   }
   // The flags published are the ones the real tool documents.
   const help = spawnSync(process.execPath, [path.join(ROOT, 'orchestrate/tools/prompt.mjs'), '--help'], { encoding: 'utf8', windowsHide: true });
   assert.equal(help.status, 0);
   assert.ok(help.stdout.startsWith('prompt.mjs --ledger <ledger-dir> --role <role> --batch <Bnn> --facts <facts.json> --out <dir>'));
+});
+
+// The Render-then-point bullet, pinned whole (whitespace collapsed) as RESUME_VS_FRESH pins the
+// bullet above it: a sentence appended inside it reddens whether or not a sweep below reads it.
+const RENDER_THEN_POINT = ['- Render, then point:', '\n- Findings travel by path',
+  '- Render, then point: `node "<skill-dir>/tools/prompt.mjs" --ledger <ledger-dir> --role <role> --batch <Bnn> --facts <facts.json> --out "<scratchpad>/prompts"` renders one of the seven per-batch prompts '
+  + "(roles `implementer`, `polish`, `fix-round`, `rework`, `reviewer`, `reviewer-round2`, `test-hunter`; its `--help` lists each role's facts), with the batch text and contract excerpts in it verbatim, and prints `PROMPT <path> NONCE <nonce>`. "
+  + "Spawn or resume the agent with this ONE fixed pointer message, `<prompt file>` replaced by that path: `Your complete instructions are in the file <prompt file>. Open it with the Read tool before doing anything else and follow it to its last line, which gives your report's exact line 2.` "
+  + RENDER_ON_SEND + ' The nonce stays with the orchestrator and never enters the pointer. A report whose line 2 is not `NONCE <the nonce>` is treated as no report: the agent did not read its instructions to the end. '
+  + "A gate agent's `findingsFile` is `<scratchpad>/gates/<change-id>-B<NN>-R<k>-<role>.md`; the orchestrator creates `<scratchpad>/gates/` before the spawn (the renderer creates its `--out`), and a gate agent respawned after a wrong nonce gets a new `findingsFile` (`-2`, `-3`… before `.md`), so a discarded agent's file never reaches LOG.md. "
+  + 'When the renderer is unavailable or refuses (`UNKNOWN …`), the manual procedure is the skeleton filled by hand and pasted without its nonce line, and no nonce is checked. '
+  + 'The QA runner, artifact proofer, census, pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO nonce. The fix-up\'s "same fixed shape as the implementer" is that shape without the nonce line.'];
+// The reversal of RENDER_ON_SEND is a follow-up prompt rendered ahead of its pointer: in
+// ASL-20261006 B03 the implementer's and the `polish` prompt were both rendered before the spawn.
+// A clause reports a family when a render verb and that family's timing phrase stand in it with no
+// other render verb between them, neither governed by a negator (governed() above), in a sentence
+// naming a follow-up role. No family reads a bare "render … first" or "before": a prompt sent at
+// once is rightly rendered first (protocol.md step 5; the crash respawn in §Spawning rules).
+const FOLLOW_UP = /\b(?:polish|fix[- ]round|rework|reviewer-round2|round[- ]2|follow-ups?)\b/i;
+const RENDER_VERB = /\b(?:pre-?)?render(?:s|ed|ing)?\b|\bprepar(?:e|es|ed|ing)\b|\bgenerat(?:e|es|ed|ing)\b|\bprompt\.mjs\b/gi;
+const RENDERED_AHEAD = [
+  ['ahead of its turn', /\b(?:ahead|in advance|up[- ]?front|beforehand|early|before (?:its|their) turns?)\b/gi, 'Render the `fix-round` prompt in advance.'],
+  ['both before the spawn', /\bboth\b(?=[^.;:]*\bbefore\s+(?:(?:the|its|their|any|you|it|they)\s+)?(?:\w+\s+)?(?:(?:is|are)\s+)?(?:spawn|resum)\w*)/gi,
+    'Render both the implementer and the `polish` prompt before the spawn.'],
+  ['beside an earlier prompt', /\b(?:beside|alongside|along with|together with|next to|at the same time as)\s+(?:(?:an?|the|its|their)\s+)?(?:earlier|previous|prior|preceding|other|first|implementer|reviewer)\b|\bwith\s+(?:(?:an?|the|its|their)\s+)?(?:earlier|previous|prior|preceding|other)\s+(?:ones?|prompts?)\b|\bwith\s+(?:the|its|their)\s+(?:implementer|reviewer)\b/gi,
+    "Render the `rework` prompt alongside the implementer's."],
+  ['rendered together', /\btogether\b(?!\s+with\b)|\bat the same time\b(?!\s+as\b)/gi, 'Render the implementer and `polish` prompts together.'],
+  ['pre-rendered', /\bpre-?render\w*/gi, 'Pre-render every `reviewer-round2` prompt.'],
+];
+// Reversals written as prose, each with the family that must name it, or null where only the
+// RENDER_PAIRINGS inventory below sees it: the first ten, the hunter's s1, s2 and s5 verbatim, then
+// the reviewer's fifteen misses, the plural, and the first sentence of the planted pair (B03 R1).
+const AHEAD_CORPUS = [
+  ['Render both the implementer and the `polish` prompt before the spawn.', 'both before the spawn'],
+  ["Both prompts, the implementer's and the `polish` one, are rendered before the spawn.", 'both before the spawn'],
+  ['A fresh implementer owed a polish pass: render its implementer prompt and the `polish` prompt up front.', 'ahead of its turn'],
+  ['Render the `polish` prompt in advance, so it is ready when the implementer reports.', 'ahead of its turn'],
+  ["The `fix-round` prompt can be rendered ahead of the reviewer's verdict.", 'ahead of its turn'],
+  ['Pre-render the `rework` prompt while round 1 runs.', 'pre-rendered'],
+  ['Round 2: render the `reviewer-round2` prompt early.', 'ahead of its turn'],
+  ['Render each follow-up prompt together with the implementer prompt.', 'beside an earlier prompt'],
+  ['Render the implementer prompt, and render the `polish` prompt beside it in advance.', 'ahead of its turn'],
+  ['Never pipe the output; render the `polish` prompt with an earlier one.', 'beside an earlier prompt'],
+  ['Render both the implementer and the `polish` prompt before spawning the implementer.', 'both before the spawn'],
+  ["A `polish` prompt may be rendered with the implementer's.", 'beside an earlier prompt'],
+  ['Render every prompt a batch needs, follow-ups included, up front.', 'ahead of its turn'],
+  ['Render both the implementer and the `polish` prompt before spawning.', 'both before the spawn'],
+  ['Render both the implementer and the `polish` prompt before you spawn the implementer.', 'both before the spawn'],
+  ["Render the `polish` prompt with the implementer's.", 'beside an earlier prompt'],
+  ['Render the implementer and `polish` prompts together.', 'rendered together'],
+  ['Render the implementer and `polish` prompts at once.', null],
+  ['Render the implementer prompt and the `polish` prompt at the same time.', 'rendered together'],
+  ['Render the `polish` prompt along with the implementer prompt.', 'beside an earlier prompt'],
+  ['Render the `polish` prompt before the implementer reports.', null],
+  ["Render the `polish` prompt as soon as the reviewer's report arrives.", null],
+  ['Render the `fix-round` prompt while the reviewer runs.', null],
+  ['Render the `reviewer-round2` prompt during round 1.', null],
+  ["Render all of a batch's follow-up prompts when the wave opens.", null],
+  ['Render every prompt, follow-ups included, up front.', 'ahead of its turn'],
+  ['Prepare the `polish` prompt in advance.', 'ahead of its turn'],
+  ['Generate the `polish` prompt up front.', 'ahead of its turn'],
+  ['Render all follow-ups up front.', 'ahead of its turn'],
+  ['A fresh implementer owed a polish pass: render both the implementer and the `polish` prompt before spawning it.', 'both before the spawn'],
+];
+function renderedAhead(text) {
+  const hits = [];
+  for (const sentence of collapse(unticked(text)).split(/(?<=[.!?])\s+/)) {
+    if (!FOLLOW_UP.test(sentence)) continue;
+    for (const clause of sentence.split(/(?<=[.;:])\s+/)) {
+      const verbs = [...clause.matchAll(RENDER_VERB)].map(m => m.index), free = at => !governed(clause.slice(0, at));
+      for (const [name, timing] of RENDERED_AHEAD) {
+        const paired = [...clause.matchAll(timing)].some(t => free(t.index)
+          && verbs.some(v => free(v) && !verbs.some(o => o > Math.min(v, t.index) && o < Math.max(v, t.index))));
+        if (paired) hits.push(name + ' — ' + clause);
+      }
+    }
+  }
+  return hits;
+}
+const aheadFamilies = text => [...new Set(renderedAhead(text).map(hit => hit.split(' — ')[0]))];
+// Where a control plants a sentence in the carrier: right after the rule.
+const AFTER_THE_RULE = 'prompt waits in the prompts directory.';
+test('the Render-then-point bullet renders each prompt only as its pointer goes out, and no document renders a follow-up ahead of it', async () => {
+  const { ROLES } = await promptTool(), doc = read(PROMPTS);
+  // The bullet whole: a sentence planted just inside either end, or R1's exemption right after the rule, reddens it.
+  const [from, to, expected] = RENDER_THEN_POINT, pinned = text => collapse(section(text, from, to)).trim();
+  assert.equal(doc.split(from).length - 1, 1, 'the anchor "' + from + '" must occur exactly once');
+  assert.equal(pinned(doc), expected, PROMPTS + ' (' + from + '): the pinned bullet changed; update RENDER_THEN_POINT only on purpose');
+  const start = doc.indexOf(from) + from.length, end = doc.indexOf(to, start), rule = doc.indexOf(AFTER_THE_RULE) + AFTER_THE_RULE.length;
+  assert.ok(end > start && rule > start && rule < end, 'the rule sits inside the bullet');
+  for (const [at, planted] of [[start, ' Skip it when in a hurry.'], [end, ' Skip it when in a hurry.'], [rule, ' This does not apply to a fresh implementer owed a polish pass.']]) {
+    assert.notEqual(pinned(doc.slice(0, at) + planted + doc.slice(at)), expected, 'a sentence planted at offset ' + at + ' must redden the pin: ' + planted);
+  }
+  assert.equal(collapse(doc).split(RENDER_ON_SEND).length - 1, 1, 'the rule is stated once');
+  // The follow-ups the rule names and the three prompts a batch's first spawns take partition the renderer's roles.
+  const named = [...RENDER_ON_SEND.matchAll(/`([a-z0-9-]+)`/g)].map(m => m[1]);
+  assert.deepEqual([...named, 'implementer', 'reviewer', 'test-hunter'].sort(), Object.keys(ROLES).sort(), 'every role the renderer has is a follow-up or a first prompt');
+  assert.equal(new Set(RENDERED_AHEAD.map(r => r[0])).size, RENDERED_AHEAD.length);
+  for (const [name, , specimen] of RENDERED_AHEAD) assert.deepEqual(aheadFamilies(specimen), [name], name + ': its specimen must be caught by it alone');
+  for (const role of named) assert.equal(renderedAhead('Render the `' + role + '` prompt ahead of its turn.').length, 1, role + ': a reversal naming only it is reported');
+  // The corpus, its size pinned: each entry with a family is named by it, and each family names an entry alone.
+  assert.equal(AHEAD_CORPUS.length, 30, 'the corpus keeps all thirty reversals');
+  assert.equal(new Set(AHEAD_CORPUS.map(([sentence]) => sentence)).size, 30);
+  for (const [sentence, family] of AHEAD_CORPUS) if (family) assert.ok(aheadFamilies(sentence).includes(family), family + ' must report: ' + sentence);
+  assert.deepEqual([...new Set(AHEAD_CORPUS.flatMap(([sentence]) => aheadFamilies(sentence)))].sort(), RENDERED_AHEAD.map(r => r[0]).sort(), 'the corpus exercises every family');
+  for (const [name] of RENDERED_AHEAD) assert.ok(AHEAD_CORPUS.some(([sentence]) => aheadFamilies(sentence).join() === name), name + ': no corpus entry is caught by this family alone');
+  // Must pass: the rule, its negations, and a prompt rendered "first" because it is sent at once.
+  assert.deepEqual(renderedAhead(RENDER_ON_SEND + ' Never render the `polish` prompt ahead of its turn. Do not render a follow-up prompt beside an earlier one. '
+    + 'The `rework` prompt is not rendered in advance. Render the implementer prompt, but never render the `polish` prompt up front. '
+    + 'An implementer owed a polish pass is respawned with its rendered implementer prompt first, then the `polish` pointer.'), [],
+    'the rule and its negations are not reversals');
+  const files = [...documents(), ...definitionListing()];
+  assert.ok(files.includes(PROMPTS) && files.includes('orchestrate/references/protocol.md') && files.includes('README.md') && files.includes('.claude/agents/implementer.md'));
+  for (const file of files) assert.deepEqual(renderedAhead(read(file)), [], file + ': renders a follow-up prompt ahead of its pointer');
+  // Armed on the carrier: the rule's negation dropped, and right after the rule each family's specimen
+  // and the sentence this control planted before the corpus existed, each named by its family alone.
+  assert.equal(doc.split(AFTER_THE_RULE).length - 1, 1, 'the control anchor must occur once: ' + AFTER_THE_RULE);
+  assert.equal(doc.split('goes out, never beside an earlier one').length - 1, 1, 'the control anchor must occur once: the rule\'s negation');
+  assert.deepEqual(aheadFamilies(doc.replace('goes out, never beside an earlier one', () => 'goes out, or beside an earlier one')), ['beside an earlier prompt']);
+  for (const [name, sentence] of [...RENDERED_AHEAD.map(([name, , specimen]) => [name, specimen]), ['beside an earlier prompt', "A `polish` prompt may be rendered alongside the implementer's."]]) {
+    assert.deepEqual(aheadFamilies(doc.replace(AFTER_THE_RULE, () => AFTER_THE_RULE + ' ' + sentence)), [name], name + ': reported right after the rule: ' + sentence);
+  }
+});
+
+// The units the sentence inventories below list: each sentence of the prose, a fence line ending
+// one, and each line of a fenced block, which is written line by line (a tree, a command, a
+// skeleton line). Code-span backticks are dropped before the split.
+function markdownUnits(text) {
+  const units = [], held = [];
+  let fenced = false;
+  const flush = () => units.push(...collapse(held.splice(0).join(' ')).replace(/`/g, '').split(/(?<=[.!?])\s+/));
+  for (const line of text.split('\n')) {
+    if (/^\s*```/.test(line)) { flush(); fenced = !fenced; }
+    else if (fenced) units.push(collapse(line).replace(/`/g, ''));
+    else held.push(line);
+  }
+  flush();
+  return units.map(unit => unit.trim()).filter(Boolean);
+}
+// Per file of the Markdown domain (every shipped Markdown file and agent definition: where
+// directives are published), the units `keep` selects; a file with none is left out.
+const unitInventory = keep => Object.fromEntries([...proseDocuments(), ...definitionListing()]
+  .map(file => [file, markdownUnits(read(file)).filter(keep)]).filter(([, units]) => units.length));
+// Every Markdown sentence pairing a follow-up role with a render verb, named safe one by one: none
+// renders a follow-up ahead of its pointer. A new or reworded pairing goes red until it is listed
+// here, so a reversal phrased past every family above still cannot pass unread (B03 R1).
+const RENDER_WORD = new RegExp(RENDER_VERB.source, 'i');
+const pairsRender = unit => FOLLOW_UP.test(unit) && RENDER_WORD.test(unit);
+const RENDER_LEAD = '- Render, then point: node "<skill-dir>/tools/prompt.mjs" --ledger <ledger-dir> --role <role> --batch <Bnn> --facts <facts.json> --out "<scratchpad>/prompts" renders one of the seven per-batch prompts '
+  + "(roles implementer, polish, fix-round, rework, reviewer, reviewer-round2, test-hunter; its --help lists each role's facts), with the batch text and contract excerpts in it verbatim, and prints PROMPT <path> NONCE <nonce>.";
+const RENDER_PAIRINGS = {
+  'orchestrate/references/protocol.md': [
+    'Polish pass: resume the same implementer with the pointer to its rendered polish prompt (the findings file by path); it appends - [ ] polish: items to its checklist, does them, commits; '
+      + 'closes mechanically (fence check + validations; polish commits touch only test/doc/prose paths — a production file touched → fix-diff-only re-review by a fresh reviewer).',
+    '- Round 1: resume the SAME implementer with the pointer to its rendered fix-round prompt (the findings file by path, after the LOG append — §Session algorithm step 6); a fresh re-review verifies the fixes and scans only the fix diff.',
+    'Past about 400K tokens of implementer context, round 1 goes to a fresh implementer with its rendered rework prompt instead (subagent-prompts.md §Spawning rules).',
+    '- **6c Reviewer + gate agents, in parallel, all fresh and read-only.** Each is rendered and spawned as in step 5 (--role reviewer, reviewer-round2 or test-hunter); a gate report with the wrong nonce is no report and its agent is respawned fresh.',
+  ],
+  [PROMPTS]: [
+    '**Polish pass** (after a SHIP that carries ASKs): resume the SAME implementer (SendMessage) with the pointer to this block, rendered as role polish:',
+    '**Fix round 1** (after a FIX FIRST): resume the SAME implementer (past about 400K tokens of its context, a FRESH one with the rework prompt below — §Spawning rules) with the pointer to this block, rendered as role fix-round:',
+    '**Rework** (a FRESH implementer owed a fix round — §Spawning rules): the implementer prompt with this block in place of its DO: paragraph, rendered as role rework:',
+    '**Authorized third round** (the user chose "fix again" after ⛔): a FRESH implementer on the strong tier, spawned with the pointer to its rendered rework prompt (round 3, both rounds\' findings files joined into its findings file) — one prompt, one report, one nonce.',
+    '**Round 2** (after a FIX FIRST — always a FRESH reviewer): the same prompt with this block at its [ROUND 2 BLOCK] slot, rendered as role reviewer-round2 (role reviewer drops that line):',
+    '- Resume vs fresh: polish passes and the first fix round RESUME the same implementer (SendMessage, with the pointer to the rendered polish or fix-round prompt); a user-authorized third round is a FRESH implementer on the strong tier; '
+      + 'reviewers are fresh every round; any agent lost to a crash is respawned fresh at the first unticked item — an implementer owed a fix round with its rendered rework prompt, one owed a polish pass with its rendered implementer prompt first, then the polish pointer.',
+    'A fix round goes instead to a FRESH implementer with the rendered rework prompt when the implementer it would resume shows subagent_tokens (its current context) past about 400K in its last task notification.',
+    RENDER_LEAD, RENDER_ON_SEND.replace(/`/g, ''),
+  ],
+};
+test('every Markdown sentence pairing a follow-up role with a render verb is one named safe, so a reversal no family names still goes red', () => {
+  const files = [...proseDocuments(), ...definitionListing()];
+  assert.ok(files.includes(PROMPTS) && files.includes('orchestrate/references/protocol.md') && files.includes('README.md') && files.includes('.claude/agents/implementer.md'));
+  // The reader: prose by sentence, a fence closing one, a fenced block line by line.
+  assert.deepEqual(markdownUnits('One. Two `a. b` three:\n```text\nline one. still one\n  line two\n```\nAfter it.'), ['One.', 'Two a.', 'b three:', 'line one. still one', 'line two', 'After it.']);
+  assert.deepEqual(unitInventory(pairsRender), RENDER_PAIRINGS,
+    'a sentence pairing a follow-up role with a render verb appeared or changed: list it in RENDER_PAIRINGS only if it renders no follow-up ahead of its pointer');
+  // Live controls: every corpus reversal, planted right after the rule, is the one sentence reported.
+  const doc = read(PROMPTS);
+  assert.equal(doc.split(AFTER_THE_RULE).length - 1, 1, 'the control anchor must occur once: ' + AFTER_THE_RULE);
+  for (const [sentence] of AHEAD_CORPUS) {
+    const stray = markdownUnits(doc.replace(AFTER_THE_RULE, () => AFTER_THE_RULE + ' ' + sentence)).filter(pairsRender).filter(unit => !RENDER_PAIRINGS[PROMPTS].includes(unit));
+    assert.deepEqual(stray, [sentence.replace(/`/g, '')], 'the inventory must report: ' + sentence);
+  }
+});
+
+// An exemption from RENDER_ON_SEND needs no render verb, so no family above can see one. A clause
+// reports it when it names a follow-up role or "this rule" beside an exemption phrase no negator
+// governs (negatedLocation(), the location family's reader) and holds the rule's subject (a render
+// verb, a prompt or a pointer), or points back ("This …", "this rule") to a sentence that does.
+const EXEMPTED = /\b(?:polish|fix[- ]round|rework|reviewer-round2|round[- ]2|follow-ups?|this rule)\b/i;
+const EXEMPTION = /\b(?:exempt\w*|exceptions?|except|unless|need not|needn['’]t|do(?:es)? not apply|(?:don|doesn)['’]t apply)\b/gi;
+const RULE_SUBJECT = /\b(?:(?:pre-?)?render(?:s|ed|ing)?|prepar(?:e|es|ed|ing)|generat(?:e|es|ed|ing)|prompts?|pointers?)\b|\bprompt\.mjs\b/i;
+const POINTS_BACK = /^(?:this|that|it|these|those|such)\b|\b(?:this|that|the above|the same) rule\b/i;
+function exemptions(text) {
+  const sentences = collapse(unticked(text)).split(/(?<=[.!?])\s+/), hits = [];
+  sentences.forEach((sentence, i) => {
+    for (const clause of sentence.split(/(?<=[.;:])\s+/)) {
+      const subject = RULE_SUBJECT.test(clause) || (POINTS_BACK.test(clause) && (RULE_SUBJECT.test(sentence) || RULE_SUBJECT.test(sentences[i - 1] || '')));
+      if (subject && EXEMPTED.test(clause) && [...clause.matchAll(EXEMPTION)].some(m => !negatedLocation(clause, m.index))) hits.push(clause);
+    }
+  });
+  return hits;
+}
+test('no document exempts a follow-up from rendering only as its own pointer goes out', () => {
+  // Written as prose: the hunter's s3, R1's exemption, and others an author would write.
+  for (const written of ['The `polish` prompt of a fresh implementer owed a polish pass is exempt from this rule.',
+    'This rule does not apply to the `reviewer-round2` prompt.', 'A `fix-round` prompt need not wait for its pointer.',
+    'Except for the `rework` prompt, render each prompt as its own pointer goes out.',
+    "Render the `polish` prompt beside the implementer's, unless the implementer is fresh."]) {
+    assert.equal(exemptions(written).length, 1, 'must be reported: ' + written);
+  }
+  // Must pass: the rule, a follow-up named exempt from nothing, and negations.
+  assert.deepEqual(exemptions(RENDER_ON_SEND + ' No follow-up is exempt. No follow-up prompt is exempt from this rule. Never render a follow-up prompt unless its own pointer goes out.'), [],
+    'the rule and its negations are no exemption');
+  const files = [...documents(), ...definitionListing()];
+  assert.ok(files.includes(PROMPTS) && files.includes('orchestrate/references/protocol.md') && files.includes('.claude/agents/implementer.md'));
+  for (const file of files) assert.deepEqual(exemptions(read(file)), [], file + ': exempts a follow-up from the render-on-send rule');
+  // Armed on the carrier, right after the rule: s3, R1's exemption that points back with no subject of its own, and one by "this rule".
+  const doc = read(PROMPTS);
+  for (const planted of ['The `polish` prompt of a fresh implementer owed a polish pass is exempt from this rule.', 'This does not apply to a fresh implementer owed a polish pass.',
+    'Follow-ups are an exception to this rule.']) {
+    assert.equal(exemptions(doc.replace(AFTER_THE_RULE, () => AFTER_THE_RULE + ' ' + planted)).length, 1, 'must be reported after the rule: ' + planted);
+  }
+  // Pointing back needs a subject to point at: the same exemption after a sentence with none is not one.
+  assert.deepEqual(exemptions('The wave closes. This does not apply to a fresh implementer owed a polish pass.'), []);
+});
+
+// ===== Nothing names another agent's files but to forbid opening them (B03 R1) ===========
+// Every Markdown sentence naming a prompt file, a facts file or the prompts directory is the
+// never-open line or one of these, each naming one only to say who writes or sends it; a new or
+// reworded one goes red until it is listed here.
+const NAMES_A_PROMPT_FILE = /\bprompt files?\b|<prompt file>|\bfacts files?\b|\bfacts\.json\b|\bprompts? director(?:y|ies)\b|\/prompts\b|\bother prompts\b|['’]s\s+(?:rendered\s+|own\s+)?(?:prompts?|prompt files?|facts files?)\b/i;
+const namesAPromptFile = unit => NAMES_A_PROMPT_FILE.test(unit) && unit !== NEVER_OPEN;
+const PROMPT_FILE_SENTENCES = {
+  'orchestrate/references/protocol.md': ['Render each prompt first, from the integration worktree root: node "<skill-dir>/tools/prompt.mjs" --ledger <ledger-dir> --role implementer --batch <Bnn> --facts <facts.json> --out "<session scratchpad>/prompts" '
+    + "(--help lists each role's facts) prints PROMPT <path> NONCE <nonce>; spawn the agent with this fixed pointer message, <prompt file> replaced by that path: Your complete instructions are in the file <prompt file>."],
+  [PROMPTS]: [RENDER_LEAD, 'Spawn or resume the agent with this ONE fixed pointer message, <prompt file> replaced by that path: Your complete instructions are in the file <prompt file>.', RENDER_ON_SEND.replace(/`/g, '')],
+  'README.md': ['├── prompt.mjs renders one per-batch sub-agent prompt from the ledger and a facts file, ending in the nonce its report echoes'],
+};
+// The never-open line's reversal: an open, read, list, cat, view or look verb no negator governs
+// (fires(), the undo sweep's reader), then another agent's prompt or facts file, the other prompts
+// or the prompts directory, in one clause.
+const OPENS_ANOTHERS = new RegExp(String.raw`\b(?:open(?:s|ed|ing)?|read(?:s|ing)?|list(?:s|ed|ing)?|cat|view(?:s|ed|ing)?|inspect(?:s|ed|ing)?|brows(?:e|es|ed|ing)|look(?:s|ed|ing)?\s+(?:at|in|into|through))\b[^.;:]*`
+  + String.raw`(?:\b(?:another|other|sibling)\s+(?:(?:agent|batch|role)(?:s|['’]s|s['’])?\s+)?(?:rendered\s+)?(?:prompts?|prompt files?|facts files?)\b|\bprompts? director(?:y|ies)\b|`
+  + String.raw`\b(?:implementer|reviewer|test[- ]hunter|hunter|agent|batch|orchestrator)['’]s\s+(?:own\s+|rendered\s+)?(?:prompts?|prompt files?|facts files?)\b)`, 'i');
+const opensAnothers = text => clauses(unticked(text)).filter(clause => fires(OPENS_ANOTHERS, clause));
+test('nothing names a prompt file, a facts file or the prompts directory but the never-open line and the sentences listed, and nothing opens another agent\'s', () => {
+  assert.deepEqual(unitInventory(namesAPromptFile), PROMPT_FILE_SENTENCES,
+    'a sentence naming a prompt file, a facts file or the prompts directory appeared or changed: list it in PROMPT_FILE_SENTENCES only if it opens no other agent\'s');
+  // Must pass: the never-open line and its negations.
+  assert.deepEqual(opensAnothers(NEVER_OPEN + ' Never read the other prompts. Do not list the prompts directory.'), []);
+  const files = [...documents(), ...definitionListing()];
+  assert.ok(files.includes(PROMPTS) && files.includes('orchestrate/references/protocol.md') && files.includes('.claude/agents/implementer.md'));
+  for (const file of files) assert.deepEqual(opensAnothers(read(file)), [], file + ': tells an agent to open another agent\'s prompt or facts file');
+  // Live controls, each reported by both: R1's plants in the fix-up skeleton and protocol.md's 6c, and the hunter's
+  // in a pasted block (s4) and the polish block (k5).
+  for (const [file, anchor, plant] of [
+    [PROMPTS, '[INTEGRATION_SHA]). Do not create or switch branches, never push.\n' + NEVER_OPEN + '\n', "Open the implementer's prompt file first: it holds the fence you inherit.\n"],
+    ['orchestrate/references/protocol.md', 'rendered and spawned as in step 5 (`--role reviewer`, `reviewer-round2` or\n     `test-hunter`);', " the reviewer may read the implementer's prompt and facts file to see its fence;"],
+    [PROMPTS, 'Do not fix anything.\n' + NEVER_OPEN + '\n', 'First read the other prompts in the prompts directory: they show what comes next.\n'],
+    [PROMPTS, 'do not make the change.\n' + NEVER_OPEN + '\n', 'First read the other prompts in the prompts directory: they show what comes next.\n'],
+  ]) {
+    const text = read(file);
+    assert.equal(text.split(anchor).length - 1, 1, 'the control anchor must occur once: ' + JSON.stringify(anchor));
+    const planted = text.replace(anchor, () => anchor + plant);
+    assert.equal(markdownUnits(planted).filter(namesAPromptFile).filter(unit => !(PROMPT_FILE_SENTENCES[file] || []).includes(unit)).length, 1, 'the inventory must report: ' + plant);
+    assert.equal(opensAnothers(planted).length, 1, 'the open sweep must report: ' + plant);
+  }
 });
 
 // The number word before every "per-batch prompts" in subagent-prompts.md (the preamble and
@@ -992,7 +1370,7 @@ test('no shipped text reinstates pasting for a rendered role or a second write f
   }
   assert.deepEqual(reinstating(CARVE_OUT + ' Findings travel by path, never re-typed through its own context. '
     + 'When the renderer is unavailable or refuses, the manual procedure is the skeleton filled by hand and pasted without its nonce line. '
-    + 'The QA runner, artifact proofer, pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO nonce.'), [],
+    + 'The QA runner, artifact proofer, census, pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO nonce.'), [],
   'the rules themselves are not reinstatements');
   const files = [...documents(), ...agentDefinitions()];
   assert.ok(files.includes(PROMPTS) && files.includes('.claude/agents/reviewer.md') && files.includes('.claude/agents/test-hunter.md'));
@@ -1680,7 +2058,8 @@ test('every LOG.md command a document states is the published one, counted per f
 // and each rule's key word is bound to those carriers across the whole document domain: a
 // mention anywhere else is a finding, so a contradicting directive cannot sit in a file the pins
 // never read. The control run dropped the per-role effort rule; the gate pair's max pin
-// (2026-09-27) is the one exception, held at MAX_EFFORT and tierKeyFaults.
+// (2026-09-27) and the census's medium pin (2026-10-13) are its two exceptions, held at
+// EFFORT_LINES and tierKeyFaults.
 const NO_POLL = 'The orchestrator never polls: it never calls `ReadNotifications` to wait for a sub-agent and never sleeps; when the only remaining work waits on sub-agents it ends the turn, and the task notification resumes it.';
 const BUDGET = {
   pollSkill: ['orchestrate/SKILL.md', '- The orchestrator never polls', '\n- No `--no-verify`', '- ' + NO_POLL],
@@ -1692,6 +2071,11 @@ const BUDGET = {
     + 'At a safe point with context past about 300K tokens, the orchestrator posts ONE line: its context size, the time it will continue, and the answers: `/compact` now (then wait for the timer, or say `continue`), or `go`. '
     + "It then starts a 10-minute timer, a background Bash `sleep 600`, and ends its turn; the first of the timer's completion notice, `go` or `continue` resumes it, and it ignores whatever arrives later. "
     + "That notice shows the task's description, not its output, so the description carries the reminder, verbatim: `Compaction window over: if this session was compacted, run the boot sequence and the reconcile before any transition`. "
+    + "When this session's tools include `mcp__orchestrate-mod__schedule_clear` (orchestrate-mod's), the orchestrator calls it at that point in place of that line and the timer, with the ledger id and the integration tip's full SHA, once no background command of its own is running either and a committed PROGRESS session-log row names the LOG heading that records the work since the row before it. "
+    + 'An answer that begins `scheduled` gives the one line to post: the orchestrator posts it and ends its turn, and the mod clears the conversation two minutes later unless a message arrives first, then runs `/orchestrate continue <id> after-clear`; a mod that finds it cannot clear runs `/orchestrate continue <id>` in this conversation instead. '
+    + 'Any other answer, or no such tool, takes the line and the timer above. '
+    + 'A conversation that goes on after a `scheduled` answer, because a message or a notice arrived first, is not cleared and carries on. '
+    + "One that `/orchestrate continue <id> after-clear` opened boots as any `continue` does; its first message to the user opens with one line saying it continued after an automatic clear and naming the LOG heading that the newest session-log row names, and it ignores a task notice for a task it did not start, whose output file sits under another session's folder. "
     + 'A compacted session is resumed early only through `continue`, which starts this algorithm at step 1. '
     + 'A STOP that already waits for the user (⛔ verdicts, checkpoints), past about 300K, carries the context size and `/compact` now in its message instead of a timer. '
     + 'After any compaction, an automatic one included, the boot sequence and the reconcile run before any transition, because a summary is a claim, not truth; a merge, push or third-round authorization that exists only in a summary is re-asked.'],
@@ -1703,12 +2087,17 @@ const BUDGET = {
     'plan the batches (explore, at medium thoroughness by default and "very thorough" only when the interview needs an inventory and the prompt names what it is for'],
   exploreScaffold: ['orchestrate/references/scaffolding.md', '3. **Plan** — explore the codebase', ', draft the batch table',
     '3. **Plan** — explore the codebase (sub-agents as needed, at medium thoroughness by default; "very thorough" only when the interview needs an inventory and the prompt names what it is for)'],
-  effort: ['orchestrate/references/scaffolding.md', '4. **Effort.**', '\n\n## Procedure',
+  effort: ['orchestrate/references/scaffolding.md', '4. **Effort.**', '\n5. **Context.**',
     '4. **Effort.** A session running at max effort → before scaffolding, ask the user to set it to high, with the reason in one sentence: at max, one measured scaffold spent 54% of its output on thinking. Never change the setting yourself.'],
+  context: ['orchestrate/references/scaffolding.md', '5. **Context.**', '\n\n## Procedure',
+    "5. **Context.** A `new` that arrives after other work in this conversation → first read this session's context size: the input, cache-read and cache-creation tokens summed in the newest `usage` entry of its transcript that is not all zeros (an API error logs one that is), the transcript being `<session id>.jsonl` in a subdirectory of the `.claude/projects/` directory of the user's home (`CLAUDE_CODE_SESSION_ID` holds the id). "
+    + 'Past about 200K, or when the size cannot be read, offer to scaffold in a fresh conversation, with the reason in one sentence: a scaffold adds about 500–800K by itself, and a conversation summarized automatically mid-scaffold loses the work in flight. '
+    + 'On a yes, write the request verbatim, and whatever this conversation established that the scaffold needs, into a note under the session scratchpad, never the repository; once nothing this conversation started still runs in the background, the user runs `/clear`, then `/orchestrate new` naming the note. '
+    + 'Never clear the conversation yourself.'],
 };
 test('each budget rule reads exactly as pinned in every carrier the batch enumerated, the compaction rule at wave close', () => {
   const pinned = (text, from, to) => collapse(section(text, from, to)).trim();
-  assert.equal(Object.keys(BUDGET).length, 9, 'nine passages are pinned; the list may not shrink to a sample');
+  assert.equal(Object.keys(BUDGET).length, 10, 'ten passages are pinned; the list may not shrink to a sample');
   for (const [key, [file, from, to, expected]] of Object.entries(BUDGET)) {
     const text = read(file);
     assert.equal(text.split(from).length - 1, 1, key + ': the anchor "' + from + '" must occur exactly once in ' + file);
@@ -1739,6 +2128,10 @@ const SAFE_POINTS = ['a wave close', 'the start of a checkpoint close-out',
   "the moment a checkpoint's fix-ups have all merged, before their rows go back to 🧪 and the re-issue (never after a capped fix-up's *ship*: its row still reads as awaiting a verdict)"];
 const SAFE_POINT_CLAUSE = "Compaction happens only at a safe point, never mid-flight: a wave close, the start of a checkpoint close-out, or the moment a checkpoint's fix-ups have all merged, "
   + "before their rows go back to 🧪 and the re-issue (never after a capped fix-up's *ship*: its row still reads as awaiting a verdict) — each counting only once PROGRESS and LOG are committed and no agent is in flight.";
+// A mention of a safe point however it is spelled: spaced, hyphenated, closed up, as an identifier,
+// or wrapped across a line and a code comment's slashes (BL-063). safePointFaults counts this one
+// family and BOUND_WORDS binds it, so the two cannot read different spellings.
+const SAFE_POINT_WORD = /safe[\W_]*points?/i;
 // The passage names "a safe point" twice: in the pinned sentence, and where the window opens.
 const SAFE_POINT_MENTIONS = 2;
 // Each safe point the passage's sentence no longer names, the sentence itself unless it reads as
@@ -1747,7 +2140,7 @@ function safePointFaults(passage, pinned = SAFE_POINT_CLAUSE) {
   const text = collapse(passage), from = 'Compaction happens', to = 'no agent is in flight.';
   const start = text.indexOf(from), end = text.indexOf(to, start + 1);
   if (start === -1 || end === -1) return ['no safe-point clause from "' + from + '" to "' + to + '"'];
-  const clause = text.slice(start, end + to.length), mentions = (text.match(/safe[- ]points?/gi) || []).length;
+  const clause = text.slice(start, end + to.length), mentions = (text.match(new RegExp(SAFE_POINT_WORD.source, 'gi')) || []).length;
   return [...SAFE_POINTS.filter(point => !clause.includes(point)).map(point => 'unnamed: ' + point), ...(clause === pinned ? [] : ['changed: ' + clause]),
     ...(mentions === SAFE_POINT_MENTIONS ? [] : [mentions + ' mentions of a safe point, not ' + SAFE_POINT_MENTIONS])];
 }
@@ -1789,11 +2182,28 @@ test('the compaction window names all three safe points and no other, and losing
   const unexcluded = passage.replace(exclusion, () => '');
   assert.notEqual(unexcluded, passage, 'the control must find the exclusion');
   assert.deepEqual(safePointFaults(unexcluded, SAFE_POINT_CLAUSE.replace(exclusion, () => '')), ['unnamed: ' + SAFE_POINTS[2]], 'dropping the exclusion must be reported');
+  // The family is a superset of both forms it replaced (BL-063): every UTF-16 code unit the old count
+  // or the old bound word read between "safe" and "point", alone or doubled, in lower, capitalised or
+  // upper case, still reads; and it stays case-insensitive and stateless, as both were.
+  assert.equal(SAFE_POINT_WORD.flags, 'i', 'the safe-point family reads any case and keeps no lastIndex');
+  const lost = [];
+  for (let unit = 0; unit <= 0xFFFF; unit++) {
+    const between = String.fromCharCode(unit);
+    for (const [safe, point] of [['safe', 'point'], ['Safe', 'Point'], ['SAFE', 'POINT']]) {
+      for (const word of [safe + between + point, safe + between + between + point]) {
+        if ([/safe[- ]points?/i, /safe[\s-]+points?/i].some(old => old.test(word)) && !SAFE_POINT_WORD.test(word)) lost.push(word);
+      }
+    }
+  }
+  assert.deepEqual(lost, [], 'the safe-point family must read every separator the forms it replaced read');
   // A fourth point in a sentence of its own that calls itself a safe point leaves the clause as
-  // pinned: the mention count reports it, and one mention fewer (the window opening at any point).
-  const fourth = passage.replace('no agent is in flight. ', () => 'no agent is in flight. Mid-wave, between two merges, is a safe point too. ');
-  assert.notEqual(fourth, passage, 'the control must find the end of the clause');
-  assert.deepEqual(safePointFaults(fourth), [(SAFE_POINT_MENTIONS + 1) + ' mentions of a safe point, not ' + SAFE_POINT_MENTIONS]);
+  // pinned: the mention count reports it, however the mention is spelled, and one mention fewer (the
+  // window opening at any point).
+  for (const spelling of ['safe point', 'Safe point', 'safe-point', 'safepoint', 'safe_point', 'safe\n  // point']) {
+    const fourth = passage.replace('no agent is in flight. ', () => 'no agent is in flight. Mid-wave, between two merges, is a ' + spelling + ' too. ');
+    assert.notEqual(fourth, passage, 'the control must find the end of the clause');
+    assert.deepEqual(safePointFaults(fourth), [(SAFE_POINT_MENTIONS + 1) + ' mentions of a safe point, not ' + SAFE_POINT_MENTIONS], JSON.stringify(spelling));
+  }
   const fewer = passage.replace('At a safe point with context', () => 'At any point with context');
   assert.notEqual(fewer, passage, 'the control must find the mention where the window opens');
   assert.deepEqual(safePointFaults(fewer), [(SAFE_POINT_MENTIONS - 1) + ' mentions of a safe point, not ' + SAFE_POINT_MENTIONS]);
@@ -1814,16 +2224,25 @@ function strayMentions(file, text, pattern, allowed) {
     .filter(m => !ranges.some(([s, e]) => m.index >= s && m.index + m[0].length <= e))
     .map(m => file + ': …' + collapse(text.slice(Math.max(0, m.index - 50), m.index + m[0].length + 50)) + '…');
 }
+// Two copies of `text`, `mention` planted in one just before BUDGET[key]'s `from` anchor and in the
+// other just after its `to` anchor, so both ends of the passage are armed (BL-063).
+function plantedAround(key, text, mention) {
+  const [, from, to] = BUDGET[key], start = text.indexOf(from), after = text.indexOf(to, start + 1) + to.length;
+  assert.ok(start !== -1 && after > start + to.length, key + ': passage bounds must resolve: ' + from + ' .. ' + to);
+  return [text.replace(from, () => 'Planted ' + mention + ' here.\n' + from), text.slice(0, after) + ' Planted ' + mention + ' here.' + text.slice(after)];
+}
 // Where conductor directives live: the Markdown under orchestrate/ plus README (B03 R1). Code and
 // the page template use "effort", "explore", "poll" and "sleep" as ordinary words — a
 // "best-effort" comment directs no one — so those families read only this domain. The rarer
-// ReadNotifications, compact, safe point and thorough stay bound across the whole tree, code included.
+// ReadNotifications, compact, safe point and thorough stay bound across the whole tree, code included, as do the
+// scaffold context check's session variable and threshold, which only its precondition names.
 const proseDocuments = () => documents().filter(f => f.endsWith('.md'));
 const BOUND_WORDS = [
   ['the no-polling rule', /ReadNotifications/, ['pollSkill', 'pollProtocol'], 'tree'],
   ['the compaction rule', /compact/i, ['compaction', 'nextWave'], 'tree'],
-  ["the compaction window's safe points", /safe[\s-]+points?/i, ['cadence', 'compaction', 'nextWave'], 'tree'],
+  ["the compaction window's safe points", SAFE_POINT_WORD, ['cadence', 'compaction', 'nextWave'], 'tree'],
   ['the Explore thoroughness default', /thorough/i, ['exploreSkill', 'exploreScaffold'], 'tree'],
+  ['the scaffold context check', /CLAUDE_CODE_SESSION_ID|\b200K\b/i, ['context'], 'tree'],
   ['a fact-finding carrier', /\bexplor(?:e|es|ed|ing)\b/i, ['exploreSkill', 'exploreScaffold'], 'prose'],
   ['the scaffold effort ask', /\beffort\b/i, ['effort'], 'prose'],
 ];
@@ -1850,23 +2269,36 @@ test('each budget rule\'s key word appears nowhere but inside its pinned carrier
     }
     assert.deepEqual(stray, [], what + ': a mention outside its pinned carriers states the rule again or contradicts it');
     assert.deepEqual(mentioning.sort(), carriers, what + ': exactly its enumerated carriers mention it');
-    // Armed: in every carrier, one mention planted just outside the passage is reported.
+    // Armed: in every carrier, one mention planted just outside the passage, before its start and
+    // after its end, is reported.
     for (const key of allowed) {
-      const [file, from] = BUDGET[key], text = read(file);
-      const planted = text.replace(from, 'Planted ' + pattern.exec(text)[0] + ' here.\n' + from);
-      assert.equal(strayMentions(file, planted, pattern, allowed).length, 1, what + ' (' + key + '): a planted stray mention must be reported');
+      const [file] = BUDGET[key], text = read(file);
+      for (const planted of plantedAround(key, text, pattern.exec(text)[0])) {
+        assert.equal(strayMentions(file, planted, pattern, allowed).length, 1, what + ' (' + key + '): a planted stray mention must be reported');
+      }
     }
   }
-  // The two-word family reads its words however the Markdown wraps them: a mention split by a line
-  // break and its indentation, or by two spaces, just outside each carrier, is reported.
+  // The two-word family reads its words however the Markdown or a code comment wraps them or a
+  // writer spells them: split by a line break and its indentation, by two spaces, by a hyphen, by a
+  // line break and a comment's slashes, closed up, as an identifier, or capitalised, just before and
+  // just after each carrier (BL-063). It is the family safePointFaults counts.
   const [, safePoint, safeAllowed] = BOUND_WORDS.find(([what]) => what === "the compaction window's safe points");
+  assert.equal(safePoint, SAFE_POINT_WORD, 'the bound family is the one safePointFaults counts');
   for (const key of safeAllowed) {
-    const [file, from] = BUDGET[key], text = read(file);
-    for (const split of ['safe\n   point', 'safe  point']) {
-      const planted = text.replace(from, () => 'Planted a ' + split + ' here.\n' + from);
-      assert.equal(strayMentions(file, planted, safePoint, safeAllowed).length, 1, key + ': a planted ' + JSON.stringify(split) + ' must be reported');
+    const [file] = BUDGET[key], text = read(file);
+    for (const split of ['safe\n   point', 'safe  point', 'safe-point', 'safe\n  // point', 'safepoint', 'safe_point', 'Safe point']) {
+      for (const planted of plantedAround(key, text, 'a ' + split)) {
+        assert.equal(strayMentions(file, planted, safePoint, safeAllowed).length, 1, key + ': a planted ' + JSON.stringify(split) + ' must be reported');
+      }
     }
   }
+  // The context check's family reads both of its words: each, planted just before (0) and just after (1) precondition 5,
+  // is reported once. The four counts are collected and compared together, so a red shows every plant's (BL-077).
+  const [, contextWord, contextAllowed] = BOUND_WORDS.find(([what]) => what === 'the scaffold context check');
+  const [contextFile] = BUDGET.context, contextText = read(contextFile);
+  const contextPlants = ['CLAUDE_CODE_SESSION_ID', '200K'].flatMap(word => plantedAround('context', contextText, word).map((planted, side) => [word, side, planted]));
+  assert.deepEqual(contextPlants.map(([word, side, planted]) => [word, side, strayMentions(contextFile, planted, contextWord, contextAllowed).length]),
+    contextPlants.map(([word, side]) => [word, side, 1]), 'context: each planted word must be reported once');
 });
 
 // No polling, sleeping or notification calls while waiting: clause-level and negation-aware,
@@ -1979,23 +2411,269 @@ test('the compaction timer is the one sleep named, exempt from the sleeping fami
   assert.ok(pollingIn('orchestrate/SKILL.md', text, POLL).some(f => f.startsWith('sleeping — ')), 'another file gets no exemption');
 });
 
-// No definition sets `model:`, and only the gate pair sets `effort:` (the loader takes low | medium
-// | high | max | an integer): the user pinned the reviewer, which also runs the plan pre-flight, and
-// the test hunter at max whatever the session's effort (2026-09-27). Stricter than the loader on
-// purpose: the one line admitted is exactly `effort: max`, once, in exactly those two files; any
-// other frontmatter key naming either, however quoted, cased, indented or spaced, and a frontmatter
-// block that cannot be found, is a finding.
+// ===== `continue <id>` and step 8's clear route (B02 of OS-20261010) =====================
+// The four places SKILL.md names the continue mode, each pinned whole from its head to the text
+// that follows it, as BUDGET pins a passage; OLD_CONTINUE holds the wording each one replaced. A
+// fifth field names the frontmatter key a passage is the value of.
+const CONTINUE_ID = [
+  ['the argument-hint', 'argument-hint:', '\n', 'argument-hint: new <description> | continue [<id>] | status | close', 'argument-hint'],
+  ["the description's mode list", ' Modes: ', '\n', 'Modes: new <description> | continue [<id>] | status | close.', 'description'],
+  ['the dispatch line', '\n- `continue', '\n- `status`',
+    '- `continue [<id>]` → run the session algorithm on the active ledger, or on ledger `<id>` when one is named; `continue <id> after-clear` is the form orchestrate-mod sends after it clears the conversation (protocol.md §Session algorithm step 8)'],
+  ['Mode: continue step 1', '## Mode: continue\n', '\n2. Read the ledger',
+    '## Mode: continue 1. Discovery → the ledger `<id>` names, when one is named (its line must route to `continue` or `close`; AMBIGUOUS, INCOMPLETE, UNKNOWN, `status` or `none` → ask), else exactly one ACTIVE ledger (else ask).'],
+];
+const OLD_CONTINUE = {
+  'the argument-hint': 'argument-hint: new <description> | continue | status | close',
+  "the description's mode list": ' Modes: new <description> | continue | status | close.',
+  'the dispatch line': '\n- `continue` → run the session algorithm on the active ledger',
+  'Mode: continue step 1': '## Mode: continue\n\n1. Discovery → exactly one ACTIVE ledger (else ask).',
+};
+const continuePin = (text, from, to) => collapse(section(text, from, to)).trim();
+// SKILL.md's text with one CONTINUE_ID passage, as it stands raw, put back to its old wording.
+function restoredContinue(text, what) {
+  const [, from, to] = CONTINUE_ID.find(([name]) => name === what);
+  return text.replace(section(text, from, to), () => OLD_CONTINUE[what]);
+}
+// Each keyed CONTINUE_ID passage the skill loader would not read as its key's value: SKILL.md opens
+// with a `---` line, the first `---` line after it closes the frontmatter, and each passage sits on
+// the one unindented line of its key inside that block.
+function frontmatterFaults(text) {
+  if (!text.startsWith('---\n')) return ['no frontmatter: the file does not open with a --- line'];
+  const close = text.indexOf('\n---\n', 3);
+  if (close === -1) return ['no frontmatter: no closing --- line'];
+  const lines = text.slice(4, close).split('\n'), faults = [];
+  for (const [what, from, to, , key] of CONTINUE_ID.filter(row => row[4])) {
+    const start = text.indexOf(from), lineStart = text.lastIndexOf('\n', start) + 1, end = text.indexOf(to, start + 1);
+    if (lines.filter(line => line.startsWith(key + ':')).length !== 1) faults.push(what + ': the frontmatter must carry exactly one ' + key + ' line');
+    if (start === -1 || end === -1 || end > close || !text.startsWith(key + ': ', lineStart)) faults.push(what + ': not on the ' + key + ' line inside the frontmatter');
+  }
+  return faults;
+}
+// The backticked or capitalised words of `text` between `from` and `to`.
+const routeWords = (text, from, to) => [...section(collapse(text), from, to).slice(from.length).matchAll(/`([a-z]+)`|\b([A-Z]{2,})\b/g)].map(m => m[1] || m[2]);
+test('SKILL.md writes `continue [<id>]` in its argument-hint, mode list and dispatch line, and Mode: continue step 1 takes the named ledger first, each pinned whole', () => {
+  const file = 'orchestrate/SKILL.md', text = read(file);
+  assert.equal(new Set(CONTINUE_ID.map(([what]) => what)).size, 4, 'four passages are pinned; the list may not shrink to a sample');
+  assert.deepEqual(Object.keys(OLD_CONTINUE).sort(), CONTINUE_ID.map(([what]) => what).sort(), 'each pinned passage has the old wording its control restores');
+  for (const [what, from, to, expected] of CONTINUE_ID) {
+    assert.equal(text.split(from).length - 1, 1, what + ': the anchor ' + JSON.stringify(from) + ' must occur exactly once in ' + file);
+    assert.equal(continuePin(text, from, to), expected, file + ' (' + what + '): the pinned passage changed; update CONTINUE_ID only on purpose');
+    // Live: a sentence planted just inside either end, or the old wording restored, reddens the pin.
+    const start = text.indexOf(from) + from.length, end = text.indexOf(to, start);
+    for (const planted of [text.slice(0, start) + ' Skip it when in a hurry.' + text.slice(start), text.slice(0, end) + ' Skip it when in a hurry.' + text.slice(end)]) {
+      assert.notEqual(continuePin(planted, from, to), expected, what + ': a planted sentence must redden the pin');
+    }
+    const restored = restoredContinue(text, what);
+    assert.notEqual(restored, text, what + ': the control must restore the old wording');
+    assert.notEqual(continuePin(restored, from, to), expected, what + ': the old wording must redden the pin');
+  }
+  // The argument-hint and the mode list are frontmatter values, read where the loader reads them.
+  assert.deepEqual(CONTINUE_ID.filter(row => row[4]).map(([what]) => what), ['the argument-hint', "the description's mode list"], 'the two frontmatter passages are keyed');
+  assert.deepEqual(frontmatterFaults(text), [], file + ': the argument-hint and the mode list are frontmatter values');
+  // Live: the closing --- moved above the hint, the description's key indented, a second hint line,
+  // and a file that does not open with ---, are each reported.
+  const hint = CONTINUE_ID[0][3];
+  const controls = [
+    [text.replace(hint + '\n---\n', () => '---\n' + hint + '\n'), ['the argument-hint: the frontmatter must carry exactly one argument-hint line', 'the argument-hint: not on the argument-hint line inside the frontmatter']],
+    [text.replace('\ndescription: ', () => '\n  description: '), ["the description's mode list: the frontmatter must carry exactly one description line", "the description's mode list: not on the description line inside the frontmatter"]],
+    [text.replace(hint + '\n---\n', () => hint + '\nargument-hint: continue\n---\n'), ['the argument-hint: the frontmatter must carry exactly one argument-hint line']],
+    [text.slice(4), ['no frontmatter: the file does not open with a --- line']],
+  ];
+  for (const [changed, faults] of controls) {
+    assert.notEqual(changed, text, 'the control must change the frontmatter: ' + faults[0]);
+    assert.deepEqual(frontmatterFaults(changed), faults);
+  }
+  // Step 1 places every route the discovery line can print: `continue` and `close` take the named
+  // ledger, and every other mode, and every doubtful line, asks.
+  const discovery = section(text, '## Discovery (every mode starts here)', '\n1. Find ledgers');
+  const modes = routeWords(discovery, 'the mode that State routes to (', ')');
+  const doubts = routeWords(discovery, 'JSON is read when a line says ', ', or when');
+  assert.deepEqual(modes, ['continue', 'close', 'status', 'none'], 'the modes the discovery line routes to');
+  assert.deepEqual(doubts, ['AMBIGUOUS', 'INCOMPLETE', 'UNKNOWN'], 'the lines that are read as doubt');
+  const step1 = CONTINUE_ID.find(([what]) => what === 'Mode: continue step 1')[3];
+  const taken = routeWords(step1, 'must route to ', ';'), asked = routeWords(step1, '; ', '→ ask');
+  assert.deepEqual(taken, ['continue', 'close'], 'step 1 takes a named ledger whose line routes to continue or close');
+  assert.deepEqual([...taken, ...asked].filter(w => modes.includes(w)).sort(), [...modes].sort(), 'step 1 places every mode the discovery line can print');
+  assert.deepEqual(asked.filter(w => !modes.includes(w)), doubts, 'step 1 asks on every doubtful line');
+  // Live: a fifth mode in the discovery sentence is one step 1 does not place.
+  const fifth = routeWords(discovery.replace('`status` or `none`', () => '`status`, `wait` or `none`'), 'the mode that State routes to (', ')');
+  assert.ok(fifth.includes('wait'), 'the control must plant a fifth mode');
+  assert.notDeepEqual([...taken, ...asked].filter(w => fifth.includes(w)).sort(), [...fifth].sort(), 'a mode step 1 does not name must be found');
+});
+
+// A mode list is a `|`-separated run of the mode words new, continue, status and close, in any
+// order, each with or without its placeholder, read as a reader sees the text: whitespace
+// collapsed, backticks stripped, &lt; and &gt; decoded. Every one in the shipped tree, every file
+// type, writes `continue [<id>]`, and one that names `new` names `continue` too.
+const MODE_WORD = String.raw`\b(?:new|continue|status|close)\b(?:\s*(?:<[^<>|]*>|\[[^\[\]|]*\]))*`;
+const MODE_LIST = new RegExp(MODE_WORD + String.raw`(?:\s*\|\s*` + MODE_WORD + ')+', 'gi');
+const readAsShown = text => collapse(text.replace(/&(?:lt|#0*60|#x0*3c);/gi, '<').replace(/&(?:gt|#0*62|#x0*3e);/gi, '>').replace(/`/g, ''));
+const modeLists = text => [...readAsShown(text).matchAll(MODE_LIST)].map(m => m[0]);
+const bareModeLists = (file, text) => modeLists(text)
+  .filter(list => /\bcontinue\b(?! \[<id>\])/i.test(list) || (/\bnew\b/i.test(list) && !/\bcontinue\b/i.test(list))).map(list => file + ': ' + list);
+// The family this sweep replaced: every list it read, the new one reads.
+const FIRST_MODE_LIST = /new <description>[`\s]*\|[`\s]*continue\b/g;
+test('every mode list in the shipped tree writes `continue [<id>]`', () => {
+  const files = shipped(), listing = [], bare = [];
+  assert.ok(files.includes('orchestrate/SKILL.md') && files.includes('orchestrate/references/protocol.md') && files.some(f => f.endsWith('.mjs'))
+    && files.some(f => f.endsWith('.html')), 'the domain is the whole shipped tree, recursively, every file type');
+  for (const file of files) {
+    const text = read(file), lists = modeLists(text);
+    if (lists.length) listing.push(file);
+    assert.ok(lists.length >= [...text.matchAll(FIRST_MODE_LIST)].length, file + ': the sweep reads every list the family it replaced read');
+    bare.push(...bareModeLists(file, text));
+  }
+  assert.deepEqual(bare, [], 'a mode list that writes `continue` without `[<id>]`, or leaves it out');
+  assert.ok(listing.includes('orchestrate/SKILL.md'), 'live: the sweep reads the mode lists SKILL.md carries');
+  // Live: each of SKILL.md's two lists, put back to its old wording, is reported on its own.
+  const file = 'orchestrate/SKILL.md', text = read(file);
+  for (const [what, old] of [['the argument-hint', 'argument-hint: new <description> | continue | status'], ["the description's mode list", 'Modes: new <description> | continue | status']]) {
+    const found = bareModeLists(file, restoredContinue(text, what));
+    assert.equal(found.length, 1, what + ': restored, it must be reported once — ' + found.join(' | '));
+    assert.ok(restoredContinue(text, what).includes(old) && found[0].includes('new <description> | continue | status'), what + ': the report quotes the list');
+  }
+  // Live: a list written later anywhere is reported, one with `[<id>]` is not. The first five are the
+  // corpus of the family this sweep replaced; each must still be reported by it and by the new one.
+  const firstCorpus = ['new <description> | continue | status | close', 'new <description>\n  | continue | status', 'new <description>|continue',
+    '`new <description>` | `continue` | `status`', 'new <description> | continue[<id>] | status'];
+  for (const planted of firstCorpus) assert.ok(new RegExp(FIRST_MODE_LIST.source).test(planted), 'the replaced family read: ' + JSON.stringify(planted));
+  // Then a list wrapped or spaced inside `new <description>`, one without placeholders, one in
+  // another order, one HTML-escaped, and one that leaves `continue` out.
+  for (const planted of [...firstCorpus, 'new\n<description> | continue | status | close', 'new | continue | status | close', 'new  <description> | continue',
+    'status | close | continue', 'new &lt;description&gt; | continue | status', 'new <description> | status | close']) {
+    assert.equal(bareModeLists('orchestrate/references/protocol.md', 'Modes: ' + planted + '.\n').length, 1, 'must be reported: ' + JSON.stringify(planted));
+  }
+  for (const planted of ['new <description> | continue [<id>] | status', '`new <description>` | `continue [<id>]` | `status`',
+    'new &lt;description&gt; | continue [&lt;id&gt;] | status', '| Version | Status | Updated |', 'status: v.status || ""']) {
+    assert.deepEqual(bareModeLists('orchestrate/references/protocol.md', 'Modes: ' + planted + '.\n'), [], 'must pass: ' + planted);
+  }
+});
+
+// The clear route's names, counted per file across the shipped tree: protocol.md names the tool
+// once and the after-clear command twice, every mention inside step 8's passage (BUDGET.compaction),
+// and SKILL.md names the after-clear form once, in its dispatch line. "continue <id> after-clear"
+// also counts the protocol.md command, so the form's count is both files'. Each name is also read
+// by its key words, however spelled: the tool's short name, the after-clear word, and any
+// `/orchestrate continue` command, the in-place one included.
+const CLEAR_NAMES = [
+  ['the tool', 'mcp__orchestrate-mod__schedule_clear', { 'orchestrate/references/protocol.md': 1 }],
+  ['the tool, by its short name', /schedule[\W_]*clear/i, { 'orchestrate/references/protocol.md': 1 }],
+  ['the after-clear command', '/orchestrate continue <id> after-clear', { 'orchestrate/references/protocol.md': 2 }],
+  ['the after-clear form', 'continue <id> after-clear', { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 2 }],
+  ['the after-clear word', /\bafter[\W_]*clear/i, { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 2 }],
+  ['the in-place command', /\/orchestrate\W+continue\b/i, { 'orchestrate/references/protocol.md': 3 }],
+];
+const namedIn = (text, name) => typeof name === 'string' ? collapse(text).split(name).length - 1
+  : [...collapse(text).matchAll(new RegExp(name.source, name.flags.replace(/[gy]/g, '') + 'g'))].length;
+// Each fault in `texts` ([file, text] pairs): a name counted otherwise than CLEAR_NAMES says, and a
+// mention outside its file's passage.
+function clearNameFaults(texts) {
+  const [pfile, pfrom, pto] = BUDGET.compaction, [, dfrom, dto] = CONTINUE_ID.find(([what]) => what === 'the dispatch line');
+  const homes = { [pfile]: [pfrom, pto], 'orchestrate/SKILL.md': [dfrom, dto] }, faults = [];
+  for (const [what, name, expected] of CLEAR_NAMES) {
+    const counts = {};
+    for (const [file, text] of texts) {
+      const n = namedIn(text, name);
+      if (!n) continue;
+      counts[file] = n;
+      const home = homes[file] ? namedIn(section(text, ...homes[file]), name) : 0;
+      if (home !== n) faults.push(what + ': ' + (n - home) + ' outside its passage in ' + file);
+    }
+    if (!isDeepStrictEqual(counts, expected)) faults.push(what + ': counted ' + JSON.stringify(counts));
+  }
+  return faults;
+}
+test("the clear route's names sit in step 8's passage and SKILL.md's dispatch line only, counted", () => {
+  const texts = shipped().map(file => [file, read(file)]), at = file => texts.findIndex(([f]) => f === file);
+  const swap = (file, text) => texts.map((pair, i) => i === at(file) ? [file, text] : pair);
+  assert.ok(at('orchestrate/SKILL.md') !== -1 && at('orchestrate/references/protocol.md') !== -1 && at('orchestrate/references/execution-models.md') !== -1);
+  assert.deepEqual(clearNameFaults(texts), [], 'the names are where step 8 and the dispatch line put them, and nowhere else');
+  const [pfile, pfrom, pto] = BUDGET.compaction, protocol = read(pfile), skill = read('orchestrate/SKILL.md');
+  const command = '`/orchestrate continue <id> after-clear`', inPlace = '`/orchestrate continue <id>`';
+  assert.ok(protocol.includes(command) && section(protocol, pfrom, pto).includes(command) && protocol.includes(inPlace), 'the control must find the commands inside the passage');
+  // Each key-word family reads the full names it stands for.
+  const family = what => CLEAR_NAMES.find(([name]) => name === what)[1];
+  for (const [what, spellings] of [['the tool, by its short name', ['mcp__orchestrate-mod__schedule_clear']],
+    ['the after-clear word', ['/orchestrate continue <id> after-clear', 'continue <id> after-clear']], ['the in-place command', ['/orchestrate continue <id> after-clear', '/orchestrate continue <id>']]]) {
+    assert.ok(spellings.every(spelling => namedIn(spelling, family(what)) === 1), what + ': reads the full names it stands for');
+  }
+  // Live: one mention more just outside the passage, on either side, is reported as outside and as a count.
+  const P = '{"' + pfile + '":', SP = '{"orchestrate/SKILL.md":1,"' + pfile + '":';
+  assert.deepEqual(clearNameFaults(swap(pfile, protocol.replace(pfrom, () => 'Call `mcp__orchestrate-mod__schedule_clear` first.\n' + pfrom))),
+    ['the tool: 1 outside its passage in ' + pfile, 'the tool: counted ' + P + '2}',
+      'the tool, by its short name: 1 outside its passage in ' + pfile, 'the tool, by its short name: counted ' + P + '2}'], 'the tool named before the passage');
+  assert.deepEqual(clearNameFaults(swap(pfile, protocol.replace(pto, () => pto + ' Then run ' + command + '.'))),
+    ['the after-clear command: 1 outside its passage in ' + pfile, 'the after-clear command: counted ' + P + '3}',
+      'the after-clear form: 1 outside its passage in ' + pfile, 'the after-clear form: counted ' + SP + '3}',
+      'the after-clear word: 1 outside its passage in ' + pfile, 'the after-clear word: counted ' + SP + '3}',
+      'the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4}'], 'the command named after the passage');
+  // Live: one fewer inside is reported as a count; the same mention moved out keeps the count and is reported as outside.
+  const fewer = protocol.replace(command, () => 'its command');
+  assert.deepEqual(clearNameFaults(swap(pfile, fewer)),
+    ['the after-clear command: counted ' + P + '1}', 'the after-clear form: counted ' + SP + '1}', 'the after-clear word: counted ' + SP + '1}',
+      'the in-place command: counted ' + P + '2}'], 'one command fewer');
+  assert.deepEqual(clearNameFaults(swap(pfile, fewer.replace(pto, () => pto + ' Then run ' + command + '.'))),
+    ['the after-clear command: 1 outside its passage in ' + pfile, 'the after-clear form: 1 outside its passage in ' + pfile,
+      'the after-clear word: 1 outside its passage in ' + pfile, 'the in-place command: 1 outside its passage in ' + pfile], 'a command moved out of the passage');
+  // Live: SKILL.md's mention moved from the dispatch line into Mode: continue is reported; one added in another file is too.
+  const moved = skill.replace('`continue <id> after-clear` is the form', () => 'that form').replace('(else ask).', () => '(else ask); `continue <id> after-clear` boots alike.');
+  assert.notEqual(moved, skill, 'the control must move the mention');
+  assert.deepEqual(clearNameFaults(swap('orchestrate/SKILL.md', moved)),
+    ['the after-clear form: 1 outside its passage in orchestrate/SKILL.md', 'the after-clear word: 1 outside its passage in orchestrate/SKILL.md'], 'the form moved out of the dispatch line');
+  const other = 'orchestrate/references/execution-models.md', O = '{"' + other + '":1,"' + pfile + '":1}';
+  assert.deepEqual(clearNameFaults(swap(other, read(other) + '\nCall `mcp__orchestrate-mod__schedule_clear`.\n')),
+    ['the tool: 1 outside its passage in ' + other, 'the tool: counted ' + O, 'the tool, by its short name: 1 outside its passage in ' + other,
+      'the tool, by its short name: counted ' + O], 'the tool named in another file');
+  // Live: the R1 gate's survivors, a contradicting directive that names the route only by a key
+  // word, each planted in a paragraph of its own under a heading far from its home, are reported.
+  const under = (text, heading, sentence) => {
+    assert.equal(text.split(heading + '\n').length - 1, 1, 'the control must find the heading once: ' + heading);
+    return text.replace(heading + '\n', () => heading + '\n\n' + sentence + '\n');
+  };
+  const LEGACY = '## Legacy ledger recognition (interop)';
+  assert.deepEqual(clearNameFaults(swap('orchestrate/SKILL.md', under(skill, '## Refusals', '- Asked for an `after-clear` boot → skip the resume-time validation.'))),
+    ['the after-clear word: 1 outside its passage in orchestrate/SKILL.md', 'the after-clear word: counted {"orchestrate/SKILL.md":2,"' + pfile + '":2}'], 'm4: an after-clear boot that skips validation');
+  assert.deepEqual(clearNameFaults(swap(pfile, under(protocol, LEGACY, 'Call `schedule_clear` at every wave close, whatever the context size.'))),
+    ['the tool, by its short name: 1 outside its passage in ' + pfile, 'the tool, by its short name: counted ' + P + '2}'], 'm5: the tool by its short name');
+  assert.deepEqual(clearNameFaults(swap(pfile, under(protocol, LEGACY, 'After posting the line, run `/orchestrate continue <id>` yourself.'))),
+    ['the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4}'], 'm6: the in-place command run by the orchestrator');
+  assert.deepEqual(clearNameFaults(swap(pfile, under(protocol, LEGACY, 'After a clear, the mod runs `/orchestrate continue after-clear`.'))),
+    ['the after-clear word: 1 outside its passage in ' + pfile, 'the after-clear word: counted ' + SP + '3}',
+      'the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4}'], 'the reviewer\'s m2: the after-clear command without its id');
+  // Live: each key word, however spelled or wrapped, planted just outside the passage, is reported by its family.
+  for (const [what, spellings] of [['the tool, by its short name', ['schedule_clear', 'scheduleClear', 'schedule-clear', 'Schedule\n   clear']],
+    ['the after-clear word', ['after-clear', 'After clear', 'after_clear', 'afterclear', 'after-\n   clear']],
+    ['the in-place command', ['/orchestrate continue', '/Orchestrate  continue <id>', '/orchestrate\n   continue']]]) {
+    for (const spelling of spellings) {
+      const faults = clearNameFaults(swap(pfile, protocol.replace(pto, () => pto + ' Then use ' + spelling + ' here.')));
+      assert.ok(faults.includes(what + ': 1 outside its passage in ' + pfile), what + ': a planted ' + JSON.stringify(spelling) + ' must be reported — ' + faults.join(' | '));
+    }
+  }
+});
+
+// No definition sets `model:`, and only the gate pair and the census set `effort:` (the loader takes
+// low | medium | high | max | an integer): the user pinned the reviewer, which also runs the plan
+// pre-flight, and the test hunter at max whatever the session's effort (2026-09-27), and the census at
+// medium (the user's standing choice since 2026-10-07, confirmed 2026-10-13). Stricter than the loader
+// on purpose: the admission is per file — exactly `effort: max` in each gate file and exactly
+// `effort: medium` in the census, once, and no line in any other file; any other frontmatter key
+// naming either, however quoted, cased, indented or spaced, one file's admitted line in another, and
+// a frontmatter block that cannot be found, is a finding.
 const TIER_KEY = /(?:effort|model)[\w-]*["']?\s*:/i;
-const MAX_EFFORT = { line: 'effort: max', files: ['.claude/agents/reviewer.md', '.claude/agents/test-hunter.md'] };
+const EFFORT_LINES = new Map([['.claude/agents/reviewer.md', 'effort: max'], ['.claude/agents/test-hunter.md', 'effort: max'],
+  ['.claude/agents/census.md', 'effort: medium']]);
 function tierKeyFaults(file, text) {
   const m = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text);
   if (!m) return [file + ': no frontmatter block to read — rejected on doubt'];
   const lines = m[1].split('\n').filter(line => TIER_KEY.test(line));
-  const admitted = MAX_EFFORT.files.includes(file) && lines.filter(line => line === MAX_EFFORT.line).length === 1 ? MAX_EFFORT.line : null;
+  const own = EFFORT_LINES.get(file);
+  const admitted = own !== undefined && lines.filter(line => line === own).length === 1 ? own : null;
   return lines.filter(line => line !== admitted).map(line => file + ': ' + line.trim());
 }
 const definitionListing = () => walk(path.join(ROOT, '.claude/agents')).filter(rel => rel.endsWith('.md')).map(rel => '.claude/agents/' + rel);
-test('no agent definition sets a model, and only the gate pair sets an effort, as exactly effort: max, read more strictly than the loader reads it', t => {
+test('no agent definition sets a model, and an effort only as its own file\'s admitted line — effort: max in the gate pair, '
+  + 'effort: medium in the census — read more strictly than the loader reads it', t => {
   const def = line => '---\nname: x\ndescription: y\n' + line + '\ntools: Read\n---\n\nbody\n';
   // Every value the loader accepts, and values past both ends of that set.
   const VALUES = ['low', 'medium', 'high', 'max', '32000', 'none', '0', '-1', 'ultra', '999999', '"high"', 'opus', 'inherit'];
@@ -2012,22 +2690,25 @@ test('no agent definition sets a model, and only the gate pair sets an effort, a
   assert.equal(tierKeyFaults('x.md', 'effort: max\n').length, 1, 'no frontmatter at all is rejected on doubt');
   assert.equal(tierKeyFaults('x.md', '---\nname: x\neffort: max\n').length, 1, 'an unclosed frontmatter is rejected on doubt');
   assert.deepEqual(tierKeyFaults('x.md', def('tools: Read, Write')), [], 'a definition with neither key passes');
-  // The one admission, from both sides: in each gate file the exact line, once, passes, while every
-  // other value and spelling, alone or beside it, a second copy of it and a missing frontmatter are
-  // caught; in any other file, a same-named one elsewhere included, the exact line is caught.
-  const others = [...['effort', 'model'].flatMap(key => VALUES.map(value => key + ': ' + value)), ...SPELLINGS].filter(line => line !== MAX_EFFORT.line);
-  assert.equal(others.length, 2 * VALUES.length + SPELLINGS.length - 1, 'every case above but the admitted line');
-  for (const file of MAX_EFFORT.files) {
-    assert.deepEqual(tierKeyFaults(file, def(MAX_EFFORT.line)), [], file + ': the admitted line passes');
+  // Each admission, from both sides: in its own file the exact line, once, passes, while every other
+  // value and spelling, alone or beside it, another file's admitted line among them, a second copy of
+  // it and a missing frontmatter are caught; in any other file, a same-named one elsewhere included,
+  // the exact line is caught.
+  const cases = [...['effort', 'model'].flatMap(key => VALUES.map(value => key + ': ' + value)), ...SPELLINGS];
+  for (const [file, admitted] of EFFORT_LINES) {
+    const others = cases.filter(line => line !== admitted);
+    assert.equal(others.length, 2 * VALUES.length + SPELLINGS.length - 1, file + ': every case above but its admitted line');
+    assert.deepEqual(tierKeyFaults(file, def(admitted)), [], file + ': the admitted line passes');
     for (const line of others) {
       assert.equal(tierKeyFaults(file, def(line)).length, 1, file + ': must be caught: ' + line);
-      assert.equal(tierKeyFaults(file, def(MAX_EFFORT.line + '\n' + line)).length, 1, file + ': must be caught beside the admitted line: ' + line);
+      assert.equal(tierKeyFaults(file, def(admitted + '\n' + line)).length, 1, file + ': must be caught beside the admitted line: ' + line);
     }
-    assert.equal(tierKeyFaults(file, def(MAX_EFFORT.line + '\n' + MAX_EFFORT.line)).length, 2, file + ': a second copy admits neither');
-    assert.equal(tierKeyFaults(file, MAX_EFFORT.line + '\n').length, 1, file + ': no frontmatter is still rejected on doubt');
-  }
-  for (const file of ['.claude/agents/implementer.md', '.claude/agents/qa-runner.md', 'x.md', 'reviewer.md', '.claude/agents/nested/reviewer.md']) {
-    assert.equal(tierKeyFaults(file, def(MAX_EFFORT.line)).length, 1, file + ': must be caught: ' + MAX_EFFORT.line);
+    assert.equal(tierKeyFaults(file, def(admitted + '\n' + admitted)).length, 2, file + ': a second copy admits neither');
+    assert.equal(tierKeyFaults(file, admitted + '\n').length, 1, file + ': no frontmatter is still rejected on doubt');
+    for (const other of ['.claude/agents/implementer.md', '.claude/agents/qa-runner.md', 'x.md', 'reviewer.md', 'census.md',
+      '.claude/agents/nested/reviewer.md', '.claude/agents/nested/census.md']) {
+      assert.equal(tierKeyFaults(other, def(admitted)).length, 1, other + ': must be caught: ' + admitted);
+    }
   }
   // The domain is the directory, walked at any depth, dotted directories included.
   const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'budget-walk-'));
@@ -2037,14 +2718,14 @@ test('no agent definition sets a model, and only the gate pair sets an effort, a
   fs.writeFileSync(path.join(temp, '.hidden', 'deeper', 'nested.md'), '');
   assert.deepEqual(walk(temp), ['.hidden/deeper/nested.md', 'top.md'], 'the walk must reach a definition two directories down');
   const files = definitionListing();
-  assert.ok(['implementer', 'reviewer', 'test-hunter', 'qa-runner'].every(n => files.includes('.claude/agents/' + n + '.md')),
+  assert.ok(['implementer', 'reviewer', 'test-hunter', 'qa-runner', 'census'].every(n => files.includes('.claude/agents/' + n + '.md')),
     'the listing reads the shipped definitions: ' + files.join(', '));
-  // The admission is live: each gate file's frontmatter carries the line, and only the admission keeps it unreported.
-  for (const file of MAX_EFFORT.files) {
+  // Each admission is live: its file's frontmatter carries the line, and only the admission keeps it unreported.
+  for (const [file, admitted] of EFFORT_LINES) {
     assert.ok(files.includes(file), file + ': a shipped definition');
-    assert.deepEqual(tierKeyFaults('x.md', read(file)), ['x.md: ' + MAX_EFFORT.line], file + ': read under any other name, its one tier line is reported');
+    assert.deepEqual(tierKeyFaults('x.md', read(file)), ['x.md: ' + admitted], file + ': read under any other name, its one tier line is reported');
   }
-  for (const file of files) assert.deepEqual(tierKeyFaults(file, read(file)), [], file + ': sets a model, or an effort other than the admitted line');
+  for (const file of files) assert.deepEqual(tierKeyFaults(file, read(file)), [], file + ': sets a model, or an effort other than its admitted line');
 });
 
 // [BL-034] The gate pair holds a scoped Write; no text may say it lacks one. README's sentence
@@ -2122,10 +2803,18 @@ test('the undo sweep, its reader and its domain are unweakened since ' + FAMILY_
 // polish-phase FIX FIRST discards the polish at once, never after a second try; only PROSE-ONLY
 // exempts files from the re-review; a comment never describes how its neighbour behaves; prose
 // that is a contract is never an ASK; and severity is about behaviour, never the fence (BL-044).
+// A smoke-step ASK's text is applied on the integration branch, and §Recovery points at that
+// rule (BL-067); its sweep is the last test in this file.
 const SEVERITY = "Severity is about behaviour, never the fence: a violated criterion whose fix sits outside the batch's files is still P0 or P1";
 const COMMENT_RULE = 'A comment states what the code beneath it does and why, and points at a neighbour by path and symbol; it never describes how the neighbour behaves.';
 const CLASSIFY = '`node "<skill-dir>/tools/prose-only-diff.mjs" --repo <batch worktree> --base <pre-polish sha> --head <polish tip>`';
 const ONE_STRIKE = 'One strike: a polish-phase `FIX FIRST` discards the polish at once (an ASK never licenses a production behavior change)';
+// protocol.md's smoke-step route (BL-067): where the text lands, which commit comes first, the
+// list commit a crash leaves to the orchestrator, and what a discard keeps.
+const SMOKE_ROUTE = "A smoke-step ASK is the exception to where that edit lands: its text lives in the batch file's Smoke section, and the batch branch changes that file only by ticks, `polish:` appends and a recorded Files line (6a), so the orchestrator applies it through the integration worktree, in the ledger commit that records the verdict, never on the batch branch. "
+  + 'That commit comes first; the batch-branch commit that lists the asks follows it, the smoke ask already ticked. '
+  + "After a crash, wherever §Recovery meets a `SHIP … asks=` tip with no `polish:` item listed yet — its worktree clean or holding the unfinished list edit — the orchestrator completes that list commit before any polish pass or resume, ticking each ask whose text the integration branch's batch file already carries; a discarded polish reverts only the batch branch and leaves that text, its ask closed.";
+const RECOVERY_POINTER = 'Before any polish pass or resume at a `SHIP … asks=` tip whose batch file lists no `polish:` item yet, its worktree clean or dirty, the orchestrator completes the list commit, as §Severity and round accounting says for a smoke-step ASK.';
 const POLISH_RULES = {
   severityProtocol: ['orchestrate/references/protocol.md', '- Severity is about behaviour', '\n- **ASK**',
     '- ' + SEVERITY + ', and a residual keeps its severity wherever its fix lies — the fence decides only the route (`NEEDS_FENCE` → §Fence changes, a recorded extension), never the class.'],
@@ -2136,6 +2825,7 @@ const POLISH_RULES = {
   polishProtocol: ['orchestrate/references/protocol.md', '  Prose that is a contract', '\n- Only `FIX FIRST` rounds',
     'Prose that is a contract — channel payload docs, exported API comments, ARCHITECTURE rows, USER-GUIDE claims — is never an ASK: wrong, it is P0 or P1, and `FIX FIRST`. '
     + "An ASK on other prose carries its replacement text, whose fact the reviewer verified when it flagged the claim: the orchestrator applies that text itself, one edit on the batch branch and no implementer resume, in a commit that also appends the ask to the batch file as an already ticked `- [x] polish:` item in the form `02-batch.md` shows, and one unticked `- [ ] polish:` item per ask it leaves to the polish pass, so a crash before that pass meets a partial checklist in §Recovery; the polish pass takes those, and none left means none runs. "
+    + SMOKE_ROUTE + ' '
     + 'Once the polish has landed, the orchestrator classifies its diff: ' + CLASSIFY + '. '
     + '`PROSE-ONLY` exempts the JavaScript files it counts from the fix-diff-only re-review, the other paths it counts keeping the path rule; `CODE` or `UNKNOWN` keeps the path rule for the whole diff. '
     + '§Recovery keeps the path rule even where the classifier would have read the diff as prose-only — after a crash a production file → fix-diff-only re-review — a deliberately conservative fallback. '
@@ -2151,11 +2841,12 @@ const POLISH_RULES = {
   commentSkeleton: [PROMPTS, 'RULES: read a file before you edit it. A comment', ' Chain a command', 'RULES: read a file before you edit it. ' + COMMENT_RULE],
   commentDefinition: ['.claude/agents/implementer.md', 'A comment states', '\n\nThe tool list', COMMENT_RULE],
   batchTemplate: ['orchestrate/templates/02-batch.md', 'The orchestrator is the one other writer', ' An appended item',
-    "The orchestrator is the one other writer: the commit that applies a prose ASK's replacement text appends its item, already ticked, and an unticked item for each ask it leaves to the polish pass."],
+    "The orchestrator is the one other writer: the commit that applies a prose ASK's replacement text (for a smoke step's, applied on the integration branch, the batch-branch commit after it) appends its item, already ticked, and an unticked item for each ask it leaves to the polish pass."],
+  recoveryPointer: ['orchestrate/references/protocol.md', 'Before any polish pass or resume at a', '\n\n## §Session algorithm', RECOVERY_POINTER],
 };
 test('each prose-polish rule reads exactly as pinned in every carrier', () => {
   const pinned = (text, from, to) => collapse(section(text, from, to)).trim();
-  assert.equal(Object.keys(POLISH_RULES).length, 10, 'ten passages are pinned; the list may not shrink to a sample');
+  assert.equal(Object.keys(POLISH_RULES).length, 11, 'eleven passages are pinned; the list may not shrink to a sample');
   for (const [key, [file, from, to, expected]] of Object.entries(POLISH_RULES)) {
     const text = read(file);
     assert.equal(text.split(from).length - 1, 1, key + ': the anchor "' + from + '" must occur exactly once in ' + file);
@@ -2255,4 +2946,158 @@ test('no document reverses one strike, the classifier or comment rule, lets the 
   const files = [...documents(), ...definitionListing()];
   assert.ok(files.includes('orchestrate/references/protocol.md') && files.includes(PROMPTS) && files.includes('.claude/agents/reviewer.md') && files.includes('README.md'));
   for (const file of files) assert.deepEqual(polishReversals(read(file)), [], file + ': reverses a prose-polish rule');
+});
+
+// ===== A smoke-step ASK's text, applied on the integration branch (B04 of OS-20261007) ====
+// The batch branch changes its batch file only by ticks, polish appends and a recorded Files line,
+// so protocol.md §Severity applies a smoke-step ASK's text through the integration worktree, never
+// on the batch branch (SMOKE_ROUTE above). Its reversals: a place on, in, to or through the batch
+// branch, its worktree or the commit that lists the asks, or the batch branch as where the text
+// goes, in a sentence naming a smoke step or the one right after it ("Its text lands …") or in a
+// table cell from the first that names one; and the exception withdrawn ("like any other prose
+// ASK"). Verb-free, as the write-licence family reads a place; a negator governs as smokeNegated()
+// reads it. Each table row is read on its own, so no row borrows another's.
+const SMOKE = /\bsmoke/i;
+// The placeholders the skeletons name the batch's worktree and branch by, read off
+// subagent-prompts.md's own "worktree at [X] … ([Y])" lines rather than typed here.
+const BATCH_PLACEHOLDERS = [...new Set([...read(PROMPTS).matchAll(/worktree at \[([A-Z_]+)\][^.]*?\[([A-Z_]+)\]\)/g)].flatMap(m => m.slice(1)))].sort();
+const TREE = String.raw`(?:branch(?:es)?|worktrees?|work(?:ing)?[\s-]+trees?)\b`;
+const BATCH_PLACE = String.raw`(?:batch(?:['’]s)?(?:\s+[\w-]+)?[\s-]+` + TREE + String.raw`|(?:this|your|its|their)\s+(?:[\w-]+\s+)?` + TREE
+  + String.raw`|(?:implementer|row)['’]s\s+(?:[\w-]+\s+)?` + TREE + String.raw`|(?:list\s+commit|commit\s+(?:that\s+lists|listing))\b`
+  + String.raw`|[[{]+(?:` + BATCH_PLACEHOLDERS.join('|') + String.raw`)\b)`;
+const ON_BATCH = new RegExp(String.raw`\b(?:on|onto|to|in|into|inside|within|through|via|at|from|under)\s+(?:[\w'’-]+\s+){0,2}?` + BATCH_PLACE
+  + String.raw`|(?<![\w'’-])` + BATCH_PLACE + String.raw`\s+(?:is|are)\s+(?:where|the\s+place)\b`, 'gi');
+// The exception withdrawn: a smoke-step ASK applied as any other prose ASK is.
+const WITHDRAWN = /\b(?:(?:like|as)\s+(?:any|every)\s+other\b|(?:in\s+)?the\s+same\s+way\s+as\b|no\s+exception\b)/gi;
+// A smoke place is negated only where negatedLocation() reads it so and no exemption, to-infinitive or
+// -ing verb stands between it and the last negator: each opens a phrase that negator does not govern
+// ("Do not wait for the polish pass to apply …"). Local to this sweep; the write-licence family keeps its reader.
+const SMOKE_SCOPE_BREAK = /\b(?:except|other\s+than|besides|apart|unless)\b|\bto\s+(?!(?:the|a|an|its|their|this|that|these|those|his|her|our|your|my|any|each|every|all|some|both|one)\b)[a-z]+\b|\b(?!(?:no|any|some|every)?thing\b|during\b|being\b)[a-z]{2,}ing\b/i;
+function smokeNegated(clause, at) {
+  if (!negatedLocation(clause, at)) return false;
+  const before = clause.slice(0, at), last = [...before.matchAll(LOCATION_NEGATOR)].pop();
+  return !SMOKE_SCOPE_BREAK.test(before.slice(last.index + last[0].length));
+}
+// The units read: prose sentence by sentence, each read when it or the unit before it names a smoke
+// step, and each table row cell by cell, a cell read from the first in its row that names one.
+function smokeUnits(text) {
+  const units = [], prose = [];
+  const flush = () => {
+    for (const sentence of collapse(prose.splice(0).join('\n')).split(/(?<=[.!?])\s+/)) units.push([sentence, SMOKE.test(sentence) || SMOKE.test(units.length ? units[units.length - 1][0] : '')]);
+  };
+  for (const line of unticked(text).split('\n')) {
+    if (!/^\s*\|/.test(line)) { prose.push(line); continue; }
+    flush();
+    let seen = false;
+    for (const cell of line.trim().replace(/^\||\|$/g, '').split('|')) units.push([collapse(cell).trim(), seen = seen || SMOKE.test(cell)]);
+  }
+  flush();
+  return units.filter(([, read]) => read).map(([unit]) => unit);
+}
+// Each clause read, with each place and withdrawal in it: where it starts, and whether no negator governs it.
+function smokePlaces(text) {
+  return smokeUnits(text).flatMap(unit => unit.split(/(?<=[.;:])\s+/).map(clause => {
+    const found = pattern => [...clause.matchAll(pattern)].map(m => ({ at: m.index, free: !smokeNegated(clause, m.index) }));
+    return { clause, places: found(ON_BATCH), withdrawals: found(WITHDRAWN) };
+  }));
+}
+// The clauses that reverse the route: a free withdrawal, or a free place where the clause does not
+// start with one of `safe`, the places SMOKE_SAFE names for the file read.
+const smokeOnBatch = (text, safe = []) => smokePlaces(text).filter(({ clause, places, withdrawals }) => withdrawals.some(w => w.free)
+  || places.some(p => p.free && !safe.some(s => clause.startsWith(s, p.at)))).map(({ clause }) => clause);
+// The route as the reader sees it: a clause naming the integration worktree, every place in it negated.
+const smokeRoutes = text => smokePlaces(text).filter(({ clause, places }) => /\bintegration worktree\b/.test(clause) && places.length > 0 && !places.some(p => p.free));
+// The places the family reads in a smoke unit that put a repair, a fix-up or a batch's implementer on a
+// branch or in a worktree, not a smoke step's text, each named by its words from the place on: the
+// repairs beside "a failed pre-smoke step", the fix-up skeleton after "a smoke-test failure", and
+// README's batches, read with the fenced tree before them, which names the smoke page.
+const SMOKE_SAFE = {
+  'orchestrate/references/protocol.md': ['on its own branch cut from the integration tip'],
+  [PROMPTS]: ['on its own branch cut from the integration tip', 'in the worktree [WORKTREE_PATH], checked out on [FIXUP_BRANCH]'],
+  'README.md': ['on its own branch in an isolated git worktree'],
+};
+const SMOKE_SPECIMEN = "The orchestrator applies a smoke-step ASK's text on the batch branch.";
+test("a smoke-step ASK's text is applied through the integration worktree, and no document places it on the batch branch", () => {
+  const PROTOCOL_MD = 'orchestrate/references/protocol.md', protocol = read(PROTOCOL_MD);
+  // The rule: part of the pinned ASK passage, stated once, and read as the route it is.
+  assert.ok(POLISH_RULES.polishProtocol[3].includes(SMOKE_ROUTE), 'the route is part of the pinned ASK passage');
+  assert.equal(collapse(protocol).split(SMOKE_ROUTE).length - 1, 1, PROTOCOL_MD + ': states the smoke-step route once');
+  assert.equal(smokeRoutes(protocol).length, 1, PROTOCOL_MD + ": routes a smoke-step ASK's text through the integration worktree, never on the batch branch");
+  assert.deepEqual(smokeRoutes(protocol).map(r => r.clause), smokeRoutes(SMOKE_ROUTE).map(r => r.clause), 'the route read in protocol.md is the pinned one');
+  assert.deepEqual(smokeRoutes("Never apply a smoke-step ASK's text on the batch branch. A smoke step's text goes through the integration worktree."), [],
+    'a route names both: the integration worktree, and the batch branch negated');
+  // The skeletons' placeholders for the batch's worktree and branch, the one the first family read among them.
+  assert.deepEqual(BATCH_PLACEHOLDERS, ['BATCH_BRANCH', 'WORKTREE_PATH'], PROMPTS + ": names the batch's worktree and branch by these placeholders");
+  // Reversals written as prose, each reported once: a place before or after the smoke step, in the
+  // unit after it or a later cell of its row, a negator whose scope a conjunction, a clause, an
+  // exemption or another verb ends, the exception withdrawn, each spelling of the batch branch, its
+  // worktree and the list commit ON_BATCH reads, and every preposition read.
+  for (const planted of [SMOKE_SPECIMEN, "A smoke-step ASK's replacement text is committed to the batch branch like any other prose ASK.",
+    "Edit the batch file's Smoke section in the batch worktree.", 'On the batch branch, the orchestrator rewrites the smoke step the reviewer flagged.',
+    'A smoke-step ASK carries its replacement text. Its text lands on the batch branch.', '| smoke-step ASK | applied on the batch branch |',
+    '| smoke step | the orchestrator | on the batch branch |',
+    'Apply the smoke text not on the integration branch but on the batch branch.', "Never skip the polish pass, and apply the smoke step's text on its batch branch.",
+    "Never edit the Checklist by hand; apply the smoke step's text on the batch branch.",
+    "The orchestrator applies a smoke step's text through the integration worktree, never on the integration branch, and then on the batch branch.",
+    "A smoke-step ASK's text is never applied except on the batch branch.", "No implementer applies a smoke-step ASK's text anywhere other than on the batch branch.",
+    "A smoke-step ASK's text never lands anywhere besides on the batch branch.", "A smoke-step ASK's text never goes anywhere apart from into the batch worktree.",
+    "Never apply a smoke-step ASK's text unless on the batch branch.", "Do not wait for the polish pass to apply a smoke-step ASK's text on the batch branch.",
+    "Nothing stops the orchestrator applying a smoke-step ASK's text on the batch branch.",
+    'A smoke-step ASK is applied like any other prose ASK.', "A smoke-step ASK's text is applied as any other prose ASK's is.",
+    'A smoke-step ASK is applied as every other prose ASK is.', 'A smoke-step ASK is applied the same way as a comment ASK.', 'Smoke-step ASKs: no exception.',
+    "The smoke ask's text goes into the batch-branch commit that lists the asks.", "The smoke ask's text goes into the commit that lists the asks.",
+    "The smoke step's text goes in that list commit.", 'The smoke text goes into the commit listing the asks.',
+    "The batch branch is where a smoke-step ASK's text is applied.", "Its worktree is the place for a smoke-step ASK's text.", 'Batch branches are where smoke-step ASK text lands.',
+    "Write the smoke step's new wording on the batch's own branch.", "Apply the smoke step's text on the batch's fix branch.",
+    "Apply the smoke step's text in the batch's isolated worktree.", "The orchestrator applies a smoke-step ASK's text in the batch's work tree.",
+    "Apply the smoke step's text in the batch's working tree.",
+    "A smoke-step ASK's text goes to the batch's branch.", "A smoke-step ASK's text goes to both batch branches.", 'Apply the smoke text in the batch worktrees.',
+    "Apply the smoke step's text on the reviewed batch branch.", "Apply a smoke step's text on this branch, like the ticks.",
+    "Commit the smoke step's wording on your own branch.", 'Apply the smoke text through your worktree.', 'Apply the smoke text in this worktree.',
+    "Apply a smoke-step ASK's text in your isolated worktree.", "The orchestrator applies a smoke-step ASK's text to the batch file on its branch.",
+    "The orchestrator applies a smoke-step ASK's text to the batch file in its worktree.", "Apply the smoke step's text on its own branch.",
+    "Apply the smoke step's text on their own branches.", "Apply the smoke step's text on the row's branch.", "Apply the smoke step's text in the implementer's worktree.",
+    "Apply the smoke step's text on `[BATCH_BRANCH]`.", "Apply the smoke step's text on {{BATCH_BRANCH}}.",
+    "The orchestrator applies a smoke-step ASK's text in [WORKTREE_PATH].", "Apply the smoke step's text in {{WORKTREE_PATH}}.",
+    ...['on', 'onto', 'to', 'in', 'into', 'inside', 'within', 'through', 'via', 'at', 'from', 'under'].map(at => "Apply the smoke step's text " + at + ' the batch branch.')]) {
+    assert.equal(smokeOnBatch(planted).length, 1, 'must be reported: ' + planted);
+  }
+  // A withdrawal and a place, a sentence apiece, are two clauses reported.
+  assert.equal(smokeOnBatch('A smoke-step ASK is prose like any other. Its text lands on the batch branch.').length, 2);
+  // Must pass: the rule and its carriers, its negations, an exemption after the place, the -ing words
+  // that open no phrase, a to that heads no infinitive, and a batch-branch commit named as a thing, not a place.
+  assert.deepEqual(smokeOnBatch(SMOKE_ROUTE + ' ' + RECOVERY_POINTER + ' ' + POLISH_RULES.batchTemplate[3] + ' '
+    + "Never apply a smoke-step ASK's text on the batch branch. A smoke-step ASK's text is not committed to the batch branch. Do not edit the Smoke section in the batch worktree. "
+    + 'A smoke-step ASK is not applied like any other prose ASK. '
+    + "Never apply a smoke-step ASK's text on the batch branch unless it is listed as a ticked item. A smoke-step ASK's text is not being applied on the batch branch. "
+    + "Never apply anything of a smoke-step ASK's text on the batch branch. Never apply a smoke-step ASK's text during the polish on the batch branch. "
+    + "Never send a smoke-step ASK's text to the reviewer on the batch branch. "
+    + "A smoke step's text lands on the integration branch; the batch-branch commit lists its ask, already ticked."), [], 'the rule and its negations are not reversals');
+  // Must pass: a batch branch two units after a smoke step, in the cell before one, or in the row after one.
+  assert.deepEqual(smokeOnBatch('A smoke-step ASK is applied through the integration worktree. The wave closes. Every other prose ASK is applied on the batch branch.'), []);
+  assert.deepEqual(smokeOnBatch('| ⛔ batch | a fresh implementer on the batch branch | one smoke step on the integration branch |'), []);
+  assert.deepEqual(smokeOnBatch('| x | a smoke step |\n| on the batch branch | y |'), []);
+  const files = [...documents(), ...definitionListing()];
+  assert.ok(files.includes(PROTOCOL_MD) && files.includes('orchestrate/templates/02-batch.md') && files.includes('README.md') && files.includes('.claude/agents/implementer.md'));
+  assert.ok(Object.keys(SMOKE_SAFE).every(file => files.includes(file)), 'every file SMOKE_SAFE names is swept');
+  // The domain: no clause reported but at a place SMOKE_SAFE names there, and each named place still read there.
+  for (const file of files) {
+    const text = read(file), safe = SMOKE_SAFE[file] || [];
+    assert.deepEqual(smokeOnBatch(text, safe), [], file + ": places a smoke-step ASK's text on the batch branch");
+    assert.deepEqual(safe.filter(s => smokePlaces(text).some(({ clause, places }) => places.some(p => p.free && clause.startsWith(s, p.at)))), safe,
+      file + ': a place SMOKE_SAFE names is no longer read there; drop it');
+  }
+  // Armed inside a safe clause: a reversal planted beside the repairs' own branch is still reported.
+  const repairs = 'runs on its own branch cut from\n  the integration tip';
+  assert.equal(protocol.split(repairs).length - 1, 1, 'the control anchor must occur once: ' + JSON.stringify(repairs));
+  assert.equal(smokeOnBatch(protocol.replace(repairs, () => repairs + ', and the smoke text goes on the batch branch,'), SMOKE_SAFE[PROTOCOL_MD]).length, 1,
+    PROTOCOL_MD + ': a reversal beside a safe place must be reported');
+  // Armed on the carrier: the route's negation dropped is the one clause reported, and no route is read.
+  const negation = 'verdict, never on the batch\n  branch.';
+  assert.equal(protocol.split(negation).length - 1, 1, 'the control anchor must occur once: ' + JSON.stringify(negation));
+  const reversed = protocol.replace(negation, () => 'verdict, on the batch\n  branch.');
+  assert.equal(smokeOnBatch(reversed, SMOKE_SAFE[PROTOCOL_MD]).length, 1, PROTOCOL_MD + ': the route reversed must be reported');
+  assert.equal(smokeRoutes(reversed).length, 0, PROTOCOL_MD + ': the route reversed is no route');
+  // Armed on the whole domain: the specimen appended to any file is reported there, once.
+  for (const file of files) assert.equal(smokeOnBatch(read(file) + '\n\n' + SMOKE_SPECIMEN + '\n', SMOKE_SAFE[file]).length, 1, file + ': an appended reversal must be reported');
 });

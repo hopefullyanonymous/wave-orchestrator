@@ -1,6 +1,6 @@
 # Guardrail receipts
 
-The incidents behind the longer rules in `CLAUDE.md` §Bug-class guardrails and §Orchestration.
+The incidents behind the longer rules in `CLAUDE.md` §Bug-class guardrails, and the rules retired from it.
 `CLAUDE.md` keeps each rule; the stories live here so the always-loaded file (and every gate
 prompt rendered from it) stays small. Nothing here is a rule of its own.
 
@@ -142,3 +142,24 @@ with `String.fromCharCode` *(the invisible-character sweep)*. At the `OS-2026092
 tool did the same twice: it decoded a typed apostrophe escape inside a single-quoted `node -e` script
 before bash saw it. That ended the quoted string early, and the command failed to parse, so nothing
 ran. Such scripts now go to files first.
+
+## Trimmed from `CLAUDE.md` on 2026-10-10
+
+Eight entries were merged into their nearest class, and three bullets were retired. Each merged rule kept
+its text in `CLAUDE.md`. These are the sources and pointers that were cut:
+- A new rule that decides an old case first: `OS-20260927` B03 R1 F1; the B06 C1 fix-up.
+- A verdict that depends on the platform or the checkout: OS-20260925 and `OS-20260927` C1 issue 1 (above).
+  A test that reads a child's raw output merged into it: OS-20260923 C1 issue 2 (above).
+- A fail-closed guard over an open domain: OS-20260925 B04, three rounds before BL-046.
+- Failure read as absence: `OS-20260927` B05 R1–R4, B06's C1 fix-up R5.
+- Provenance proven against a point that moves: `OS-20260927` B06 R1 F1, its C1 fix-up's R3 F1 and R4 N1.
+- A build gate that proves commits, not the disk, merged into "Verified means verified as published":
+  `OS-20261007` C1. An issued input derived from the tree merged there too (above).
+- A sweep that asserts inside its loop reports one member: `OS-20261008` C1 Step 12.
+
+Retired because the rule is stated where it is enforced:
+- "No test can verify this" is not "no agent can verify this" (BL-016): `protocol.md`'s Runner rule,
+  pinned by `tests/protocol-contract.test.cjs`.
+- Severity is about behaviour, never about the fence (above): `protocol.md` and the reviewer definition.
+- A hooks module spells every `$` call in full, and its pure helpers take data, never `$`:
+  `claude plugin validate --strict`, which the suite runs on every plugin directory.

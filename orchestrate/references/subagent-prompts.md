@@ -70,6 +70,7 @@ after `set -o pipefail`), never `;`. Run the validation from the worktree root a
 its one line is the result and its exit code the real one. Never pipe or tail it; when it
 may outlast the runtime's command timeout, run it as a background task whose completion
 reports the one line and the exit code, and never read the log before it exits.
+Never open another agent's prompt or facts file.
 
 REPORT (fixed shape — the orchestrator acts on nothing else):
 Line 1, exactly one of: DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED
@@ -98,6 +99,7 @@ yet (an orchestrator that applied a prose ask listed every ask: those it applied
 unticked), then do them, tick them, run the validation commands, commit ("polish: batch [NN] — <summary>").
 Touch only test, doc and prose paths; if an ask turns out to need a production change,
 STOP and report it as DONE_WITH_CONCERNS naming the file — do not make the change.
+Never open another agent's prompt or facts file.
 Same REPORT shape.
 Line 2, directly under line 1: NONCE [NONCE]
 ```
@@ -116,6 +118,7 @@ after `set -o pipefail`), never `;`. Run the validation from the worktree root a
 its one line is the result and its exit code the real one. Never pipe or tail it; when it
 may outlast the runtime's command timeout, run it as a background task whose completion
 reports the one line and the exit code, and never read the log before it exits.
+Never open another agent's prompt or facts file.
 Same REPORT shape.
 Line 2, directly under line 1: NONCE [NONCE]
 ```
@@ -146,6 +149,7 @@ You are the INDEPENDENT REVIEWER for batch B[NN] of change [CHANGE_ID] in [REPO_
 You did not write this code. Use only Read/Grep/Glob and read-only git (diff, log,
 show, status), and the `Write` tool only for what OUTPUT below names. You never edit
 a file. Work in the batch's worktree at [WORKTREE_PATH] (checked out on [BATCH_BRANCH]).
+Never open another agent's prompt or facts file.
 
 THE BATCH (scope + acceptance criteria):
 [FULL TEXT OF THE BATCH FILE]
@@ -245,6 +249,7 @@ You hunt tests that cannot fail, for batch B[NN] of [CHANGE_ID] in [REPO_PATH]. 
 Read/Grep/Glob and read-only git, and the `Write` tool only for what OUTPUT below names;
 edit nothing. Beyond those, run only the two harness tools PROOF below names, which work
 on disposable clones. Worktree: [WORKTREE_PATH].
+Never open another agent's prompt or facts file.
 
 Scope: every test added or modified in `git diff [INTEGRATION_BRANCH]...HEAD`, plus the
 production code each claims to cover. Testing guide / vacuity catalog, if the repo has
@@ -347,6 +352,7 @@ exit codes, output tail (≤20 lines) or the screenshot path, the integration SH
 step revision actually tested, the environment, a verdict PASS | FAIL | COULD-NOT-RUN
 with one line of reason. Do not edit
 anything else. Do not fix anything.
+Never open another agent's prompt or facts file.
 
 REPORT: one line per step — `step NN: PASS|FAIL|COULD-NOT-RUN — <reason>` — then ≤20
 lines on anything the user should know before running the human steps.
@@ -380,6 +386,7 @@ a `Runner: human` step — still READ them and report their bytes, since those a
 a person copy-pastes and a mangled backslash costs most there — and touch no data outside
 [DISPOSABLE_ENV or "none — steps touching data are human"]. Edit nothing: the page is
 issued, not repaired, by you.
+Never open another agent's prompt or facts file.
 
 REPORT: one line per block, in page order — `block NN (step NN): RAN-AS-PUBLISHED |
 FAILED-AS-PUBLISHED | COULD-NOT-RUN — <exit code, ≤5 lines of output tail>`. A block
@@ -393,6 +400,35 @@ STOP, and leaves the pre-smoke above exactly where it is. A FAILED-AS-PUBLISHED 
 is repaired on the page or its sidecar and the page re-issued and re-proofed; the
 pre-smoke evidence for that step stands.
 
+## Census (scaffold time — read-only)
+
+**Spawn with** `subagent_type: census`.
+
+```
+You are a read-only CENSUS agent for ONE planned batch, B[NN] of change [CHANGE_ID], in
+[REPO_PATH] at [BASE]. Use only Read/Grep/Glob, read-only git and read-only commands; edit
+nothing, and write only disposable scratch under your session scratchpad.
+Never open another agent's prompt or facts file.
+
+THE BATCH'S PLANNED CHANGE: [the draft batch file's planned change]
+FACTS TO FIND: [numbered; each names the files and symbols to settle]
+
+Open your report with a short list headed "Where the draft is wrong or incomplete": each
+place the planned change contradicts the code or misses something it must also change, one
+bullet each with `path:line`, or `none`.
+
+Then, for every file this batch changes, list every test that reads it (search the tests for the file's name), including tests that assert on something unrelated to this batch, and say whether the change could break it.
+
+Then grep the repository's backlog and bug trackers and its old ledgers under `.agents/` for every file this batch changes or depends on and for its main symbols; open the hits, and report any recorded finding, measurement or decision that bears on the planned change.
+
+Report: one bullet per file: `path:line — what — why`. At most 80 lines. Mark as UNVERIFIED anything you did not read in the file it depends on or run yourself, including your own inferences and recommendations, and name the platform of anything you ran.
+```
+
+One census per batch, never one agent for several batches. The report comes back as the
+agent's final message. `scaffolding.md` step 3 says how the orchestrator records its opening
+list in LOG.md; `protocol.md` §Fence changes and §Session algorithm step 4 say when a batch's
+`census` agent runs again during the run.
+
 ## Plan pre-flight (scaffold time — read-only)
 
 **Spawn with** `subagent_type: reviewer`.
@@ -400,6 +436,7 @@ pre-smoke evidence for that step stands.
 ```
 You are the independent PRE-FLIGHT reviewer of a change plan for [REPO_PATH]. You did not
 write it. Use only Read/Grep/Glob; edit nothing.
+Never open another agent's prompt or facts file.
 
 THE REQUEST (verbatim): [00-request.md TEXT]
 THE DRAFT PLAN: [01-plan.md TEXT]
@@ -454,6 +491,7 @@ the plan goes to the user and records the verdict in the plan's coverage audit a
 You verify that change [CHANGE_ID] in [REPO_PATH] converged with its plan. Read-only.
 Integration tip: [INTEGRATION_SHA]. Full diff: `git diff [BASE_SHA]..[INTEGRATION_SHA]
 -- . ':(exclude)[LEDGER_DIR]'` ([BASE_SHA] = the **Base** line of the PROGRESS preamble).
+Never open another agent's prompt or facts file.
 
 PLAN ITEMS with acceptance criteria: [ITEM TABLE + CRITERIA TEXT]
 
@@ -482,6 +520,7 @@ You are fixing [a smoke-test failure from checkpoint [CN] | a red integration ti
 merging B[NN] | a failed pre-smoke step [S]] of [CHANGE_ID] in [REPO_PATH]. Work in the
 worktree [WORKTREE_PATH], checked out on [FIXUP_BRANCH] (cut from the integration tip
 [INTEGRATION_SHA]). Do not create or switch branches, never push.
+Never open another agent's prompt or facts file.
 
 THE FAILURE REPORT (verbatim — this is the spec):
 [USER'S WORDS | FAILING VALIDATION OUTPUT | QA RUNNER EVIDENCE]
@@ -556,6 +595,9 @@ unmerged and the session STOPs with the three verdicts.
   Spawn or resume the agent with this ONE fixed pointer message, `<prompt file>` replaced
   by that path:
   `Your complete instructions are in the file <prompt file>. Open it with the Read tool before doing anything else and follow it to its last line, which gives your report's exact line 2.`
+  Render each prompt only as its own pointer goes out, never beside an earlier one — a
+  follow-up (`polish`, `fix-round`, `rework`, `reviewer-round2`) included — so no unsent
+  prompt waits in the prompts directory.
   The nonce stays with the orchestrator and never enters the pointer. A report whose line
   2 is not `NONCE <the nonce>` is treated as no report: the agent did not read its
   instructions to the end. A gate agent's `findingsFile` is
@@ -565,7 +607,7 @@ unmerged and the session STOPs with the three verdicts.
   `.md`), so a discarded agent's file never reaches LOG.md. When the renderer is unavailable
   or refuses (`UNKNOWN …`), the manual procedure is the skeleton filled by hand and pasted
   without its nonce line, and no nonce is checked. The QA runner, artifact proofer,
-  pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO
+  census, pre-flight, convergence and fix-up skeletons are always filled and pasted and carry NO
   nonce. The fix-up's "same fixed shape as the implementer" is that shape without the
   nonce line.
 - Findings travel by path, and reach LOG.md first: the orchestrator appends each findings

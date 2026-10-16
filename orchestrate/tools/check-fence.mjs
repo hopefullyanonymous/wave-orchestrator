@@ -97,11 +97,15 @@ export function checkFence({ repo, integration, batch, ledger: id, 'batch-id': b
     result.evidence.allowedPaths = [...fence, ...extension, batchFile];
   } catch (e) { unknowns.push(diagnostic('authority', e.message, { path: planPath })); }
   if (result.mergeBase) {
-    const diff = git(repo, ['diff', '--no-ext-diff', '--no-textconv', '--name-status', '-z', '-M', '-C', '--find-copies-harder', `${result.integrationSha}...${result.batchSha}`, '--'], options);
+    // -C without --find-copies-harder takes a copy source only from paths this diff changes,
+    // so a file the batch left untouched is never held to the fence as a copy source.
+    const diff = git(repo, ['diff', '--no-ext-diff', '--no-textconv', '--name-status', '-z', '-M', '-C', `${result.integrationSha}...${result.batchSha}`, '--'], options);
     if (!diff.ok) unknowns.push(diff.diagnostic);
     else try { result.evidence.changes = parseChanges(diff.text); } catch { unknowns.push(diagnostic('invalid-diff', 'Malformed committed name-status output')); }
     if (fence) for (const change of result.evidence.changes) for (const file of change.paths) if (!result.evidence.allowedPaths.includes(file)) violations.push(diagnostic('outside-fence', 'Changed path is outside captured plan fence and authorized extensions', { path: file, change: change.status }));
-    const batchChange = result.evidence.changes.find(c => c.paths.includes(batchFile));
+    // A copy whose source is the batch file is the copy's change: the batch file is judged by its own
+    // entry, which a copy sorting ahead of it must not stand in for.
+    const batchChange = result.evidence.changes.find(c => c.paths.includes(batchFile) && !(/^C/.test(c.status) && c.paths[0] === batchFile));
     if (batchChange && batchChange.status !== 'M') violations.push(diagnostic('batch-type', 'Own batch file cannot be added, deleted, renamed, copied or type-replaced', { path: batchFile }));
     const baselineMode = ordinaryBlob(repo, result.mergeBase, batchFile, unknowns, options);
     const proposedMode = ordinaryBlob(repo, result.batchSha, batchFile, unknowns, options);

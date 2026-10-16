@@ -615,7 +615,15 @@ function materializeBase(t) {
   }
   return dir;
 }
-test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', renders byte-identically to that renderer and its skeletons', { skip: 'needs history and ledger records that are not in this copy' }, async t => {
+// The one line B03 of OS-20261007 added to every skeleton, so to every render: how often a render
+// holds it, anywhere and as a line of its own, and the render with that one line taken out.
+const NEVER_OPEN = "Never open another agent's prompt or facts file.";
+function neverOpen(text) {
+  const lines = text.split('\n'), at = lines.flatMap((line, i) => line === NEVER_OPEN ? [i] : []);
+  return { count: text.split(NEVER_OPEN).length - 1, own: at.length,
+    rest: at.length === 1 ? [...lines.slice(0, at[0]), ...lines.slice(at[0] + 1)].join('\n') : null };
+}
+test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', renders byte-identically to that renderer and its skeletons, the never-open line aside', { skip: 'needs history and ledger records that are not in this copy' }, async t => {
   const fx = fixture(t), base = materializeBase(t), skeletons = read(SKELETONS);
   const now = await api(), then = await import(pathToFileURL(path.join(base, 'orchestrate', 'tools', 'prompt.mjs')).href);
   const baseSkeletons = fs.readFileSync(path.join(base, ...SKELETONS.split('/')), 'utf8');
@@ -628,9 +636,29 @@ test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', r
   const texts = { contract: file('00-READBEFORE.md'), plan: file('01-plan.md'), batchName: '02-batches-01-render-me.md', batchText: file('02-batches-01-render-me.md'), batch: 'B01' };
   const nonce = '0123456789ab', readGuardrails = name => fs.readFileSync(path.join(fx.worktree, name), 'utf8');
   const renderWith = (mod, text, role) => mod.render({ skeletons: text, ledger: mod.ledgerValues(texts), role, facts: pick(fx.facts, ROLE_FACTS[role]), nonce, readGuardrails });
-  for (const role of roles) assert.equal(renderWith(now, skeletons, role), renderWith(then, baseSkeletons, role), role + ': the render changed since ' + PROMPT_BASE);
+  // Every role the renderer has now, rework among them, holds the never-open line once, on a line
+  // of its own; each base role, that one line taken out, renders as it did at the base.
+  assert.ok(Object.hasOwn(now.ROLES, 'rework'), 'the role the base lacked is among those checked');
+  for (const role of Object.keys(now.ROLES)) {
+    const { count, own, rest } = neverOpen(renderWith(now, skeletons, role));
+    assert.deepEqual({ count, own }, { count: 1, own: 1 }, role + ': the never-open line, once, on a line of its own');
+    if (roles.includes(role)) assert.equal(rest, renderWith(then, baseSkeletons, role), role + ': the render changed since ' + PROMPT_BASE + ' beyond the never-open line');
+  }
   // Live control: one word of the implementer's DO paragraph changed is a different render.
   const changed = skeletons.replace('DO: implement each checklist item;', () => 'DO: implement every checklist item;');
   assert.notEqual(changed, skeletons, 'the control anchor must exist');
-  assert.notEqual(renderWith(now, changed, 'implementer'), renderWith(then, baseSkeletons, 'implementer'), 'a changed DO paragraph must show');
+  const changedRender = neverOpen(renderWith(now, changed, 'implementer'));
+  assert.equal(changedRender.own, 1, 'the control keeps the never-open line, so only the DO word differs');
+  assert.notEqual(changedRender.rest, renderWith(then, baseSkeletons, 'implementer'), 'a changed DO paragraph must show');
+  // Live controls, each count moved: the implementer block without its line, rendered as rework;
+  // the polish block with a second copy; the reviewer block's line joined to the line above it.
+  for (const [role, from, to, want] of [
+    ['rework', 'before it exits.\n' + NEVER_OPEN + '\n\nREPORT', 'before it exits.\n\nREPORT', { count: 0, own: 0 }],
+    ['polish', 'do not make the change.\n' + NEVER_OPEN + '\n', 'do not make the change.\n' + NEVER_OPEN + '\n' + NEVER_OPEN + '\n', { count: 2, own: 2 }],
+    ['reviewer', '(checked out on [BATCH_BRANCH]).\n' + NEVER_OPEN + '\n', '(checked out on [BATCH_BRANCH]). ' + NEVER_OPEN + '\n', { count: 1, own: 0 }],
+  ]) {
+    assert.equal(skeletons.split(from).length - 1, 1, 'the control anchor must occur once: ' + JSON.stringify(from));
+    const { count, own } = neverOpen(renderWith(now, skeletons.replace(from, () => to), role));
+    assert.deepEqual({ count, own }, want, role + ': the planted skeleton must change the count');
+  }
 });

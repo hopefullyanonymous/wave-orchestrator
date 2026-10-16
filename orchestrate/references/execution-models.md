@@ -102,7 +102,8 @@ batch or per wave by default.
 
 ## Wave mechanics (run time)
 
-1. **Open the wave**: from the integration tip, cut every member batch's branch;
+1. **Open the wave**: from the integration tip — after any `census` agent re-run that
+   `protocol.md` §Session algorithm step 4 calls for —, cut every member batch's branch;
    create one worktree per batch under the session scratchpad (never inside the
    repo); run the ledger's per-worktree setup; commit ONE PROGRESS flip on the
    integration branch through the integration worktree (member rows → 🔄, branches

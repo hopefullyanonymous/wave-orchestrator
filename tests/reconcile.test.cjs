@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { isDeepStrictEqual } = require('node:util');
 const { makeRepo } = require('./support/git-fixture.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -259,7 +260,7 @@ test('the checklist reader: items, wrapped lines, polish items, deferrals, comme
 
 // ===== Fixture repositories ===============================================================
 const LEDGER_ID = 'FIX-1', LEDGER_DIR = `.agents/changes/${LEDGER_ID}`, INTEGRATION = 'refs/heads/int';
-const contractText = (source, ref = 'refs/heads/main') => `# Contract\n\n## Git model\n\n- Default branch (protected local ref): \`refs/heads/main\`. Integration branch: \`int\` — the ledger branch.\n- Shipment source: \`${source}\`. Shipment ref: \`${ref}\` — the target.\n\n## Other\n`;
+const contractText = (source, ref = 'refs/heads/main', integration = 'int') => `# Contract\n\n## Git model\n\n- Default branch (protected local ref): \`refs/heads/main\`. Integration branch: \`${integration}\` — the ledger branch.\n- Shipment source: \`${source}\`. Shipment ref: \`${ref}\` — the target.\n\n## Other\n`;
 const batchText = id => `# ${id} — work\n\n**Branch**: \`feat/${id.toLowerCase()}\`\n\n## Checklist\n\n- [ ] first item\n- [ ] second item\n  wraps under it\n\n## Acceptance criteria\n\n- done\n`;
 const progressText = (rows, checkpoint = '| C1 | 2 | all | final | ⬜ | — |') => `# Progress\n\n**State**: ACTIVE\n\n## Batches\n\n| # | Batch | Branch | Wave | Version | Status | Updated | Notes |\n|---|---|---|---|---|---|---|---|\n`
   + rows.map(r => `| ${r.id} | work | \`${r.branch}\` | ${r.wave ?? 1} | — | ${r.status} | 2026-09-27 | ${r.notes ?? '—'} |`).join('\n')
@@ -383,12 +384,24 @@ test('rows: a fixture ledger prints its header, the right row per batch with pro
   assert.ok(tips.B03 && tips.B14, 'the merged batches were built');
   // As published, once: the same lines and exit code.
   assert.deepEqual(cli(repo, ['rows', '--repo', repo.cwd, '--ledger', LEDGER_ID, '--integration', INTEGRATION]), { status: 2, lines: expected });
-  // The main checkout's dirt counts for every row: B04's full checklist is now row 11.
+  // The main checkout's dirt counts only for a row whose branch it holds. On `int` it holds none:
+  // the user's stray file there changes no line.
   repo.write('stray.txt', 'untracked\n');
-  const dirty = (await rows(repo)).lines;
-  assert.equal(dirty[4], `B04 🔄 row 11: ${v[10]}`);
-  assert.deepEqual(dirty.filter((l, i) => l !== expected[i]), ['B04', 'B20', 'B23', 'B25', 'B26', 'B27'].map(id => `${id} 🔄 row 11: ${v[10]}`), 'only the rows that read dirt change (B13 matches row 6 first)');
+  assert.deepEqual(await rows(repo), { code: 2, lines: expected });
+  // On B04's branch, which no other worktree holds, the same file turns B04, and only B04, to row 11;
+  // `rows` reads the ledger from the `int` ref, so the switch changes nothing else it reads.
+  repo.git('checkout', '-q', 'feat/b04');
+  const held = expected.map(l => l.startsWith('B04 ') ? `B04 🔄 row 11: ${v[10]}` : l);
+  assert.deepEqual(held.filter((l, i) => l !== expected[i]), [`B04 🔄 row 11: ${v[10]}`], 'the control: B04 is a line, and not already row 11');
+  assert.deepEqual(await rows(repo), { code: 2, lines: held });
+  // At B04's tip but detached, the checkout holds no branch: the same file changes no line.
+  repo.git('checkout', '-q', '--detach', 'feat/b04');
+  assert.deepEqual(await rows(repo), { code: 2, lines: expected });
+  repo.git('checkout', '-q', 'feat/b04');
+  // Holding the branch is not dirt: the same checkout without the file reads B04 clean again.
   fs.rmSync(path.join(repo.cwd, 'stray.txt'));
+  assert.deepEqual(await rows(repo), { code: 2, lines: expected });
+  repo.git('checkout', '-q', 'int');
   // A batch worktree whose status cannot be read leaves that row UNKNOWN.
   fs.rmSync(path.join(repo.root, 'wt-B02'), { recursive: true, force: true });
   assert.equal((await rows(repo)).lines[2], 'B02 🔄 UNKNOWN dirty: a worktree status cannot be read');
@@ -591,9 +604,10 @@ test('discovery prints a working ledger in Node\'s native spelling, however the 
 });
 
 // ===== discovery of archived ledgers ======================================================
-// A ledger at a State, with a contract recording `remote origin`'s refs/heads/main as its shipment target.
-const writeLedger = (at, id, state) => {
-  at.write(`.agents/changes/${id}/PROGRESS.md`, discoveryLedger(state)); at.write(`.agents/changes/${id}/00-READBEFORE.md`, contractText('remote origin'));
+// A ledger at a State, with a contract recording `remote origin`'s refs/heads/main as its shipment target and
+// `integration` (`int` unless given) as its integration branch.
+const writeLedger = (at, id, state, integration) => {
+  at.write(`.agents/changes/${id}/PROGRESS.md`, discoveryLedger(state)); at.write(`.agents/changes/${id}/00-READBEFORE.md`, contractText('remote origin', undefined, integration));
 };
 const TARGET = 'remote origin refs/heads/main';
 // The laptop's shape at C1: two closed ledgers archived on main and on the ledger branch checked out
@@ -601,9 +615,11 @@ const TARGET = 'remote origin refs/heads/main';
 // ACTIVE, a ledger branch and its unpruned origin twin at AT-CHECKPOINT C1 — beside the live ledger,
 // and a ledger the leftover batch branch also holds, deleted where the other was archived. Every
 // contract records `remote origin` as its shipment source: a bare repository whose main holds both
-// archives, as a fetch left origin/main, and whose upload-pack records every query.
+// archives, as a fetch left origin/main, and whose upload-pack records every query. L-SLIM's contract names its
+// surviving ledger branch as its integration branch, so once its copies differ in State, only the archive cases
+// coming before the integration-branch rule keep it archived rather than settled there.
 function archivedFixture(t) {
-  const repo = repository(t), bare = repo.remote(), ledger = (id, state) => writeLedger(repo, id, state);
+  const repo = repository(t), bare = repo.remote(), ledger = (id, state) => writeLedger(repo, id, state, id === 'L-SLIM' ? 'chore/slim-ledger' : undefined);
   const archive = id => {
     ledger(id, 'COMPLETE'); fs.mkdirSync(path.join(repo.cwd, '.agents', 'archive'), { recursive: true });
     repo.git('mv', `.agents/changes/${id}`, `.agents/archive/${id}`);
@@ -893,11 +909,249 @@ test('discovery: an archive at the target that no commit introduced with a PROGR
   assert.deepEqual(await summary(repo), { code: 0, lines: [`L State=archived at ${TARGET} → none (older copies: feat/l-a=ACTIVE)`] });
 });
 
+// ===== discovery of a live ledger's own older copies =====================================
+// L opens ACTIVE on `int`, the integration branch writeLedger's contract names; feat/b01 is cut from it, ticks its
+// batch file and is merged; the close-out on `int` writes AT-CHECKPOINT C1, while feat/b01 keeps the ACTIVE copy of
+// its own ledger commit, an ancestor of `int`. The main checkout stays on main, which holds no ledger. The remote's
+// upload-pack records every query.
+function ownedFixture(t) {
+  const repo = repository(t), bare = repo.remote(), batch = '.agents/changes/L/02-batches-01-a.md';
+  repo.git('checkout', '-q', '-b', 'int'); writeLedger(repo, 'L', 'ACTIVE'); repo.write(batch, batchText('B01')); repo.commit('L opens');
+  repo.git('checkout', '-q', '-b', 'feat/b01'); repo.write(batch, batchText('B01').replace('- [ ] ', '- [x] ')); repo.write('b01.txt', 'B01\n'); repo.commit('B01 work');
+  repo.git('checkout', '-q', 'int'); repo.git('merge', '-q', '--no-ff', '-m', 'merge B01', 'feat/b01');
+  writeLedger(repo, 'L', 'AT-CHECKPOINT C1'); repo.commit('C1 close-out');
+  repo.git('checkout', '-q', 'main');
+  const marker = path.join(repo.root, 'queried'), script = path.join(repo.root, 'upload-pack.sh');
+  fs.writeFileSync(script, `#!/bin/sh\necho queried >> "${marker.split(path.sep).join('/')}"\nexec git upload-pack "$@"\n`, { mode: 0o755 });
+  repo.git('config', 'remote.origin.uploadpack', script.split(path.sep).join('/'));
+  const queries = () => { const n = fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).length : 0; fs.rmSync(marker, { force: true }); return n; };
+  // A commit on `base` made by `change` on a branch deleted again, so only the returned SHA remains.
+  const commitOn = (base, change) => {
+    repo.git('checkout', '-q', '-b', 'scratch', base); change();
+    const sha = repo.commit('scratch'); repo.git('checkout', '-q', 'main'); repo.git('branch', '-q', '-D', 'scratch');
+    return sha;
+  };
+  return { repo, bare, queries, commitOn };
+}
+
+test('discovery: copies proven older than their integration branch settle the line on its State; a newer copy, a divergent remote integration branch, or no copy on a local one leaves it AMBIGUOUS', async t => {
+  const { summarize } = await api, { discovery } = await evidence;
+  const { repo, queries, commitOn } = ownedFixture(t);
+  const differs = (at, states) => ({ code: 2, lines: [`L at ${at} → AMBIGUOUS (State differs: ${states})`] });
+  // As published. Before the fix this printed `L at feat/b01, int → AMBIGUOUS (State differs: feat/b01=ACTIVE, int=AT-CHECKPOINT C1)`, exit 2.
+  const settled = 'L State=AT-CHECKPOINT C1 at feat/b01, int → close';
+  assert.deepEqual(cli(repo, ['discovery', '--repo', repo.cwd]), { status: 0, lines: [settled] }, 'as published');
+  assert.deepEqual(await summary(repo), { code: 0, lines: [settled] });
+  // An earlier push of `int`; then a batch branch's remote copy, a remote branch whose name ends in `int` with no `/`
+  // before it, and a local branch whose name ends in `/int`, each with a commit of its own outside the ledger: every
+  // one older.
+  repo.git('update-ref', 'refs/remotes/origin/int', 'int~1');
+  repo.git('update-ref', 'refs/remotes/origin/feat/b01', commitOn('feat/b01', () => repo.write('more.txt', 'pushed\n')));
+  repo.git('update-ref', 'refs/remotes/origin/print', commitOn('feat/b01', () => repo.write('print.txt', 'a print fix\n')));
+  repo.git('update-ref', 'refs/heads/fix/int', commitOn('feat/b01', () => repo.write('fix.txt', 'a fix\n')));
+  const all = 'feat/b01, fix/int, int, origin/feat/b01, origin/int, origin/print';
+  const states = 'feat/b01=ACTIVE, fix/int=ACTIVE, int=AT-CHECKPOINT C1, origin/feat/b01=ACTIVE, origin/int=ACTIVE, origin/print=ACTIVE';
+  assert.deepEqual(await summary(repo), { code: 0, lines: [`L State=AT-CHECKPOINT C1 at ${all} → close`] }, 'older remote copies');
+  // origin/int at a commit git cannot test for ancestry, the evidence doctored: unknown is no proof.
+  const found = discovery({ repo: repo.cwd, env: repo.env }), clone = structuredClone(found);
+  clone.evidence.ledgers[0].locations.find(l => l.ref === 'refs/remotes/origin/int').sha = 'f'.repeat(40);
+  assert.deepEqual(summarize(structuredClone(found), { env: repo.env }), { code: 0, lines: [`L State=AT-CHECKPOINT C1 at ${all} → close`] }, 'the control: the copies as discovery found them');
+  assert.deepEqual(summarize(clone, { env: repo.env }), differs(all, states), 'origin/int unknown');
+  // A remote-tracking copy's contract naming another integration branch, the evidence doctored: no one branch is named.
+  const renamed = structuredClone(found), pushed = renamed.evidence.ledgers[0].locations.find(l => l.ref === 'refs/remotes/origin/feat/b01').provenance.contractTexts.find(c => c.path.endsWith('/00-READBEFORE.md'));
+  pushed.text = pushed.text.replace('Integration branch: `int`', () => 'Integration branch: `int2`');
+  assert.ok(pushed.text.includes('Integration branch: `int2`'), 'the control: the copy names int2');
+  assert.deepEqual(summarize(renamed, { env: repo.env }), differs(all, states), 'a remote-tracking copy naming int2');
+  // origin/int, then upstream/int, with a commit of its own outside the ledger: a divergent integration ref on any
+  // remote, though its ledger change is old.
+  const divergent = commitOn('int~1', () => repo.write('elsewhere.txt', 'pushed from elsewhere\n'));
+  repo.git('update-ref', 'refs/remotes/origin/int', divergent);
+  assert.deepEqual(await summary(repo), differs(all, states), 'a divergent origin/int');
+  repo.git('update-ref', 'refs/remotes/origin/int', 'int~1'); repo.git('update-ref', 'refs/remotes/upstream/int', divergent);
+  assert.deepEqual(await summary(repo), differs(`${all}, upstream/int`, `${states}, upstream/int=ACTIVE`), 'a divergent upstream/int');
+  for (const ref of ['refs/remotes/origin/int', 'refs/remotes/origin/feat/b01', 'refs/remotes/origin/print', 'refs/remotes/upstream/int', 'refs/heads/fix/int']) repo.git('update-ref', '-d', ref);
+  // A batch branch whose own ledger commit `int` lacks is newer, whatever State it writes: another, then int's own.
+  repo.git('update-ref', 'refs/heads/feat/b02', commitOn('int', () => repo.write('.agents/changes/L/PROGRESS.md', discoveryLedger('USER-BLOCKED'))));
+  assert.deepEqual(await summary(repo), differs('feat/b01, feat/b02, int', 'feat/b01=ACTIVE, feat/b02=USER-BLOCKED, int=AT-CHECKPOINT C1'), 'a newer ledger commit');
+  repo.git('update-ref', 'refs/heads/feat/b02', commitOn('int', () => repo.write('.agents/changes/L/02-batches-02-b.md', batchText('B02'))));
+  assert.deepEqual(await summary(repo), differs('feat/b01, feat/b02, int', 'feat/b01=ACTIVE, feat/b02=AT-CHECKPOINT C1, int=AT-CHECKPOINT C1'), 'a newer ledger commit agreeing with int');
+  repo.git('branch', '-q', '-D', 'feat/b02');
+  // The newer ledger commit pushed, held by a remote-tracking copy alone.
+  repo.git('update-ref', 'refs/remotes/origin/feat/b02', commitOn('int', () => repo.write('.agents/changes/L/PROGRESS.md', discoveryLedger('USER-BLOCKED'))));
+  assert.deepEqual(await summary(repo), differs('feat/b01, int, origin/feat/b02', 'feat/b01=ACTIVE, int=AT-CHECKPOINT C1, origin/feat/b02=USER-BLOCKED'), 'a newer remote-tracking copy');
+  repo.git('update-ref', '-d', 'refs/remotes/origin/feat/b02');
+  // No local `int`: an earlier push stands for it alone. Then a local `int` whose tip holds no copy, the ledger deleted
+  // there, every other copy older than it.
+  const tip = repo.git('rev-parse', 'int');
+  repo.git('update-ref', 'refs/remotes/origin/int', tip); repo.git('branch', '-q', '-D', 'int');
+  assert.deepEqual(await summary(repo), differs('feat/b01, origin/int', 'feat/b01=ACTIVE, origin/int=AT-CHECKPOINT C1'), 'no local int');
+  repo.git('update-ref', 'refs/heads/int', commitOn(tip, () => repo.git('rm', '-r', '-q', '.agents/changes/L')));
+  assert.deepEqual(await summary(repo), differs('feat/b01, origin/int', 'feat/b01=ACTIVE, origin/int=AT-CHECKPOINT C1'), 'an int that holds no copy');
+  repo.git('update-ref', 'refs/heads/int', tip);
+  assert.deepEqual(await summary(repo), { code: 0, lines: [`L State=AT-CHECKPOINT C1 at feat/b01, int, origin/int → close`] }, 'int restored');
+  // Every proof is local: no run asked the remote. The control: a query of it is counted.
+  assert.equal(queries(), 0, 'no discovery run asks the remote');
+  repo.git('ls-remote', '-q', 'origin');
+  assert.equal(queries(), 1, 'the control: a query of the remote is counted');
+});
+
+test('discovery: a checkout stands for its branch\'s copy, the integration branch\'s included, until an uncommitted change touches the ledger', async t => {
+  const { summarize } = await api, { discovery } = await evidence;
+  const { repo } = ownedFixture(t);
+  // Linked worktrees of `int` and of the batch branch, which git lists in spellings of their own.
+  const onInt = path.join(repo.root, 'wt-int'), onBatch = path.join(repo.root, 'wt-b01'), copy = (at, file = 'PROGRESS.md') => path.join(at, '.agents', 'changes', 'L', file);
+  repo.git('worktree', 'add', '-q', onInt, 'int'); respell(repo, onInt);
+  repo.git('worktree', 'add', '-q', onBatch, 'feat/b01'); respell(repo, onBatch);
+  const at = `feat/b01, int, ${copy(onBatch)}, ${copy(onInt)}`, settled = { code: 0, lines: [`L State=AT-CHECKPOINT C1 at ${at} → close`] };
+  const differs = (batch, int) => ({ code: 2, lines: [`L at ${at} → AMBIGUOUS (State differs: feat/b01=ACTIVE, int=AT-CHECKPOINT C1, ${copy(onBatch)}=${batch}, ${copy(onInt)}=${int})`] });
+  assert.deepEqual(await summary(repo), settled);
+  // A change outside the ledger leaves each checkout's copy its branch's.
+  for (const wt of [onInt, onBatch]) fs.writeFileSync(path.join(wt, 'scratch.txt'), 'untracked\n');
+  assert.deepEqual(await summary(repo), settled, 'changes outside the ledger');
+  // On the integration branch, an uncommitted edit that changes the State, then one that keeps it.
+  fs.writeFileSync(copy(onInt), discoveryLedger('USER-BLOCKED'));
+  assert.deepEqual(await summary(repo), differs('ACTIVE', 'USER-BLOCKED'), 'a State edited on int');
+  fs.appendFileSync(copy(onInt, '02-batches-01-a.md'), '- [ ] polish: an uncommitted item\n'); fs.writeFileSync(copy(onInt), discoveryLedger('AT-CHECKPOINT C1'));
+  assert.deepEqual(await summary(repo), differs('ACTIVE', 'AT-CHECKPOINT C1'), 'a batch file edited on int');
+  repo.at(onInt).git('checkout', '--', '.agents/changes/L/');
+  // On the batch branch, an uncommitted edit under the ledger.
+  fs.appendFileSync(copy(onBatch, '02-batches-01-a.md'), '- [ ] polish: an uncommitted item\n');
+  assert.deepEqual(await summary(repo), differs('ACTIVE', 'AT-CHECKPOINT C1'), 'a batch file edited on feat/b01');
+  repo.at(onBatch).git('checkout', '--', '.agents/changes/L/');
+  assert.deepEqual(await summary(repo), settled, 'the edits undone');
+  // A State edit git status does not see, under assume-unchanged and under skip-worktree, on each checkout: the State
+  // read there is not its branch's. The control for each: status is silent about the ledger.
+  const file = '.agents/changes/L/PROGRESS.md', hidden = [];
+  for (const [wt, want] of [[onInt, differs('ACTIVE', 'USER-BLOCKED')], [onBatch, differs('USER-BLOCKED', 'AT-CHECKPOINT C1')]]) {
+    for (const flag of ['assume-unchanged', 'skip-worktree']) {
+      const tree = repo.at(wt);
+      tree.git('update-index', `--${flag}`, file); fs.writeFileSync(copy(wt), discoveryLedger('USER-BLOCKED'));
+      const silent = !tree.git('status', '--porcelain', '--untracked-files=all').includes('.agents/'), got = await summary(repo);
+      if (!silent || !isDeepStrictEqual(got, want)) hidden.push({ flag, wt, silent, got });
+      tree.git('update-index', `--no-${flag}`, file); tree.git('checkout', '--', file);
+    }
+  }
+  assert.deepEqual(hidden, [], 'each hidden State edit: status silent, the line AMBIGUOUS');
+  assert.deepEqual(await summary(repo), settled, 'the hidden edits undone');
+  // Facts no fixture reaches, the evidence doctored, git as found: a checkout whose HEAD is not its branch's tip, and one
+  // read clean at another State (an edit after its status was read).
+  const found = discovery({ repo: repo.cwd, env: repo.env }), stale = repo.git('rev-parse', 'int~1');
+  const doctored = (branch, change) => { const clone = structuredClone(found); change(clone.evidence.ledgers[0].locations.find(l => l.kind === 'worktree' && l.branch === branch)); return summarize(clone, { env: repo.env }); };
+  assert.deepEqual(summarize(structuredClone(found), { env: repo.env }), settled, 'the control: the checkouts as discovery found them');
+  assert.deepEqual(found.evidence.ledgers[0].locations.filter(l => l.kind === 'worktree').map(l => l.branch), ['refs/heads/feat/b01', 'refs/heads/int'], 'the control: discovery lists both checkouts');
+  const unsettled = [];
+  for (const branch of ['refs/heads/feat/b01', 'refs/heads/int']) {
+    const blocked = branch === 'refs/heads/int' ? differs('ACTIVE', 'USER-BLOCKED') : differs('USER-BLOCKED', 'AT-CHECKPOINT C1');
+    for (const [what, change, want] of [['a HEAD its branch is not at', l => { l.head = stale; }, differs('ACTIVE', 'AT-CHECKPOINT C1')],
+      ['clean at another State', l => { l.cleanliness = 'clean'; l.status = []; l.progressText = discoveryLedger('USER-BLOCKED'); }, blocked]]) {
+      const got = doctored(branch, change);
+      if (!isDeepStrictEqual(got, want)) unsettled.push({ what, branch, got });
+    }
+  }
+  assert.deepEqual(unsettled, [], 'each doctored checkout leaves the line AMBIGUOUS');
+  // Discovery spells a checkout's contract path natively; in either separator the contract is read: as found it
+  // settles, and int's checkout contract naming `int2` leaves the line AMBIGUOUS.
+  const contractFile = /(?:^|[\\/])00-READBEFORE\.md$/;
+  const contracts = found.evidence.ledgers[0].locations.filter(l => l.kind === 'worktree').flatMap(l => l.contractTexts).filter(c => contractFile.test(c.path));
+  assert.equal(contracts.length, 2, 'the control: each checkout copy carries its contract');
+  const spelled = (sep, name) => {
+    const clone = structuredClone(found);
+    let renamed = 0;
+    for (const l of clone.evidence.ledgers[0].locations) {
+      for (const c of l.contractTexts ?? []) {
+        c.path = c.path.split(/[\\/]/).join(sep);
+        if (name && l.branch === 'refs/heads/int' && contractFile.test(c.path)) { c.text = c.text.replace('Integration branch: `int`', () => `Integration branch: \`${name}\``); renamed += c.text.includes(`\`${name}\``) ? 1 : 0; }
+      }
+    }
+    assert.equal(renamed, name ? 1 : 0, 'the control: int\'s checkout contract names the branch given');
+    return summarize(clone, { env: repo.env });
+  };
+  const misread = ['\\', '/'].flatMap(sep => [[sep, undefined, settled], [sep, 'int2', differs('ACTIVE', 'AT-CHECKPOINT C1')]])
+    .filter(([sep, name, want]) => !isDeepStrictEqual(spelled(sep, name), want)).map(([sep, name]) => `${sep} ${name ?? 'int'}`);
+  assert.deepEqual(misread, [], 'a checkout contract path in either separator is read');
+  // A detached checkout at int's tip has no branch copy to stand for.
+  const detached = path.join(repo.root, 'wt-detached');
+  repo.git('worktree', 'add', '-q', '--detach', detached, 'int'); respell(repo, detached);
+  const three = `feat/b01, int, ${copy(onBatch)}, ${copy(detached)}, ${copy(onInt)}`;
+  assert.deepEqual(await summary(repo), { code: 2, lines: [`L at ${three} → AMBIGUOUS (State differs: feat/b01=ACTIVE, int=AT-CHECKPOINT C1, ${copy(onBatch)}=ACTIVE, ${copy(detached)}=AT-CHECKPOINT C1, ${copy(onInt)}=AT-CHECKPOINT C1)`] }, 'a detached checkout');
+});
+
+test('discovery: every copy\'s contract names one integration branch, its copy at the tip git resolves, and git answers each proof, or the line stays AMBIGUOUS', async t => {
+  const { summarize } = await api, { discovery } = await evidence;
+  const { repo, commitOn } = ownedFixture(t);
+  const settled = { code: 0, lines: ['L State=AT-CHECKPOINT C1 at feat/b01, int → close'] };
+  const differs = { code: 2, lines: ['L at feat/b01, int → AMBIGUOUS (State differs: feat/b01=ACTIVE, int=AT-CHECKPOINT C1)'] };
+  // The evidence doctored copy by copy (feat/b01's first, int's second), git as found.
+  const found = discovery({ repo: repo.cwd, env: repo.env });
+  const doctored = change => { const clone = structuredClone(found); clone.evidence.ledgers[0].locations.forEach((l, i) => change(l, i)); return summarize(clone, { env: repo.env }); };
+  assert.deepEqual(doctored(() => {}), settled, 'the control: the copies as discovery found them');
+  // Each copy's contract read as `rows` reads one: `refs/heads/int` is `int`, beside it or in both copies.
+  const contract = (l, text) => { const list = l.provenance.contractTexts, at = list.findIndex(c => c.path.endsWith('/00-READBEFORE.md')); if (text === null) list.splice(at, 1); else list[at].text = text; };
+  const naming = name => contractText('remote origin').replace('Integration branch: `int`', () => `Integration branch: \`${name}\``);
+  assert.ok(naming('x').includes('Integration branch: `x`'), 'the control: the contract names the branch it is given');
+  assert.deepEqual(doctored((l, i) => contract(l, naming(i ? 'refs/heads/int' : 'int'))), settled, 'refs/heads/int beside int');
+  assert.deepEqual(doctored(l => contract(l, naming('refs/heads/int'))), settled, 'refs/heads/int in both');
+  const unread = { 'no contract': null, 'no Git model': contractText('remote origin').replace('## Git model', '## Model'),
+    'no Integration branch label': contractText('remote origin').replace('Integration branch: `int` — the ledger branch.', ''),
+    'the label given twice': contractText('remote origin').replace('\n\n## Other', '\n- Integration branch: `int`.\n\n## Other'),
+    'another integration branch': naming('int2'), 'an empty branch name': naming('refs/heads/') };
+  const settledInstead = [0, 1].flatMap(which => Object.entries(unread)
+    .filter(([, text]) => !isDeepStrictEqual(doctored((l, i) => { if (i === which) contract(l, text); }), differs)).map(([what]) => `${what}, copy ${which}`));
+  assert.deepEqual(settledInstead, [], 'each contract not naming the one integration branch, on either copy, leaves the line AMBIGUOUS');
+  // The integration branch's copy must be the one at its tip; every copy, that one included, is proven by its last
+  // ledger-changing commit, holding that very subtree, which git finds an ancestor of the tip.
+  const older = repo.git('rev-parse', 'int~1');
+  assert.deepEqual(doctored((l, i) => { if (i === 1) l.sha = older; }), differs, 'int\'s copy read at another commit');
+  // The tip is read from git, never from the evidence: `int` moved on after discovery read it, then a name git is never
+  // asked about (an unsafe revision), though the evidence holds a ref of that name at int's tip.
+  const tip = repo.git('rev-parse', 'int');
+  repo.git('update-ref', 'refs/heads/int', commitOn('int', () => repo.write('.agents/changes/L/PROGRESS.md', discoveryLedger('USER-BLOCKED'))));
+  assert.deepEqual(doctored(() => {}), differs, 'int moved after discovery');
+  repo.git('update-ref', 'refs/heads/int', tip);
+  assert.deepEqual(doctored(() => {}), settled, 'the control: int back at the tip discovery read');
+  assert.deepEqual(doctored((l, i) => { contract(l, naming('int x')); if (i === 1) l.ref = 'refs/heads/int x'; }),
+    { code: 2, lines: ['L at feat/b01, int x → AMBIGUOUS (State differs: feat/b01=ACTIVE, int x=AT-CHECKPOINT C1)'] }, 'an unsafe revision');
+  assert.deepEqual(doctored((l, i) => { if (i === 1) l.provenance.lastChange = null; }), differs, 'int\'s copy with no last ledger-changing commit');
+  assert.deepEqual(doctored((l, i) => { if (i === 0) l.provenance.lastChange = null; }), differs, 'no last ledger-changing commit');
+  assert.deepEqual(doctored((l, i) => { if (i === 0) l.provenance.lastChangeTree = l.provenance.tree.replace(/^./, c => c === '0' ? '1' : '0'); }), differs, 'a last change holding another subtree');
+  assert.deepEqual(doctored((l, i) => { if (i === 0) l.provenance.lastChange = 'f'.repeat(40); }), differs, 'a last change git cannot test: ancestry unknown');
+  // The settled State is read as any other: one in no accepted form is UNKNOWN, an empty one included, never State differs.
+  assert.deepEqual(doctored((l, i) => { if (i === 1) l.provenance.progressText = discoveryLedger('DONE'); }), { code: 2, lines: ['L State=DONE at feat/b01, int → UNKNOWN (State DONE is in no accepted form)'] });
+  assert.deepEqual(doctored((l, i) => { if (i === 1) l.provenance.progressText = discoveryLedger(''); }), { code: 2, lines: ['L State= at feat/b01, int → UNKNOWN (State  is in no accepted form)'] }, 'an empty State');
+  // A git that does not run: the tip is not resolved, and the line stays AMBIGUOUS, never a throw. The archive listing
+  // is in doubt too.
+  assert.deepEqual(await summary(repo, { ...repo.env, PATH: repo.root, Path: repo.root }), { code: 2, lines: ['INCOMPLETE 1 diagnostic(s): archive-unavailable', ...differs.lines] }, 'git not found');
+  // Copies carrying no contract, as the synthetic calls in tests/tool-docs.test.cjs give them, ask git nothing: an env
+  // whose keys are read only by a git probe stays unread. The control: the same copies with their contracts ask git.
+  const asks = locations => {
+    let read = false;
+    const env = new Proxy({ ...repo.env }, { ownKeys: target => { read = true; return Reflect.ownKeys(target); } });
+    summarize({ repo: repo.cwd, completeness: 'complete', diagnostics: [], evidence: { ledgers: [{ id: 'L', locations }] } }, { env });
+    return read;
+  };
+  const copies = found.evidence.ledgers[0].locations;
+  assert.equal(asks(structuredClone(copies)), true, 'the control: copies with their contracts ask git');
+  assert.equal(asks(copies.map(l => ({ ...structuredClone(l), provenance: { ...structuredClone(l.provenance), contractTexts: [] } }))), false, 'copies with no contract ask git nothing');
+});
+
 test('the CLI: --help, and every invalid invocation is one UNKNOWN line with exit 2', async t => {
   const repo = repository(t);
   const help = cli(repo, ['--help']);
   assert.equal(help.status, 0); assert.match(help.lines[0], /^reconcile\.mjs discovery --repo <repo>$/);
   assert.ok(help.lines.some(l => l.includes('runs no validation')), 'HELP says reconcile runs no validation');
+  // The State-differs passage, whole: copies proven older settle on the integration branch's State, never always AMBIGUOUS.
+  const flat = help.lines.join(' ').replace(/\s+/g, ' '), from = 'Copies of one id that disagree on State', to = "SKILL.md §Discovery's provenance rules to";
+  const start = flat.indexOf(from), end = flat.indexOf(to, start);
+  assert.ok(start >= 0 && end > start, 'the passage bounds resolve in --help');
+  assert.equal(flat.slice(start, end + to.length), "Copies of one id that disagree on State settle on the State their integration branch holds when every copy's contract"
+    + ' names that branch, its tip holds a copy, and every other copy is proven older than that tip as an archive proves one below (a remote-tracking'
+    + ' copy of that branch with its own tip an ancestor too); otherwise, a checkout of that branch with an uncommitted ledger edit included, they print'
+    + " `→ AMBIGUOUS (State differs: <location>=<value>, …)`: apply SKILL.md §Discovery's provenance rules to");
+  // Once, and nowhere else: --help states the rule in that passage alone, so a contradiction planted elsewhere reddens.
+  assert.deepEqual(['disagree on State', 'State differs', 'AMBIGUOUS'].map(w => flat.split(w).length - 1), [1, 1, 3], 'HELP states the State-differs rule once');
+  assert.equal(flat.split(from).length, 2, 'the passage appears once');
+  const rest = flat.slice(0, start) + flat.slice(end + to.length);
+  assert.deepEqual([/disagree on State/, /State differs/].filter(re => re.test(rest)), [], '--help says nothing else of disagreeing States');
   const { reconcileCli } = await api;
   for (const args of [[], ['status'], ['discovery'], ['discovery', '--repo'], ['rows', '--repo', '.', '--ledger', 'X'], ['discovery', '--repo', '.', '--extra', 'x'], ['--help', 'x']]) {
     const r = reconcileCli(args);
