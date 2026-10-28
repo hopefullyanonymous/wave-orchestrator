@@ -27,7 +27,12 @@ Greppable shapes, no understanding of the code required (moved from `CLAUDE.md` 
 - a corpus whose every entry sits inside the pattern's own bound (derived from it, whatever
   the comment says) — write it as prose first, pin its size and set, and require each pattern
   to own an entry no other catches;
-- an out-parameter passed inline as a fresh literal and never bound.
+- an out-parameter passed inline as a fresh literal and never bound;
+- a sweep built on another test's unit reader — it inherits that reader's exclusions, as a
+  directive sweep did that read no heading where the template's headings carry directives
+  (`OS-20261022` B03 R3);
+- an exclusion deferred to another guard's pin but bounded by its own, wider anchors — the text
+  between the cut's end and the pin's is read by neither (`OS-20261022` B06 R2–R3).
 
 ## A sweep blind to an edit that NARROWS a rule's scope
 
@@ -55,6 +60,11 @@ Each repair emulates the other platform on every platform, never skipping:
 - `skillCopy`'s `eol` argument in `tests/scaffold.test.cjs`;
 - `respell`, a worktree's admin `gitdir` rewritten with a `/./` segment, in `tests/reconcile.test.cjs`;
 - `windowsSpec`, node's real runner behind a shim that respells `tests/`, in `tests/failing-on-base.test.cjs`.
+
+At `OS-20261022` C1 step 13 an emulation itself failed on Windows: a test built its CRLF form by
+converting README as read from the checkout, so a CRLF checkout became CR CR LF. Build both forms
+from one canonical text (`tests/orchestrate-mod-cost.test.cjs`'s README §Use test, `d4b7ea9`);
+the siblings are BL-106.
 
 ## A test that reads a child's raw output
 

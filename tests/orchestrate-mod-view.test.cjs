@@ -234,11 +234,67 @@ test('conductorOf: no tokens and no percent before the live window\'s first resp
   assert.deepEqual(conductorOf({ tokens: -1, window: 'x', percent: NaN }), { tokens: null, window: null, percent: null });
 });
 
-test('the safe point is the 300K protocol.md names', async () => {
-  const { SAFE_POINT } = await view;
-  const named = [...PROTOCOL.matchAll(/past about (\d+)K\b/g)].map(m => Number(m[1]) * 1000);
-  assert.ok(named.length >= 1, 'protocol.md names a safe point');
-  assert.deepEqual([...new Set(named)], [SAFE_POINT]);
+// The two documents that state the clear threshold of a contract without the line, each in one passage: protocol.md in
+// §Session algorithm step 8's compaction passage, from its first sentence up to **Session practices**, and README.md
+// in §Clear and continue. Each fault in `where`'s `text` against the mod's default `safePoint`: the passage not found,
+// the default not stated once there, a stated default other than `safePoint`, and any other size the file names, in the
+// passage or out of it, which would stand beside the contract's threshold as a second one. No size is exempt: the
+// fresh-implementer line protocol.md once named in §Severity and round accounting is prompt.mjs's alone now.
+const README = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
+const DEFAULT_HOMES = {
+  'step 8': ['Compaction happens only at a safe point', '\n\n**Session practices**'],
+  'README': ['### Clear and continue', '\n\n## Requirements'],
+};
+const STATED_DEFAULT = /`\*\*Clear threshold\*\*` line \((\d+)K for a contract without one\)/g;
+const SIZE = /\b\d[\d,.]*\s*(?:[KM]|tokens?)\b/gi;
+function defaultFaults(where, text, safePoint) {
+  const [from, to] = DEFAULT_HOMES[where], start = text.indexOf(from), end = start === -1 ? -1 : text.indexOf(to, start);
+  if (start === -1 || end === -1) return [where + ': no passage from ' + JSON.stringify(from)];
+  const passage = text.slice(start, end).replace(/\s+/g, ' '), stated = [...passage.matchAll(STATED_DEFAULT)].map(m => Number(m[1]) * 1000);
+  const faults = [...(stated.length === 1 ? [] : [where + ' states the default ' + stated.length + ' times, not once']),
+    ...stated.filter(size => size !== safePoint).map(size => where + ' states the default ' + size + ', not the mod\'s ' + safePoint),
+    ...[...passage.replace(STATED_DEFAULT, '').matchAll(SIZE)].map(m => where + ' names ' + m[0] + ' outside its default')];
+  const rest = (text.slice(0, start) + '\n' + text.slice(end)).replace(/\s+/g, ' ');
+  return [...faults, ...[...rest.matchAll(SIZE)].map(m => where + ' names ' + m[0] + ' outside its passage')];
+}
+test("the mod's default clear threshold is the one protocol.md's step 8 and README state, and neither names another size", async () => {
+  const { SAFE_POINT } = await view, stated = '(300K for a contract without one)';
+  assert.deepEqual([defaultFaults('step 8', PROTOCOL, SAFE_POINT), defaultFaults('README', README, SAFE_POINT)], [[], []]);
+  assert.ok(PROTOCOL.split(stated).length === 2 && README.split(stated).length === 2, 'the controls must find the stated default once in each');
+  const inside = 'never treated as below the threshold.\n', before = 'Compaction happens only at a safe point', freshRule = 'When the fix-round render\n  prints `FRESH`';
+  const readmeInside = 'for you to type.\n', readmeAfter = '\n\n## Requirements\n';
+  assert.ok([inside, before, freshRule].every(anchor => PROTOCOL.split(anchor).length === 2) && [readmeInside, readmeAfter].every(anchor => README.split(anchor).length === 2),
+    'the controls must find their anchors once');
+  const plant = (text, find, put) => text.replace(find, () => put);
+  // Each control's faults, collected before the one comparison, so a red shows every control's outcome.
+  const controls = [
+    ['the default rewritten', 'step 8', plant(PROTOCOL, stated, '(250K for a contract without one)'), SAFE_POINT, ['step 8 states the default 250000, not the mod\'s ' + SAFE_POINT]],
+    ['the default gone', 'step 8', plant(PROTOCOL, stated, '(the mod\'s default for a contract without one)'), SAFE_POINT, ['step 8 states the default 0 times, not once']],
+    ['a mod whose default differs', 'step 8', PROTOCOL, 250000, ['step 8 states the default ' + SAFE_POINT + ', not the mod\'s 250000']],
+    ['the old size put back', 'step 8', plant(PROTOCOL, inside, inside + '   At a safe point with context past about 300K tokens, it posts ONE line.\n'), SAFE_POINT,
+      ['step 8 names 300K outside its default']],
+    ['a size in other words', 'step 8', plant(PROTOCOL, inside, inside + '   Past 250k, or 250,000 tokens, it posts ONE line.\n'), SAFE_POINT,
+      ['step 8 names 250k outside its default', 'step 8 names 250,000 tokens outside its default']],
+    ['a size just before the passage', 'step 8', plant(PROTOCOL, before, 'With context past about 250K tokens, the orchestrator names its size in its next message.\n   ' + before), SAFE_POINT,
+      ['step 8 names 250K outside its passage']],
+    ['a size in millions just before the passage', 'step 8', plant(PROTOCOL, before, 'With context past about 0.3M tokens, the orchestrator names its size in its next message.\n   ' + before), SAFE_POINT,
+      ['step 8 names 0.3M outside its passage']],
+    ['the fresh-implementer size put back', 'step 8', plant(PROTOCOL, freshRule, 'Past about 400K tokens of\n  implementer context, or when the fix-round render\n  prints `FRESH`'), SAFE_POINT,
+      ['step 8 names 400K outside its passage']],
+    ['the passage gone', 'step 8', plant(PROTOCOL, before, 'Compaction happens at a safe point'), SAFE_POINT,
+      ['step 8: no passage from "Compaction happens only at a safe point"']],
+    ["README's default rewritten", 'README', plant(README, stated, '(250K for a contract without one)'), SAFE_POINT, ['README states the default 250000, not the mod\'s ' + SAFE_POINT]],
+    ["README, a mod whose default differs", 'README', README, 250000, ['README states the default ' + SAFE_POINT + ', not the mod\'s 250000']],
+    ["README, a second size", 'README', plant(README, readmeInside, readmeInside + '  Past about 250K the conductor clears.\n'), SAFE_POINT, ['README names 250K outside its default']],
+    ["README, a size just after the passage", 'README', plant(README, readmeAfter, readmeAfter + '\nThe mod clears past 250K.\n'), SAFE_POINT, ['README names 250K outside its passage']],
+  ];
+  assert.deepEqual(controls.map(([what, where, text, safePoint]) => [what, defaultFaults(where, text, safePoint)]), controls.map(([what, , , , faults]) => [what, faults]));
+});
+
+test('the default safe point is the clear threshold ledger-view.mjs gives a contract with no threshold line', async () => {
+  const { SAFE_POINT } = await view, { DEFAULT_CLEAR_THRESHOLD } = await ledgerViewTool;
+  assert.equal(typeof DEFAULT_CLEAR_THRESHOLD, 'number');
+  assert.equal(SAFE_POINT, DEFAULT_CLEAR_THRESHOLD);
 });
 
 // ===== The pane, the text, the band =====================================================
@@ -344,6 +400,23 @@ test('a context reading with tokens and no percent reads (?), never (0%)', async
   assert.equal(lines.at(-2), 'conductor  412K of 1M (?) · safe point at 300K');
 });
 
+test('the safe point is the shown ledger\'s clear threshold; with none, one carrying an error, or no ledger to read, the default', async () => {
+  const { paneLines } = await view;
+  const conductor = data => paneLines(data, 100).map(l => l.text).find(text => text.startsWith('conductor '));
+  const shown = over => dataOf({ view: { incomplete: false, ledger: ledgerOf(over), more: 0 } });
+  const own = tokens => ({ tokens, source: 'contract' });
+  assert.deepEqual([shown({ clearThreshold: own(250000) }), shown({ clearThreshold: own(450000) }), shown({ clearThreshold: { tokens: 250000, source: 'default' } }),
+    { ...shown({ clearThreshold: own(250000) }), conductor: null }, shown({ clearThreshold: own(250000), error: 'UNKNOWN rows did not complete: exit 1' }),
+    shown({ clearThreshold: own(0) })].map(conductor), [
+    'conductor  412K of 1M (41%) · safe point at 250K', 'conductor  412K of 1M (41%) · safe point at 450K', 'conductor  412K of 1M (41%) · safe point at 250K',
+    'conductor context unknown · safe point at 250K', 'conductor  412K of 1M (41%) · safe point at 250K', 'conductor  412K of 1M (41%) · safe point at 0K']);
+  const fallback = [shown({ clearThreshold: { error: 'lines 5, 6 each open with **Clear threshold**' } }), shown({ clearThreshold: null }), shown({}),
+    dataOf({ view: { error: 'node cannot start' } }), dataOf({ view: { incomplete: false, ledger: null, more: 0 } }),
+    // A view that cannot be read names no threshold, even beside a ledger that carries one.
+    dataOf({ view: { error: 'x', incomplete: false, ledger: ledgerOf({ clearThreshold: own(250000) }), more: 0 } })];
+  assert.deepEqual(fallback.map(conductor), fallback.map(() => 'conductor  412K of 1M (41%) · safe point at 300K'));
+});
+
 test('bandLine: id, wave, the latest agent as <Bnn> R<k> <role>, context, dollars, /ledger; each unknown segment left out', async () => {
   const { bandLine } = await view;
   const full = 'OS-…-ledger-mod · W2 · B03 R2 implementer · ctx 412K/1M · $24.33 · /ledger';
@@ -433,7 +506,7 @@ test('readView reads what ledger-view.mjs prints: a fixture ledger drawn row by 
   repo.git('config', 'maintenance.auto', 'false');
   repo.git('config', 'gc.auto', '0');
   const table = (columns, rows) => [`| ${columns.join(' | ')} |`, `|${columns.map(() => '---').join('|')}|`, ...rows.map(r => `| ${r.join(' | ')} |`)].join('\n');
-  const contract = '# Contract\n\n**Change**: fixture\n**Skill**: `' + SKILL + '` · sha256 `' + 'ab'.repeat(32) + '`\n\n## Git model\n\n'
+  const contract = '# Contract\n\n**Change**: fixture\n**Skill**: `' + SKILL + '` · sha256 `' + 'ab'.repeat(32) + '`\n**Clear threshold**: 250K\n\n## Git model\n\n'
     + '- Default branch (protected local ref): `refs/heads/main`. Integration branch: `int` — the ledger branch.\n'
     + '- Shipment source: `local`. Shipment ref: `refs/heads/main` — the target.\n\n## Other\n';
   const progress = '# Progress\n\n**State**: ACTIVE\n\n## Batches\n\n'
@@ -460,6 +533,9 @@ test('readView reads what ledger-view.mjs prints: a fixture ledger drawn row by 
     { text: `B01 🔄 W1 M  first work   ${git[0].padEnd(gitW)}  $0.00`, dim: false }, { text: `    ${verdicts[0].verdict}`, dim: true },
     { text: `B02 ⬜ W2 S  second work  ${git[1].padEnd(gitW)}  $0.00`, dim: false }, { text: `    ${verdicts[1].verdict}`, dim: true },
   ]);
+  // The contract's threshold, read by the tool, is the pane's safe point.
+  assert.deepEqual(read.ledger.clearThreshold, { tokens: 250000, source: 'contract' });
+  assert.ok(lines.some(l => l.text === 'conductor context unknown · safe point at 250K'), JSON.stringify(lines));
   const missing = await ledgerView({ repo: repo.cwd, skillDir: path.join(repo.root, 'no-such-skill'), env: withoutTestContext(repo.env) });
   const failed = readView({ exitCode: missing.code, stdout: missing.line + '\n', isStdoutTruncated: false }, 'L-A');
   assert.match(failed.error, /^skill directory .*no-such-skill: tools\/reconcile\.mjs cannot be used/);

@@ -63,9 +63,14 @@ diff against the ones its fence can actually violate.
   triggers; a filter attribute no test resolves; assertions behind an `existsSync` on a path that
   moved (assert a candidate location exists, so a move goes red). If a mutation of the branch
   leaves the suite green, the branch is untested however correct it is. *(BL-001, BL-005, BL-009)*
+- **A fixture whose checkout holds the bytes of the ref the code must read.** Code that reads the
+  working tree instead of the ref stays green; give the fixture the real channel (the checkout on
+  another branch, or an uncommitted edit). *(`OS-20261022` B04 R1–R2; `tests/reconcile.test.cjs`'s digest cases)*
 - **A new rule that decides an old case first.** A rule or lookup added ahead of the verdict now answers an old
   case, so that case stays green whether or not the rule it tested still works; give every rule a case only it
   decides. *(`tests/reconcile.test.cjs`'s `queries()` counts)*
+- **A locator asserted by its shape, never its value.** A problem matched as `line \d+` passes when the tool names the wrong
+  line; assert the number. *(`OS-20261024` B03 R3, BL-112)*
 - **A test that pins the defect.** An existing assertion can encode the old, wrong meaning
   of "correct". When a fix changes what correct means, hunt for the assertion that froze
   the old one.

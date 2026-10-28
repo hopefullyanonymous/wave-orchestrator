@@ -425,9 +425,11 @@ test("SKILL.md's Mode: new names the context precondition exactly when scaffoldi
 // ===== (e) README's other census mentions ===========================================================================
 // How it works step 1, and the one sentence of it that names the census agent, pinned whole.
 const STEP_1 = ['1. **A locked plan, pre-flighted.**', '\n2. **A file fence, checked mechanically.**'];
-const STEP_1_CENSUS = 'Each drafted batch first gets its own read-only census agent, whose report opens with where the draft is wrong or '
-  + 'incomplete, then names the tests that read every file the batch changes and what the backlog and old ledgers already record '
-  + 'about them; each opening item is logged as carried or rejected.';
+const STEP_1_CENSUS = "Each drafted batch first gets its own read-only census agent, given the batch's fence, whose report opens with where "
+  + 'the draft is wrong or incomplete, then names the tests that read every file the batch changes, the tests each fix it proposes would '
+  + 'break, and what the backlog and old ledgers already record about them; each opening item is logged as carried or rejected once any '
+  + 'line the conductor wrote from it in other words, and any fix the conductor chose for a problem the report only flagged, have gone '
+  + 'back to the same agent to be checked.';
 // README's `/orchestrate new` row, pinned whole, its whitespace collapsed.
 const NEW_ROW_TEXT = '| `/orchestrate new <description>` | Offer a fresh conversation first when this one already holds much earlier work; then '
   + 'interview, plan the batches, run a census of each batch, sweep the backlog, pre-flight the plan, scaffold the ledger, stop for your approval |';
@@ -470,9 +472,9 @@ test("README's other census mentions are pinned whole or bound to SKILL.md's row
   const STEP = 'README step 1 names the census agent in: ', ROW = "README's `new` row reads: ";
   const scaffoldingRow = 'interview, census, backlog sweep', skeletonsRow = 'artifact proofer / census / ';
   settle([
-    ['the step 1 sentence naming no census', swap('read-only census agent, whose', 'read-only agent, whose')(readme), skill, [STEP + 'no sentence']],
-    ['a word of the step 1 sentence altered', swap('logged as carried or rejected.', 'logged as carried.')(readme), skill, [STEP + STEP_1_CENSUS.replace(' or rejected.', '.')]],
-    ['a census sentence added to step 1', swap('logged as carried or rejected.', 'logged as carried or rejected. Skip the census when in a hurry.')(readme), skill,
+    ['the step 1 sentence naming no census', swap('read-only census agent, given', 'read-only agent, given')(readme), skill, [STEP + 'no sentence']],
+    ['a word of the step 1 sentence altered', swap('carried or rejected once', 'carried once')(readme), skill, [STEP + STEP_1_CENSUS.replace(' or rejected once', ' once')]],
+    ['a census sentence added to step 1', swap('to be checked.', 'to be checked. Skip the census when in a hurry.')(readme), skill,
       [STEP + STEP_1_CENSUS + ' | Skip the census when in a hurry.']],
     ["the new row's census dropped", swap('run a census of each batch, ', '')(readme), skill, [ROW + NEW_ROW_TEXT.replace('run a census of each batch, ', '')]],
     ['a clause appended to the new row', swap('stop for your approval |', 'stop for your approval; skip the census for one batch |')(readme), skill,
@@ -494,6 +496,41 @@ test("README's other census mentions are pinned whole or bound to SKILL.md's row
   ], mentionFaults);
 });
 
+// The phrases README's step 1 census sentence holds for this repository's census: the tests its own fixes would break,
+// the send-back of what the conductor wrote or chose from its report, the send-back's trigger for a chosen fix, and the
+// fence the census is given.
+const STEP_1_NAMES = ['the tests each fix it proposes would break', 'gone back to the same agent', 'only flagged', "given the batch's fence"];
+// Each of STEP_1_NAMES that no sentence of README's How it works step 1 naming the census agent holds. Called on its own,
+// beside mentionFaults' whole pin, so a dropped phrase is decided by this check alone.
+function namesFaults(readme) {
+  const start = readme.indexOf(STEP_1[0]), end = start === -1 ? -1 : readme.indexOf(STEP_1[1], start);
+  if (end === -1) return ['README: no How it works step 1 before step 2'];
+  const said = sentencesOf(readme.slice(start, end)).filter(sentence => namesAgent(README, sentence));
+  return STEP_1_NAMES.filter(name => !said.some(sentence => sentence.includes(name))).map(name => "README step 1's census sentence does not name: " + name);
+}
+
+test("README's step 1 census sentence names the fix check, the send-back and its only-flagged trigger", t => {
+  const readme = read(README);
+  assert.deepEqual(namesFaults(readme), []);
+  const twin = crlfTwin(t, [README]);
+  assert.deepEqual(namesFaults(read(README, twin)), [], 'a CRLF checkout reads alike');
+  const NAME = "README step 1's census sentence does not name: ";
+  settle([
+    ['the fix check dropped', swap('each fix it proposes would break', 'it proposes')(readme), [NAME + STEP_1_NAMES[0]]],
+    ['the send-back dropped', swap('gone back to the same agent', 'gone to the same agent')(readme), [NAME + STEP_1_NAMES[1]]],
+    ['"only flagged" dropped', swap('report only flagged', 'report flagged')(readme), [NAME + STEP_1_NAMES[2]]],
+    ['the fence dropped', swap(", given the batch's fence,", ',')(readme), [NAME + STEP_1_NAMES[3]]],
+    ['the fix check moved to a step 1 sentence naming no census',
+      swap('to be checked. Before', 'to be checked. It names the tests each fix it proposes would break. Before')(swap(' the tests each fix it proposes would break,', '')(readme)),
+      [NAME + STEP_1_NAMES[0]]],
+    ['the fix check moved out of step 1', swap(' the tests each fix it proposes would break,', '')(readme) + '\nThe census names the tests each fix it proposes would break.\n',
+      [NAME + STEP_1_NAMES[0]]],
+    ['step 1 gone', swap(STEP_1[0], '1. **A plan.**')(readme), ['README: no How it works step 1 before step 2']],
+    // Must pass: the sentence as written.
+    ['the sentence as written', readme, []],
+  ], namesFaults);
+});
+
 // ===== One checkout, every rule ======================================================================================
 test('a CRLF checkout of every file the rules read reaches the verdicts of its LF original', t => {
   const files = sweepDomain(), all = [...new Set([README, ...files])], twin = crlfTwin(t, all);
@@ -501,7 +538,8 @@ test('a CRLF checkout of every file the rules read reaches the verdicts of its L
   const verdicts = root => {
     const texts = load(files, root), readme = read(README, root);
     return [listFaults(readme, definitions()), wiringFaults(texts.get(SCAFFOLDING), texts.get(PROMPTS), tracked([AGENTS])), sweepFaults(texts),
-      rowFaults(readme, texts.get(SCAFFOLDING)), skillFaults(texts.get(SKILL), texts.get(SCAFFOLDING)), mentionFaults(readme, texts.get(SKILL))];
+      rowFaults(readme, texts.get(SCAFFOLDING)), skillFaults(texts.get(SKILL), texts.get(SCAFFOLDING)), mentionFaults(readme, texts.get(SKILL)),
+      namesFaults(readme)];
   };
   assert.deepEqual(verdicts(twin), verdicts(ROOT));
   // Live: a sentence planted in the CRLF copy on disk, wrapped across a line, is read back as its LF original reads.

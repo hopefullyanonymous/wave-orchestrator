@@ -21,8 +21,8 @@ const TOOL = 'mcp__orchestrate-mod__schedule_clear'
 const PROTOCOL = '8. At a safe point call `mcp__orchestrate-mod__schedule_clear` with the ledger id and the tip.\n'
 const DESCRIPTION = 'orchestrate-mod: schedules an automatic clear of this conversation followed by /orchestrate continue <ledger> after-clear.'
   + " Call it only where your ledger's pinned protocol.md (§Session algorithm step 8) names this tool, with the ledger id and the"
-  + " integration branch's full tip SHA. The answer begins `scheduled` (post the line it gives, then end your turn) or `declined`"
-  + ' (take the timer path).'
+  + " integration branch's full tip SHA. The answer begins `scheduled` (post the line it gives, then end your turn), `not needed`"
+  + " (carry on: no clear and no timer) or `declined` (take the timer path, after any retry your ledger's step 8 names)."
 const SCHEDULED = 'scheduled: Context 412K: clearing this conversation in about two minutes and continuing ' + ID
   + ' in a fresh one; any message before then keeps this conversation.'
 const USAGE = { startedAt: T0, context: { tokens: 412345, window: 1000000, percent: 41 }, rateLimits: [], cost: { usd: 2.75 } }
@@ -33,12 +33,16 @@ const MAIN_USAGE = { input_tokens: 100000, output_tokens: 50000, cache_read_inpu
 const SETTLED_AGENTS = ['completed', 'failed', 'killed'].map((status, n) => ({ id: 'agent-' + n, description: 'done', type: 'Plan', status }))
 const EMPTY = { background_tasks: [], session_crons: [] }
 const TASK = { id: 'b1', type: 'shell', status: 'running', description: 'sleep 120', command: 'sleep 120' }
+// The entries 2.1.307 gives: a sub-agent that handed back with a background command of its own running, in the agent
+// list, and a sub-agent's task at the Stop, with no command.
+const WAITING = { id: 'a0adf6f1a25021318', description: 'probe leaker C', type: 'general-purpose', status: 'waiting' }
+const AGENT_TASK = { id: 'a70c0ff43ab64663d', type: 'subagent', status: 'running', description: 'probe leaker E', agent_type: 'general-purpose' }
 const CRON = { id: 'c1', schedule: '*/5 * * * *', recurring: true, prompt: 'check the build' }
 const BAND = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 200, scroll: { offset: 0, bodyRows: 10 }, view: {} }
 const PANE = { title: 'Ledger', isFocused: true, bodyColumns: 200, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} }
 const BAND_TAIL = 'OS-…-clear-continue · W1 · ctx 412K/1M · $0.00 · /ledger'
 const counted = left => 'clearing in ' + left + ' · type anything to keep this conversation · ' + BAND_TAIL
-const continueHere = ['orchestrate', 'continue ' + ID]
+const continueHere = reason => ['orchestrate', 'continue ' + ID + ' in-place ' + reason]
 const CLEARED = [['clear', ''], ['orchestrate', 'continue ' + ID + ' after-clear']]
 
 // The engine resolves every `fs` path natively before a stub sees it, so on Windows `/home/u/x` arrives as
@@ -50,7 +54,7 @@ const asWindows = p => p.replace(/^(?:[A-Za-z]:)?/, 'C:').replace(/\//g, '\\')
 const SPELLINGS = ['native', 'win32']
 const hhmm = ms => new Date(ms - new Date(ms).getTimezoneOffset() * MIN).toISOString().slice(11, 16)
 const discoveryLine = id => id + ' State=ACTIVE at ' + BRANCH + ', /work/a b/.agents/changes/' + id + '/PROGRESS.md → continue'
-const ledgerOf = (over = {}) => ({ id: ID, state: 'ACTIVE', integration: { branch: BRANCH, sha: SHA }, skillDir: PINNED, waves: 2, currentWave: 1,
+const ledgerOf = (over = {}) => ({ id: ID, state: 'ACTIVE', integration: { branch: BRANCH, sha: SHA }, skillDir: PINNED, clearThreshold: { tokens: 300000, source: 'contract' }, waves: 2, currentWave: 1,
   nextCheckpoint: 'C1', rows: [], checkpoints: [], error: null, warning: null, ...over })
 const viewOf = ledgers => ({ exitCode: 0, stdout: JSON.stringify({ v: 1, repo: ROOT, incomplete: false, ledgers }) + '\n' })
 // `git worktree list --porcelain` as git prints it: the root on main, then `holders`, each holding the integration branch.
@@ -65,9 +69,9 @@ function porcelain(spelling, holders = [INT]) {
 // `w.view` as it stood when the run began, waiting on `w.gate` when one is set; the pinned protocol.md reads
 // `w.protocol` (refused when 'deny'); git answers `w.worktrees` and `w.status` (a run refused when 'deny') and is
 // recorded in `w.git`; the agent list answers `w.agents` (refused when 'deny'), waiting on `w.agentGate` when one is
-// set. `/clear` moves the session to the next id of `w.next` and its reading to a fresh conversation's; every command
-// that reaches the engine is recorded in `w.commands`. A call named in `w.deny` is refused (`command.run <name>` for
-// one command).
+// set. The session's usage answers `w.usages` one by one, then `w.usage`. `/clear` moves the session to the next id of
+// `w.next` and its reading to a fresh conversation's; every command that reaches the engine is recorded in
+// `w.commands`. A call named in `w.deny` is refused (`command.run <name>` for one command).
 function makeWorld(on, o = {}) {
   const spelling = o.spelling, deny = new Set(o.deny ?? [])
   const seen = p => posix(spelling === 'win32' ? asWindows(p) : p)
@@ -76,7 +80,7 @@ function makeWorld(on, o = {}) {
     deny, session: 's-1', next: ['s-2', 's-3', 's-4'], tag: 'tag' in o ? o.tag : ID,
     view: o.view ?? viewOf([ledgerOf()]), protocol: o.protocol ?? PROTOCOL,
     worktrees: o.worktrees ?? { exitCode: 0, stdout: porcelain(spelling) }, status: o.status ?? { exitCode: 0, stdout: '' },
-    agents: o.agents ?? SETTLED_AGENTS, usage: o.usage ?? USAGE, stopAnswer: {}, gate: null, agentGate: null,
+    agents: o.agents ?? SETTLED_AGENTS, usage: o.usage ?? USAGE, usages: [...(o.usages ?? [])], stopAnswer: {}, gate: null, agentGate: null,
     git: [], reads: [], commands: [], statuses: [], tools: [], registered: [], lists: 0, views: 0, bandDraws: 0,
   }
   mock.env(on, { HOME })
@@ -84,7 +88,7 @@ function makeWorld(on, o = {}) {
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => (deny.has('session.id') ? { deny: 'no session id here' } : { value: w.session }))
   on('session.root', () => ({ value: spelling === 'win32' ? asWindows(ROOT) : ROOT }))
-  on('session.usage', () => (deny.has('session.usage') ? { deny: 'no usage here' } : { value: w.usage }))
+  on('session.usage', () => (deny.has('session.usage') ? { deny: 'no usage here' } : { value: w.usages.length ? w.usages.shift() : w.usage }))
   on('session.surfaces', () => ({ value: [] }))
   on('fs.exists', ($, e) => ({ value: seen(e.path) === SKILL }))
   on('fs.read', ($, e) => {
@@ -156,7 +160,12 @@ const turn = ($, turnId = 't-2', text = 'stay') => $.turn.start({ text, turnId }
 const step = $ => drain($.turn.step({ turnId: 't-1', index: 0, model: 'claude-opus-5-5', messageCount: 3 }))
 const mountBand = ($, props = BAND) => $.ui.mount({ plugin: 'orchestrate-mod', surface: 'terminal', component: 'AbovePrompt', props })
 const mountPane = $ => $.ui.mount({ plugin: 'orchestrate-mod', surface: 'terminal', component: 'Pane', props: PANE, requestId: 'ledger' })
-const texts = async ui => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+// Every Text of a drawing in order, but for the Texts the Buttons hold as labels: they come last, in the buttons' row.
+const texts = async ui => {
+  const held = (await ui.findAll({ type: 'Button' })).reduce((n, b) => n + b.children.filter(c => c?.type === 'Text').length, 0)
+  const all = await ui.findAll({ type: 'Text' })
+  return all.slice(0, all.length - held).map(t => t.text)
+}
 const paneText = async $ => (await $.command.run({ command: 'ledger', args: '' })).text.split('\n')
 // The call answered `scheduled`; then, for a countdown, the turn's unblocked Stop found nothing in flight and the
 // turn completed with its answer.
@@ -257,6 +266,53 @@ function suite(spelling) {
     })
   })
 
+  describe(spelling + ' paths, the clear threshold', () => {
+    const sized = tokens => ({ ...USAGE, context: { tokens, window: 1000000, percent: Math.round(tokens / 10000) } })
+    test('one token under the ledger\'s threshold: not needed, nothing past the threshold read, and nothing scheduled or run', async ($, on) => {
+      const w = world(on, { usage: sized(299999) })
+      await start($, w)
+      const lists = w.lists
+      expect(await call($)).toEqual({ result: "not needed: context 299K is under the ledger's 300K clear threshold" })
+      // The list the read's refresh makes, and none of the decision's own.
+      expect([w.reads, w.git, w.lists - lists]).toEqual([[], [], 1])
+      await stop($)
+      await complete($)
+      await w.clock.advance(COUNTDOWN + 10000)
+      expect(w.commands).toEqual([])
+      // No clear stands scheduled: a call over the threshold schedules.
+      w.usage = USAGE
+      expect(await call($)).toEqual({ result: SCHEDULED })
+    })
+
+    test('at the threshold it schedules, the line naming the size the threshold was held to', async ($, on) => {
+      const w = world(on, { usage: sized(300000) })
+      await start($, w)
+      expect(await call($)).toEqual({ result: SCHEDULED.replace('412K', '300K') })
+    })
+
+    test('the default threshold of a contract with no line is named as the default', async ($, on) => {
+      const w = world(on, { view: viewOf([ledgerOf({ clearThreshold: { tokens: 300000, source: 'default' } })]), usage: sized(212000) })
+      await start($, w)
+      expect(await call($)).toEqual({ result: 'not needed: context 212K is under the default 300K clear threshold' })
+    })
+
+    test('a ledger\'s own threshold: one under it is not needed, at it schedules', async ($, on) => {
+      const w = world(on, { view: viewOf([ledgerOf({ clearThreshold: { tokens: 250000, source: 'contract' } })]), usage: sized(249999) })
+      await start($, w)
+      expect(await call($)).toEqual({ result: "not needed: context 249K is under the ledger's 250K clear threshold" })
+      w.usage = sized(250000)
+      expect(await call($)).toEqual({ result: SCHEDULED.replace('412K', '250K') })
+    })
+
+    // The session's usage answers the read's refresh under the threshold, the threshold step over it, and any later
+    // read far under it: only the threshold step's own reading may decide, and the line posts that one.
+    test('the scheduled line posts the size the threshold step read, not another reading', async ($, on) => {
+      const w = world(on, { usages: [sized(100000), sized(350000)], usage: sized(5000) })
+      await start($, w)
+      expect(await call($)).toEqual({ result: SCHEDULED.replace('412K', '350K') })
+    })
+  })
+
   describe(spelling + ' paths, every reason to decline, each on its own', () => {
     const declined = reason => ({ result: 'declined: ' + reason })
     // Each case changes one fact of a world that schedules, and says how far the call read: its git runs and reads.
@@ -274,22 +330,32 @@ function suite(spelling) {
         'the ledger view of ' + ID + ' carries an error: UNKNOWN rows did not complete: exit 1', [], []],
       ['(e) a tip that moved', { view: viewOf([ledgerOf({ integration: { branch: BRANCH, sha: 'e'.repeat(40) } })]) }, {},
         'the integration tip is ' + 'e'.repeat(40) + ', not ' + SHA, [], []],
-      ['(f) a protocol.md that cannot be read', { protocol: 'deny' }, {},
+      ...[{}, { deny: ['session.usage'] }].map(o => ['(f) a Clear threshold line that cannot be read' + (o.deny ? ', the context unknown' : ''),
+        { ...o, view: viewOf([ledgerOf({ clearThreshold: { error: 'line 5 is not **Clear threshold**: <n>K' } })]) }, {},
+        "the ledger's Clear threshold line cannot be read: line 5 is not **Clear threshold**: <n>K", [], []]),
+      ['(f) a ledger entry with no clear threshold', { view: viewOf([ledgerOf({ clearThreshold: null })]) }, {},
+        "the ledger's Clear threshold line cannot be read: the ledger view carries none", [], []],
+      ['(g) a protocol.md that cannot be read', { protocol: 'deny' }, {},
         'the pinned protocol.md cannot be read: orchestrate-mod: $.fs.read: cannot read ' + PROTOCOL_PATH, [], [PROTOCOL_PATH]],
-      ['(f) a protocol.md that does not name the tool', { protocol: '8. At a safe point start the timer.\n' }, {},
+      ['(g) a protocol.md that does not name the tool', { protocol: '8. At a safe point start the timer.\n' }, {},
         'the pinned protocol.md does not name ' + TOOL, [], [PROTOCOL_PATH]],
-      ['(g) a worktree list that cannot run', { worktrees: 'deny' }, {}, 'git worktree list failed: orchestrate-mod: $.process.run: git cannot start', ['worktree'], [PROTOCOL_PATH]],
-      ['(g) a worktree list that fails', { worktrees: { exitCode: 128, stdout: '' } }, {}, 'git worktree list exited 128', ['worktree'], [PROTOCOL_PATH]],
-      ['(g) a worktree list that cannot be read', { worktrees: { exitCode: 0, stdout: 'HEAD ' + SHA + '\n' } }, {},
+      ['(h) a worktree list that cannot run', { worktrees: 'deny' }, {}, 'git worktree list failed: orchestrate-mod: $.process.run: git cannot start', ['worktree'], [PROTOCOL_PATH]],
+      ['(h) a worktree list that fails', { worktrees: { exitCode: 128, stdout: '' } }, {}, 'git worktree list exited 128', ['worktree'], [PROTOCOL_PATH]],
+      ['(h) a worktree list that cannot be read', { worktrees: { exitCode: 0, stdout: 'HEAD ' + SHA + '\n' } }, {},
         'git worktree list cannot be read: a record opens with HEAD ' + SHA, ['worktree'], [PROTOCOL_PATH]],
-      ['(g) a status that cannot run', { status: 'deny' }, {}, 'git status failed: orchestrate-mod: $.process.run: git cannot start', ['worktree', 'status'], [PROTOCOL_PATH]],
-      ['(g) a status that fails', { status: { exitCode: 128, stdout: '' } }, {}, 'git status exited 128', ['worktree', 'status'], [PROTOCOL_PATH]],
-      ['(g) a status cut short', { status: { exitCode: 0, stdout: '', truncated: true } }, {}, 'git status was cut short', ['worktree', 'status'], [PROTOCOL_PATH]],
-      ['(g) uncommitted ledger files', { status: { exitCode: 0, stdout: '?? .agents/changes/' + ID + '/notes.md\n' } }, {},
+      ['(h) a status that cannot run', { status: 'deny' }, {}, 'git status failed: orchestrate-mod: $.process.run: git cannot start', ['worktree', 'status'], [PROTOCOL_PATH]],
+      ['(h) a status that fails', { status: { exitCode: 128, stdout: '' } }, {}, 'git status exited 128', ['worktree', 'status'], [PROTOCOL_PATH]],
+      ['(h) a status cut short', { status: { exitCode: 0, stdout: '', truncated: true } }, {}, 'git status was cut short', ['worktree', 'status'], [PROTOCOL_PATH]],
+      ['(h) uncommitted ledger files', { status: { exitCode: 0, stdout: '?? .agents/changes/' + ID + '/notes.md\n' } }, {},
         'uncommitted files in .agents/changes/' + ID + '/ of ' + int, ['worktree', 'status'], [PROTOCOL_PATH]],
-      ...['running', 'pending', 'suspended'].map(status => ['(h) an agent ' + status, { agents: [...SETTLED_AGENTS, { id: 'agent-9', description: 'x', type: 'Explore', status }] }, {},
-        'an agent is in flight', ['worktree', 'status'], [PROTOCOL_PATH]]),
-      ['(h) an agent list that cannot be read', { agents: 'deny' }, {}, 'the agent list cannot be read', ['worktree', 'status'], [PROTOCOL_PATH]],
+      ...['running', 'pending', 'suspended'].map(status => ['(i) an agent ' + status, { agents: [...SETTLED_AGENTS, { id: 'agent-9', description: 'x', type: 'Explore', status }] }, {},
+        'an agent is in flight: agent-9 (Explore, "x", ' + status + ')', ['worktree', 'status'], [PROTOCOL_PATH]]),
+      ['(i) an agent waiting on a command of its own', { agents: [...SETTLED_AGENTS, WAITING] }, {},
+        'an agent is in flight: a0adf6f1a25021318 (general-purpose, "probe leaker C", waiting: returned its report; a command of its own still runs)', ['worktree', 'status'], [PROTOCOL_PATH]],
+      ['(i) two agents in flight, both named', { agents: [WAITING, ...SETTLED_AGENTS, { id: 'agent-9', description: 'x', type: 'Explore', status: 'running' }] }, {},
+        'agents are in flight: a0adf6f1a25021318 (general-purpose, "probe leaker C", waiting: returned its report; a command of its own still runs); agent-9 (Explore, "x", running)',
+        ['worktree', 'status'], [PROTOCOL_PATH]],
+      ['(i) an agent list that cannot be read', { agents: 'deny' }, {}, 'the agent list cannot be read', ['worktree', 'status'], [PROTOCOL_PATH]],
     ]
     for (const [label, o, input, reason, git, reads] of cases) {
       test(label + ': declined, and nothing scheduled', async ($, on) => {
@@ -375,8 +441,10 @@ function suite(spelling) {
     }
 
     const skips = [
-      ['background work running', { background_tasks: [TASK], session_crons: [] }, 'background work is running'],
-      ['a session cron', { background_tasks: [], session_crons: [CRON] }, 'a scheduled task would wake this conversation'],
+      ['background work running', { background_tasks: [TASK], session_crons: [] }, 'background work is running: b1 (shell, sleep 120)'],
+      ['a shell and a sub-agent running', { background_tasks: [TASK, AGENT_TASK], session_crons: [] },
+        'background work is running: b1 (shell, sleep 120); a70c0ff43ab64663d (subagent, probe leaker E)'],
+      ['a session cron', { background_tasks: [], session_crons: [CRON] }, 'a scheduled task would wake this conversation: c1 (*/5 * * * *)'],
       ['no background_tasks', { session_crons: [] }, 'background work is unknown'],
       ['no session_crons', { background_tasks: [] }, 'background work is unknown'],
       ['a background_tasks that is no list', { background_tasks: null, session_crons: [] }, 'background work is unknown'],
@@ -391,10 +459,10 @@ function suite(spelling) {
         expect(w.commands).toEqual([])
         expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: ' + reason + ' — continuing here · ' + BAND_TAIL])
         await w.clock.settle()
-        expect(w.commands).toEqual([continueHere])
+        expect(w.commands).toEqual([continueHere(reason)])
         await ui.unmount()
         await w.clock.advance(COUNTDOWN + 10000)
-        expect(w.commands).toEqual([continueHere])
+        expect(w.commands).toEqual([continueHere(reason)])
       })
     }
 
@@ -408,14 +476,14 @@ function suite(spelling) {
       await w.clock.advance(4999)
       expect([w.commands, await texts(ui)]).toEqual([[], ['drawn beneath', BAND_TAIL]])
       await w.clock.advance(1)
-      expect(w.commands).toEqual([continueHere])
+      expect(w.commands).toEqual([continueHere('no Stop within 5 s, so background work is unknown')])
       expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: no Stop within 5 s, so background work is unknown — continuing here · ' + BAND_TAIL])
       await ui.unmount()
       // The skip ended the schedule: the turn's later unblocked Stop starts nothing, and a new call is free to schedule.
       w.stopAnswer = {}
       await stop($)
       await w.clock.advance(COUNTDOWN + 10000)
-      expect(w.commands).toEqual([continueHere])
+      expect(w.commands).toEqual([continueHere('no Stop within 5 s, so background work is unknown')])
       expect(await call($)).toEqual({ result: SCHEDULED })
     })
 
@@ -543,25 +611,44 @@ function suite(spelling) {
     })
 
     for (const [label, agents, reason] of [...['running', 'pending', 'suspended'].map(status => ['an agent ' + status,
-      [...SETTLED_AGENTS, { id: 'agent-9', description: 'x', type: 'Explore', status }], 'an agent is in flight']), ['an agent list that cannot be read', 'deny', 'the agent list cannot be read']]) {
+      [...SETTLED_AGENTS, { id: 'agent-9', description: 'x', type: 'Explore', status }], 'an agent is in flight: agent-9 (Explore, "x", ' + status + ')']),
+      ['an agent waiting on a command of its own', [...SETTLED_AGENTS, WAITING],
+        'an agent is in flight: a0adf6f1a25021318 (general-purpose, "probe leaker C", waiting: returned its report; a command of its own still runs)'],
+      ['two agents, both named', [...SETTLED_AGENTS, WAITING, { id: 'agent-9', description: 'x', type: 'Explore', status: 'running' }],
+        'agents are in flight: a0adf6f1a25021318 (general-purpose, "probe leaker C", waiting: returned its report; a command of its own still runs); agent-9 (Explore, "x", running)'],
+      ['three agents, each named', [...SETTLED_AGENTS, WAITING, { id: 'agent-9', description: 'x', type: 'Explore', status: 'running' }, { id: 'agent-10', description: 'y', type: 'Plan', status: 'pending' }],
+        'agents are in flight: a0adf6f1a25021318 (general-purpose, "probe leaker C", waiting: returned its report; a command of its own still runs); agent-9 (Explore, "x", running); agent-10 (Plan, "y", pending)'],
+      ['an agent list that cannot be read', 'deny', 'the agent list cannot be read']]) {
       test('at zero, ' + label + ': no clear, the run continues here', async ($, on) => {
         const w = world(on)
         await countingOffGrid($, w)
-        const ui = await mountBand($)
+        // Wide enough for the longest reason whole.
+        const ui = await mountBand($, { ...BAND, bodyColumns: 400 })
         w.agents = agents
         await w.clock.advance(COUNTDOWN)
-        expect(w.commands).toEqual([continueHere])
+        expect(w.commands).toEqual([continueHere(reason)])
         expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: ' + reason + ' — continuing here · ' + BAND_TAIL])
         await ui.unmount()
       })
     }
+
+    test('at zero, an agent whose description holds a line break and runs past 80 characters is named on one line, cut', async ($, on) => {
+      const w = world(on)
+      await countingOffGrid($, w)
+      const ui = await mountBand($, { ...BAND, bodyColumns: 400 })
+      w.agents = [...SETTLED_AGENTS, { id: 'agent-9', description: 'first' + String.fromCharCode(10) + 'x'.repeat(100), type: 'Explore', status: 'running' }]
+      await w.clock.advance(COUNTDOWN)
+      expect(w.commands).toEqual([continueHere('an agent is in flight: agent-9 (Explore, "first ' + 'x'.repeat(74) + '…", running)')])
+      expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: an agent is in flight: agent-9 (Explore, "first ' + 'x'.repeat(74) + '…", running) — continuing here · ' + BAND_TAIL])
+      await ui.unmount()
+    })
 
     test('a refused /clear continues the run here', async ($, on) => {
       const w = world(on, { deny: ['command.run clear'] })
       await countingOffGrid($, w)
       const ui = await mountBand($)
       await w.clock.advance(COUNTDOWN)
-      expect(w.commands).toEqual([['clear', ''], continueHere])
+      expect(w.commands).toEqual([['clear', ''], continueHere('/clear was refused')])
       expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: /clear was refused — continuing here · ' + BAND_TAIL])
       await ui.unmount()
     })
@@ -584,7 +671,7 @@ function suite(spelling) {
       const ui = await mountBand($)
       await stop($, { background_tasks: [TASK], session_crons: [] })
       await complete($)
-      const notice = ['drawn beneath', 'clear skipped: background work is running — continuing here · ' + BAND_TAIL]
+      const notice = ['drawn beneath', 'clear skipped: background work is running: b1 (shell, sleep 120) — continuing here · ' + BAND_TAIL]
       expect(await texts(ui)).toEqual(notice)
       await w.clock.settle()
       await turn($, 't-2', '')
@@ -609,8 +696,8 @@ function suite(spelling) {
       await complete($)
       const ui = await mountBand($)
       await w.clock.settle()
-      expect(w.commands).toEqual([continueHere])
-      expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: background work is running — type /orchestrate continue ' + ID + ' · ' + BAND_TAIL])
+      expect(w.commands).toEqual([continueHere('background work is running: b1 (shell, sleep 120)')])
+      expect(await texts(ui)).toEqual(['drawn beneath', 'clear skipped: background work is running: b1 (shell, sleep 120) — type /orchestrate continue ' + ID + ' · ' + BAND_TAIL])
       await turn($, 't-2', '/orchestrate continue ' + ID)
       expect(await texts(ui)).toEqual(['drawn beneath', BAND_TAIL])
       await ui.unmount()
@@ -649,14 +736,15 @@ function suite(spelling) {
       const w = world(on)
       await counting($, w)
       await w.clock.advance(COUNTDOWN)
-      // The person's own /clear: the session moves on without the mod.
+      // The person's own /clear: the session moves on without the mod, and grows past the threshold.
       w.session = 's-9'
+      w.usage = { ...FRESH, context: { tokens: 318000, window: 1000000, percent: 32 } }
       await step($)
-      expect(await call($)).toEqual({ result: SCHEDULED.replace('412K', '18K') })
+      expect(await call($)).toEqual({ result: SCHEDULED.replace('412K', '318K') })
       await stop($)
       await complete($)
       await w.clock.advance(COUNTDOWN)
-      expect((await paneText($)).slice(-2)).toEqual(['clears ' + hhmm(T0 + 2 * COUNTDOWN) + ' at 18K', 'run $2.40 over 2 conversations'])
+      expect((await paneText($)).slice(-2)).toEqual(['clears ' + hhmm(T0 + 2 * COUNTDOWN) + ' at 318K', 'run $2.40 over 2 conversations'])
     })
 
     // Refuses the clock from zero on: a plugin beside the one under test, since the mock clock holds the test's own

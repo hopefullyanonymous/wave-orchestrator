@@ -128,6 +128,74 @@ test('a filled pin line round-trips through the real check-ledger.mjs, from a di
   assert.equal(changed.status, 1);
 });
 
+// The template's clear threshold line and its registry row, read through orchestrate-mod/tools/ledger-view.mjs
+// `clearThreshold` and `DEFAULT_CLEAR_THRESHOLD` (`mod`, that module's exports) rather than a hand copy of its reader,
+// so the line is held to the form and the default orchestrate-mod reads. Each fault in `text` (the template) and
+// `row` (its {{CLEAR_THRESHOLD}} registry row): the field line not held once, or the template with that line filled
+// not read as the filled value; the line not directly under the Skill source line; a row naming no single default
+// or no single `<n>` form; the form not filling the line as the mod reads it; the default, or any digit-led value
+// the row states, not read as the mod's default.
+const ledgerViewTool = () => import(require('node:url').pathToFileURL(path.join(ROOT, 'orchestrate-mod/tools/ledger-view.mjs')).href);
+function thresholdFaults(text, row, mod) {
+  const lines = text.split('\n'), field = '**Clear threshold**: {{CLEAR_THRESHOLD}}', faults = [];
+  const at = lines.indexOf(field), held = lines.filter(l => l === field).length;
+  // A contract's line, read as the mod reads it: the tokens it holds, or undefined when the mod reads none from it.
+  const tokens = contract => { const read = mod.clearThreshold(contract); return read.source === 'contract' ? read.tokens : undefined; };
+  if (held !== 1) faults.push('the field line is held ' + held + ' times');
+  else {
+    const read = mod.clearThreshold(text.replace(field, () => '**Clear threshold**: 450K'));
+    if (read.source !== 'contract' || read.tokens !== 450000) faults.push('the template filled with 450K reads as ' + JSON.stringify(read));
+  }
+  if (at < 1 || lines[at - 1] !== '**Skill source**: {{SKILL_SOURCE}}') faults.push('not under the Skill source line');
+  const reads = value => tokens(fill(field, { CLEAR_THRESHOLD: value }));
+  const defaults = [...row.matchAll(/default `([^`]+)`/g)].map(m => m[1]), forms = [...row.matchAll(/`<n>([^`]*)`/g)].map(m => m[1]);
+  if (defaults.length !== 1) faults.push('the row publishes defaults ' + JSON.stringify(defaults));
+  if (forms.length !== 1) faults.push('the row shows forms ' + JSON.stringify(forms));
+  else if (reads('450' + forms[0]) !== 450000) faults.push('the form <n>' + forms[0] + ' does not fill the line as the mod reads it');
+  for (const value of new Set([...defaults, ...[...row.matchAll(/`(\d[^`]*)`/g)].map(m => m[1])])) {
+    if (reads(value) !== mod.DEFAULT_CLEAR_THRESHOLD) faults.push('the value ' + value + ' does not read as the mod\'s default ' + mod.DEFAULT_CLEAR_THRESHOLD);
+  }
+  return faults;
+}
+test('the clear threshold line sits under the Skill source line, and the registry default fills it in the form orchestrate-mod reads', async () => {
+  const mod = await ledgerViewTool(), DEFAULT = mod.DEFAULT_CLEAR_THRESHOLD;
+  assert.equal(typeof mod.clearThreshold, 'function', 'ledger-view.mjs exports the reader');
+  assert.ok(Number.isSafeInteger(DEFAULT) && DEFAULT > 0, 'ledger-view.mjs exports its default');
+  const row = registryRow('CLEAR_THRESHOLD'), source = '**Skill source**: {{SKILL_SOURCE}}', field = '**Clear threshold**: {{CLEAR_THRESHOLD}}';
+  assert.deepEqual(thresholdFaults(template, row, mod), []);
+  // Live: the line moved above the Skill source line; held twice, as itself, and beside it a second line the mod
+  // reads as one, indented under boot step 6 and with its colon inside the emphasis.
+  assert.ok(template.split(source + '\n' + field + '\n').length === 2, 'the controls must find the two lines together once');
+  assert.deepEqual(thresholdFaults(template.replace(source + '\n' + field, () => field + '\n' + source), row, mod), ['not under the Skill source line']);
+  const stepSix = '6. **Resume-time validation**: run the validation wrapper (§Validation commands) on the integration\n';
+  assert.equal(template.split(stepSix).length, 2, 'the control must find boot step 6 once');
+  assert.deepEqual(thresholdFaults(template + '\n' + field + '\n', row, mod), ['the field line is held 2 times'], 'the field line held twice must be reported');
+  assert.deepEqual(thresholdFaults(template.replace(field, () => '**Clear threshold:** {{CLEAR_THRESHOLD}}'), row, mod), ['the field line is held 0 times', 'not under the Skill source line'],
+    'the field line rewritten must be reported');
+  const lineOf = (text, line) => text.split('\n').indexOf(line) + 1, FIELD_AT = lineOf(template, field);
+  const SECOND = [['   **Clear threshold** above is read by the mod.', template.replace(stepSix, () => stepSix + '   **Clear threshold** above is read by the mod.\n')],
+    ['**Clear threshold:** 300K', template + '\n**Clear threshold:** 300K\n']];
+  assert.deepEqual(SECOND.map(([line, text]) => [line, thresholdFaults(text, row, mod)]),
+    SECOND.map(([line, text]) => [line, ['the template filled with 450K reads as ' + JSON.stringify({ error: 'lines ' + FIELD_AT + ', ' + lineOf(text, line) + ' each open with **Clear threshold**' })]]),
+    'a second line opening with the field name must be reported');
+  // Live: defaults the mod would not read as its own, no default, the form and the missing-line value rewritten.
+  const BAD = ['300 K', '300k', '300', '0.3M', '300000', '250K', 'about 300K', 'K300'];
+  assert.deepEqual(BAD.map(bad => [bad, thresholdFaults(template, row.replace('default `300K`', () => 'default `' + bad + '`'), mod)]),
+    BAD.map(bad => [bad, ['the value ' + bad + ' does not read as the mod\'s default ' + DEFAULT]]), 'each default the mod would not read as its own must be reported');
+  assert.deepEqual(thresholdFaults(template, row.replace('default `300K`', () => 'no default'), mod), ['the row publishes defaults []']);
+  assert.ok(row.split('`<n>K`').length === 2 && row.split('without it as `300K`').length === 2, 'the controls must find the form and the missing-line value once');
+  assert.deepEqual(thresholdFaults(template, row.replace('`<n>K`', () => '`<n>k`'), mod), ['the form <n>k does not fill the line as the mod reads it']);
+  assert.deepEqual(thresholdFaults(template, row.replace('without it as `300K`', () => 'without it as `250K`'), mod), ['the value 250K does not read as the mod\'s default ' + DEFAULT]);
+  // Live: the row is held to the mod's default, not to a number written here; a mod whose default were 250K reports the
+  // row's 300K, and the row rewritten to 250K throughout then passes.
+  const mod250 = { ...mod, DEFAULT_CLEAR_THRESHOLD: 250000 };
+  assert.deepEqual(thresholdFaults(template, row, mod250), ['the value 300K does not read as the mod\'s default 250000']);
+  assert.deepEqual(thresholdFaults(template, row.split('`300K`').join('`250K`'), mod250), []);
+  // Live: a reader that took a lowercase k would pass the rewritten form, so the form is held to the reader it is given.
+  const lenient = { ...mod, clearThreshold: text => mod.clearThreshold(text.replace(/^(\*\*Clear threshold\*\*: \d+)k$/m, (m, head) => head + 'K')) };
+  assert.deepEqual(thresholdFaults(template, row.replace('`<n>K`', () => '`<n>k`'), lenient), []);
+});
+
 test('an unfilled pin passes the code-span-exempt grep, so the pin check is what fails it', t => {
   const { repo, env } = fixture(t);
   const contractPath = path.join(repo.cwd, ...LEDGER_DIR.split('/'), '00-READBEFORE.md');
@@ -722,6 +790,13 @@ test('no shipped passage tells a reader to pipe, tail or detach validation, or t
 const PINNED = [
   [TEMPLATE, '3. **Skill pin**', '\n4. **Procedure**',
     "3. **Skill pin**, before anything is reconciled: from the integration worktree root run `node \"{{SKILL_DIR}}/tools/check-ledger.mjs\" skill --contract {{LEDGER_DIR}}/00-READBEFORE.md`. `SKILL MATCH` → continue. Anything but `SKILL MATCH` (including `SKILL MISMATCH`, `UNKNOWN` and a tool that does not run) → STOP and ask; continue only on the user's explicit words, recorded verbatim in the session log, which pick one of two ways on — an upgrade (the `**Skill**` line above rewritten to the new directory and hash in the commit that records those words, the change continuing under the new directory's protocol.md) or a restore (the pinned directory rebuilt byte-for-byte from the `**Skill source**` line above, then this pin check re-run, continuing only on `SKILL MATCH`). The recipe under §Validation commands stays in this contract, so validation never depends on the pinned directory."],
+  // The two places a contract puts its worktrees, both under {{WORKTREE_ROOT}}: boot step 2's integration
+  // worktree and the Git model's batch worktrees, held whole here; every other template unit naming a
+  // worktree is listed word for word in tests/protocol-contract.test.cjs WORKTREE_UNITS.
+  [TEMPLATE, '2. Run `git status --porcelain`', '\n3. **Skill pin**',
+    "2. Run `git status --porcelain`, `git branch --list`, `git worktree list`; note the current branch. **Never switch the main checkout.** Read ledger files from any branch with `git show <branch>:./<path>` (the `./` is required — Git Bash on Windows mangles `branch:path` otherwise) and write to the ledger through an integration worktree (`git worktree add \"{{WORKTREE_ROOT}}/int\" {{INTEGRATION_BRANCH}}`), using the main checkout only if it already has `{{INTEGRATION_BRANCH}}` checked out. Run `git show` from the repo or worktree ROOT (the `./` path is cwd-relative). Reuse an integration worktree that `git worktree list` already shows; if its directory is gone, `git worktree prune` first — never two worktrees on one branch. Run {{WORKTREE_SETUP}} in a newly created integration worktree before validating in it."],
+  [TEMPLATE, '- One branch per batch', '\n- **Merge/push policy**',
+    "- One branch per batch, named in the batch file (branch prefixes in this repo: {{BRANCH_PREFIXES}}), cut from the integration tip when the batch's wave opens. Wave members run CONCURRENTLY: one implementer per batch, each in an isolated git worktree under `{{WORKTREE_ROOT}}` as `b<nn>` (never inside the repo). Per-worktree setup: {{WORKTREE_SETUP}}. Same-wave fences were planned disjoint."],
   // The step that takes up the pinned procedure, held by more than its position.
   [TEMPLATE, '4. **Procedure**', '\n5. **Reconcile**',
     "4. **Procedure**: protocol.md, hashed with the rest of the pinned directory, now governs what this contract leaves unstated — role duties, severity and round accounting, §Fence changes, §Recovery, §Session algorithm and both close-outs. Load it beside this contract."],
@@ -736,10 +811,19 @@ const PINNED = [
     "Also write `validate.json` into the ledger directory, the spec `validate.mjs --help` describes: one step per confirmed validation command; a multi-line recipe block becomes ONE `shell` step whose `script` is the block's text (a PowerShell block: prefer `pwsh`; use `powershell` only where `pwsh` is absent — its log carries CLIXML noise); `parser` names the runner the command invokes (`node`, `jest`, `pytest` — without `-q`, whose summary it cannot read — `cargo`, else `none`). Run it once at the base through the contract's validation wrapper and record its line in LOG.md as the ledger's validation baseline. When the validation commands are `none`, write no `validate.json` (an empty `steps` array is invalid) and say so in LOG.md. When `{{WORKTREE_SETUP}}` is not `n/a`, also write `setup.json`, a `validate.mjs` spec holding the setup command(s), so a disposable checkout can be set up exactly like a worktree."],
   ['orchestrate/references/scaffolding.md', '## Baking rule', undefined,
     "## Baking rule Interview answers are written INTO the generated `00-READBEFORE.md` — never left as a pointer into this skill's reference docs. A ledger references ONLY its pinned skill directory, by absolute path and hash; its procedure is that directory's `references/protocol.md`, frozen by the hash, and every step a tool performs also has its manual procedure there; a changed skill stops the ledger at its next boot and asks, and never silently changes how it runs. The contract carries repo facts only, never a copy of that procedure; the recipe block for validation stays in it. Each ledger must be drivable by a session from the ledger plus its pinned directory: State line, LOG.md, `NEEDS_FENCE`, ASK, tiers, runners, evidence, fold-ins and their ids are explained between the ledger's own files and that directory's `references/protocol.md`."],
+  // Step 3 sends a checkpoint whose close-out has not run to step 8 before step 4 can open a wave (BL-100), and Mode:
+  // continue step 2 sends a session the mod opened to its contract's §Boot sequence before it reads the rest (BL-101).
+  ['orchestrate/references/protocol.md', '3. If any batch is `🧪`', '\n4. Open the next wave',
+    "3. If any batch is `🧪`: a checkpoint is open — ask the user for its verdict (passed / failed / waive). Never open the next wave past an unanswered checkpoint. A checkpoint whose close-out has not run — every member of its wave 🟢, ⛔ or 👤 and its row not 🧪/✅, §Recovery's Close-out unfinished row — goes to step 8's per-checkpoint close-out before any wave opens. A ledger with every row ✅ or `⛔ (dropped)` (advisory `👤` rows aside) and no COMPLETE marker, met by `continue` or `close`, goes to the change-complete close-out's first unfinished step."],
+  ['orchestrate/SKILL.md', "2. Read the ledger's OWN contract", '\n3. Boot',
+    "2. Read the ledger's OWN contract (`00-READBEFORE.md`; legacy names per protocol.md; contract absent → protocol.md fills the gaps, ask before acting on ambiguity). A session that orchestrate-mod opened when it cleared the conversation reads the contract's §Boot sequence first, then only what that section names for such a session, or the whole contract when it names nothing for one."],
 ];
 const PINNED_ROWS = {
   SKILL_DIR: "| `{{SKILL_DIR}}` | template (READBEFORE) | the absolute path of the directory holding the skill's `SKILL.md` (the base directory the skill loader reports), forward slashes, stored RAW between the pin line's backticks — never quoted there; every command that uses it quotes it. Never relative or `~`: the pin check reads it from the working directory |",
   SKILL_SHA256: "| `{{SKILL_SHA256}}` | template (READBEFORE) | the hex field of `node \"<SKILL_DIR>/tools/check-ledger.mjs\" skill --dir \"<SKILL_DIR>\"`, run at fill time |",
+  // The clear threshold's form and values, and where the worktree root may and may not be.
+  CLEAR_THRESHOLD: "| `{{CLEAR_THRESHOLD}}` | template (READBEFORE) | the interview — the context size, as `<n>K` in whole thousands with no space (`300K`), under which orchestrate-mod answers `not needed` instead of clearing the conversation, since a clear repays its restart only past the break-even of about 280–355K; default `300K`, a repeat repo offering its prior contract value as the default. The mod reads the line in exactly that form, and a contract without it as `300K` |",
+  WORKTREE_ROOT: "| `{{WORKTREE_ROOT}}` | template (READBEFORE) | the interview — the absolute directory, forward slashes, that holds the integration worktree (`int`) and every batch worktree (`b<nn>`): outside the session scratchpad and outside any `tmpfs` (`env-facts.mjs` flags one), so it survives sessions and reboots. Default `<home>/worktrees/{{CHANGE_ID}}`, the full id, since two ledgers scaffolded the same day share a prefix-and-date name such as `os1022`; its length plus `/b<nn>/` and the repository's longest tracked path stays under 248 characters, the limit Git for Windows puts on a directory without `core.longpaths` (a file's is 260). It replaces the worktree-root bullet earlier contracts hand-wrote into `{{REPO_CONVENTIONS}}`, so a repeat scaffold does not copy that bullet |",
 };
 test('the load-bearing passages and registry rows match their pinned text exactly', () => {
   const pinned = (text, from, to) => collapse(section(text, from, to)).trim();
@@ -751,7 +835,8 @@ test('the load-bearing passages and registry rows match their pinned text exactl
     const planted = text.replace(from, from + ' Skip it when in a hurry.');
     assert.notEqual(pinned(planted, from, to), expected);
   }
-  assert.equal(PINNED.length, 7, 'seven passages are pinned; the list may not shrink to a sample');
+  assert.equal(PINNED.length, 11, 'eleven passages are pinned; the list may not shrink to a sample');
+  assert.deepEqual(Object.keys(PINNED_ROWS), ['SKILL_DIR', 'SKILL_SHA256', 'CLEAR_THRESHOLD', 'WORKTREE_ROOT'], 'four registry rows are pinned; the list may not shrink to a sample');
   for (const [key, row] of Object.entries(PINNED_ROWS)) assert.equal(registryRow(key), row, '{{' + key + '}} registry row changed');
 });
 
@@ -797,7 +882,7 @@ test('every rendered REPORT shape carries NONCE [NONCE] as line 2, last; no past
   // Controls: a nonce planted in a pasted skeleton, a nonce line moved up, a nonce line lost.
   const qa = doc.replace('REPORT: one line per step', 'NONCE [NONCE]\nREPORT: one line per step');
   const moved = doc.replace(NONCE_LINE + '\n```\n\nMain-checkout variant', '```\n\nMain-checkout variant')
-    .replace('REPORT (fixed shape — the orchestrator acts on nothing else):\nLine 1', 'REPORT (fixed shape — the orchestrator acts on nothing else):\n' + NONCE_LINE + '\nLine 1');
+    .replace('REPORT (fixed shape — the orchestrator acts on nothing else):\n', () => 'REPORT (fixed shape — the orchestrator acts on nothing else):\n' + NONCE_LINE + '\n');
   const lost = doc.replace('line; line 3 `FINDINGS <n>`; line 4 the path [FINDINGS_FILE].\n' + NONCE_LINE + '\n', 'line; line 3 `FINDINGS <n>`; line 4 the path [FINDINGS_FILE].\n');
   // Each fragment with a nonce line planted, as a whole block would end.
   const fragment = FRAGMENTS.map(info => [info, doc.replace('```' + info + '\n', () => '```' + info + '\n' + NONCE_LINE + '\n')]);
@@ -1048,22 +1133,25 @@ const pairsRender = unit => FOLLOW_UP.test(unit) && RENDER_WORD.test(unit);
 const RENDER_LEAD = '- Render, then point: node "<skill-dir>/tools/prompt.mjs" --ledger <ledger-dir> --role <role> --batch <Bnn> --facts <facts.json> --out "<scratchpad>/prompts" renders one of the seven per-batch prompts '
   + "(roles implementer, polish, fix-round, rework, reviewer, reviewer-round2, test-hunter; its --help lists each role's facts), with the batch text and contract excerpts in it verbatim, and prints PROMPT <path> NONCE <nonce>.";
 const RENDER_PAIRINGS = {
+  'orchestrate/references/execution-models.md': [
+    "SHIP with ASKs → polish pass (not a round; a prose ASK's replacement text the orchestrator applies itself, prose-only-diff.mjs classifies the polish diff, and a polish-phase FIX FIRST discards the polish at once — protocol.md §Severity and round accounting); FIX FIRST → round 1 resumes the implementer (a fresh one with the rework prompt when the render prints FRESH — subagent-prompts.md §Spawning rules); the second FIX FIRST → ⛔, and once the wave's other members are gated and integrated the session STOPs instead of opening the next wave; a user-authorized third round is a fresh implementer on the strong tier.",
+  ],
   'orchestrate/references/protocol.md': [
-    'Polish pass: resume the same implementer with the pointer to its rendered polish prompt (the findings file by path); it appends - [ ] polish: items to its checklist, does them, commits; '
+    'Polish pass: resume the same implementer (a fresh one when the render prints FRESH — subagent-prompts.md §Spawning rules) with the pointer to its rendered polish prompt (the findings file by path); it appends - [ ] polish: items to its checklist, does them, commits; '
       + 'closes mechanically (fence check + validations; polish commits touch only test/doc/prose paths — a production file touched → fix-diff-only re-review by a fresh reviewer).',
     '- Round 1: resume the SAME implementer with the pointer to its rendered fix-round prompt (the findings file by path, after the LOG append — §Session algorithm step 6); a fresh re-review verifies the fixes and scans only the fix diff.',
-    'Past about 400K tokens of implementer context, round 1 goes to a fresh implementer with its rendered rework prompt instead (subagent-prompts.md §Spawning rules).',
+    'When the fix-round render prints FRESH (implementer context at or past the renderer\'s line), round 1 goes to a fresh implementer with its rendered rework prompt instead (subagent-prompts.md §Spawning rules).',
     '- **6c Reviewer + gate agents, in parallel, all fresh and read-only.** Each is rendered and spawned as in step 5 (--role reviewer, reviewer-round2 or test-hunter); a gate report with the wrong nonce is no report and its agent is respawned fresh.',
   ],
   [PROMPTS]: [
-    '**Polish pass** (after a SHIP that carries ASKs): resume the SAME implementer (SendMessage) with the pointer to this block, rendered as role polish:',
-    '**Fix round 1** (after a FIX FIRST): resume the SAME implementer (past about 400K tokens of its context, a FRESH one with the rework prompt below — §Spawning rules) with the pointer to this block, rendered as role fix-round:',
+    '**Polish pass** (after a SHIP that carries ASKs): resume the SAME implementer (SendMessage; a FRESH one when the render prints FRESH — §Spawning rules) with the pointer to this block, rendered as role polish:',
+    '**Fix round 1** (after a FIX FIRST): resume the SAME implementer (a FRESH one with the rework prompt below when the render prints FRESH — §Spawning rules) with the pointer to this block, rendered as role fix-round:',
     '**Rework** (a FRESH implementer owed a fix round — §Spawning rules): the implementer prompt with this block in place of its DO: paragraph, rendered as role rework:',
     '**Authorized third round** (the user chose "fix again" after ⛔): a FRESH implementer on the strong tier, spawned with the pointer to its rendered rework prompt (round 3, both rounds\' findings files joined into its findings file) — one prompt, one report, one nonce.',
     '**Round 2** (after a FIX FIRST — always a FRESH reviewer): the same prompt with this block at its [ROUND 2 BLOCK] slot, rendered as role reviewer-round2 (role reviewer drops that line):',
     '- Resume vs fresh: polish passes and the first fix round RESUME the same implementer (SendMessage, with the pointer to the rendered polish or fix-round prompt); a user-authorized third round is a FRESH implementer on the strong tier; '
       + 'reviewers are fresh every round; any agent lost to a crash is respawned fresh at the first unticked item — an implementer owed a fix round with its rendered rework prompt, one owed a polish pass with its rendered implementer prompt first, then the polish pointer.',
-    'A fix round goes instead to a FRESH implementer with the rendered rework prompt when the implementer it would resume shows subagent_tokens (its current context) past about 400K in its last task notification.',
+    'A polish or fix-round render takes, as fact subagentTokens, the subagent_tokens (its current context) the implementer it would resume shows in its last task notification; at or past the renderer\'s line it prints FRESH <route> instead of a prompt, and the pass goes to a FRESH implementer by the route that line names.',
     RENDER_LEAD, RENDER_ON_SEND.replace(/`/g, ''),
   ],
 };
@@ -1135,7 +1223,7 @@ const PROMPT_FILE_SENTENCES = {
   'orchestrate/references/protocol.md': ['Render each prompt first, from the integration worktree root: node "<skill-dir>/tools/prompt.mjs" --ledger <ledger-dir> --role implementer --batch <Bnn> --facts <facts.json> --out "<session scratchpad>/prompts" '
     + "(--help lists each role's facts) prints PROMPT <path> NONCE <nonce>; spawn the agent with this fixed pointer message, <prompt file> replaced by that path: Your complete instructions are in the file <prompt file>."],
   [PROMPTS]: [RENDER_LEAD, 'Spawn or resume the agent with this ONE fixed pointer message, <prompt file> replaced by that path: Your complete instructions are in the file <prompt file>.', RENDER_ON_SEND.replace(/`/g, '')],
-  'README.md': ['├── prompt.mjs renders one per-batch sub-agent prompt from the ledger and a facts file, ending in the nonce its report echoes'],
+  'README.md': ['├── prompt.mjs renders one per-batch sub-agent prompt from the ledger and a facts file, ending in the nonce its report echoes; with --report it checks a report file and prints one line'],
 };
 // The never-open line's reversal: an open, read, list, cat, view or look verb no negator governs
 // (fires(), the undo sweep's reader), then another agent's prompt or facts file, the other prompts
@@ -1783,8 +1871,8 @@ test('protocol.md says, one sentence apiece, what mutate.mjs and the mutation ru
 
 // The rendered-prompt life cycle around a crash, a respawn and the rounds after the first. Three
 // passages of subagent-prompts.md are pinned whole: the third round; §Spawning rules' "Resume vs
-// fresh" bullet, which states the third round again with the crash respawns and the 400K
-// exception; and the "**Fix round 1**" lead-in, which states that exception beside the block.
+// fresh" bullet, which states the third round again with the crash respawns and the renderer's
+// FRESH verdict; and the "**Fix round 1**" lead-in, which points at that verdict beside the block.
 const THIRD_ROUND = ['**Authorized third round**', '\n\n## Reviewer',
   '**Authorized third round** (the user chose "fix again" after `⛔`): a FRESH implementer on the strong tier, spawned with the pointer to its rendered `rework` prompt '
   + '(`round` 3, both rounds\' findings files joined into its findings file) — one prompt, one report, one nonce. Then a fresh re-review.'];
@@ -1792,9 +1880,10 @@ const RESUME_VS_FRESH = ['- Resume vs fresh:', '\n- Tiers:',
   '- Resume vs fresh: polish passes and the first fix round RESUME the same implementer (SendMessage, with the pointer to the rendered `polish` or `fix-round` prompt); '
   + 'a user-authorized third round is a FRESH implementer on the strong tier; reviewers are fresh every round; any agent lost to a crash is respawned fresh at the first unticked item — '
   + 'an implementer owed a fix round with its rendered `rework` prompt, one owed a polish pass with its rendered implementer prompt first, then the `polish` pointer. '
-  + 'A fix round goes instead to a FRESH implementer with the rendered `rework` prompt when the implementer it would resume shows `subagent_tokens` (its current context) past about 400K in its last task notification.'];
+  + 'A polish or fix-round render takes, as fact `subagentTokens`, the `subagent_tokens` (its current context) the implementer it would resume shows in its last task notification; '
+  + 'at or past the renderer\'s line it prints `FRESH <route>` instead of a prompt, and the pass goes to a FRESH implementer by the route that line names.'];
 const FIX_ROUND_LEAD = ['**Fix round 1**', '\n\n```prompt:fix-round',
-  '**Fix round 1** (after a `FIX FIRST`): resume the SAME implementer (past about 400K tokens of its context, a FRESH one with the `rework` prompt below — §Spawning rules) with the pointer to this block, rendered as role `fix-round`:'];
+  '**Fix round 1** (after a `FIX FIRST`): resume the SAME implementer (a FRESH one with the `rework` prompt below when the render prints `FRESH` — §Spawning rules) with the pointer to this block, rendered as role `fix-round`:'];
 test('recovery, respawn and later rounds work from rendered files and LOG.md, never from re-typed text', () => {
   const rules = collapse(section(read(PROMPTS), '## Spawning rules (orchestrator)'));
   const prompts = collapse(read(PROMPTS));
@@ -1816,12 +1905,22 @@ test('recovery, respawn and later rounds work from rendered files and LOG.md, ne
   // A crashed implementer owed a fix round is respawned with the rework prompt; one owed a polish
   // pass with its implementer prompt before the polish pointer.
   assert.ok(rules.includes('an implementer owed a fix round with its rendered `rework` prompt, one owed a polish pass with its rendered implementer prompt first, then the `polish` pointer.'));
-  // A fix round past about 400K of implementer context goes to a fresh implementer, stated in
-  // §Spawning rules and pointed at from protocol.md's round 1, execution-models.md's gate and the
-  // "**Fix round 1**" lead-in (FIX_ROUND_LEAD, pinned below).
-  assert.ok(rules.includes('A fix round goes instead to a FRESH implementer with the rendered `rework` prompt when the implementer it would resume shows `subagent_tokens` (its current context) past about 400K in its last task notification.'));
-  assert.ok(collapse(read('orchestrate/references/protocol.md')).includes('Past about 400K tokens of implementer context, round 1 goes to a fresh implementer with its rendered `rework` prompt instead (`subagent-prompts.md` §Spawning rules).'));
-  assert.ok(collapse(read('orchestrate/references/execution-models.md')).includes('`FIX FIRST` → round 1 resumes the implementer (past about 400K tokens of its context, a fresh one with the `rework` prompt — subagent-prompts.md §Spawning rules);'));
+  // A polish pass or fix round whose render prints FRESH goes to a fresh implementer, stated in
+  // §Spawning rules and pointed at from protocol.md's polish pass and round 1, execution-models.md's
+  // gate and the "**Polish pass**" and "**Fix round 1**" lead-ins (FIX_ROUND_LEAD, pinned below).
+  // The line itself lives in prompt.mjs alone (tests/prompt.test.cjs): no document names a size.
+  assert.ok(rules.includes('A polish or fix-round render takes, as fact `subagentTokens`, the `subagent_tokens` (its current context) the implementer it would resume shows in its last task notification; '
+    + 'at or past the renderer\'s line it prints `FRESH <route>` instead of a prompt, and the pass goes to a FRESH implementer by the route that line names.'));
+  const protocol = collapse(read('orchestrate/references/protocol.md'));
+  assert.ok(protocol.includes('When the fix-round render prints `FRESH` (implementer context at or past the renderer\'s line), round 1 goes to a fresh implementer with its rendered `rework` prompt instead (`subagent-prompts.md` §Spawning rules).'));
+  assert.ok(protocol.includes('Polish pass: resume the same implementer (a fresh one when the render prints `FRESH` — `subagent-prompts.md` §Spawning rules) with the pointer to its rendered `polish` prompt'));
+  assert.ok(prompts.includes('**Polish pass** (after a `SHIP` that carries ASKs): resume the SAME implementer (SendMessage; a FRESH one when the render prints `FRESH` — §Spawning rules) with the pointer to this block, rendered as role `polish`:'));
+  assert.ok(collapse(read('orchestrate/references/execution-models.md')).includes('`FIX FIRST` → round 1 resumes the implementer (a fresh one with the `rework` prompt when the render prints `FRESH` — subagent-prompts.md §Spawning rules);'));
+  const RESTATED = /about 400K|\b\d{3}K tokens|\b350,?000\b/;
+  for (const control of ['past about 400K tokens', 'past 350K tokens of its context', 'at 350,000', 'at or past 350000']) assert.match(control, RESTATED, 'the size reader must see: ' + control);
+  for (const file of [PROMPTS, 'orchestrate/references/protocol.md', 'orchestrate/references/execution-models.md']) {
+    assert.doesNotMatch(collapse(read(file)), RESTATED, file + ': the fresh-implementer line is the renderer\'s, never restated as a size');
+  }
   // The third round: one rework prompt, one nonce, the round number rendered, nothing told outside
   // the pointer. THIRD_ROUND, RESUME_VS_FRESH and FIX_ROUND_LEAD are each pinned whole (whitespace
   // collapsed), so a step reinstated beside a rule in any words goes red, and a sentence planted
@@ -2057,9 +2156,9 @@ test('every LOG.md command a document states is the published one, counted per f
 // Each rule is pinned as whole text in every carrier the batch enumerated, as PINNED is above,
 // and each rule's key word is bound to those carriers across the whole document domain: a
 // mention anywhere else is a finding, so a contradicting directive cannot sit in a file the pins
-// never read. The control run dropped the per-role effort rule; the gate pair's max pin
-// (2026-09-27) and the census's medium pin (2026-10-13) are its two exceptions, held at
-// EFFORT_LINES and tierKeyFaults.
+// never read. The control run dropped the per-role effort rule; the reviewer's max pin (2026-09-27)
+// and the census's and the test hunter's medium pins (2026-10-13, 2026-10-25) are its exceptions,
+// held at EFFORT_LINES and tierKeyFaults.
 const NO_POLL = 'The orchestrator never polls: it never calls `ReadNotifications` to wait for a sub-agent and never sleeps; when the only remaining work waits on sub-agents it ends the turn, and the task notification resumes it.';
 const BUDGET = {
   pollSkill: ['orchestrate/SKILL.md', '- The orchestrator never polls', '\n- No `--no-verify`', '- ' + NO_POLL],
@@ -2068,21 +2167,36 @@ const BUDGET = {
     '- Default session cadence: run autonomously to the next checkpoint — waves in sequence, no stopping between batches — halting early only at ⛔ or an unplanned user gate, or pausing at a safe point for context (protocol.md §Session algorithm step 8).'],
   compaction: ['orchestrate/references/protocol.md', 'Compaction happens only at a safe point', '\n\n**Session practices**',
     "Compaction happens only at a safe point, never mid-flight: a wave close, the start of a checkpoint close-out, or the moment a checkpoint's fix-ups have all merged, before their rows go back to 🧪 and the re-issue (never after a capped fix-up's *ship*: its row still reads as awaiting a verdict) — each counting only once PROGRESS and LOG are committed and no agent is in flight. "
-    + 'At a safe point with context past about 300K tokens, the orchestrator posts ONE line: its context size, the time it will continue, and the answers: `/compact` now (then wait for the timer, or say `continue`), or `go`. '
+    // Which rules cover the mod's clear and `/compact` both, and which the clear alone (C1 of OS-20261022); the clear
+    // before a checkpoint's close-out, which the checkpoint's STOP never stands in for (BL-100); the tool at every safe
+    // point; a session the mod opened booting as its contract's §Boot sequence says (BL-101); `not needed` carrying on;
+    // a `declined` naming a `waiting` agent retried once that agent is stopped by its own id (BL-097); and only a
+    // decline with no retry left, or no tool, reading the context against the contract's threshold, an unknown size or
+    // threshold never below it (BL-099).
+    + "The compaction rules of this step cover both orchestrate-mod's automatic clear and `/compact`; those about the mod's tool, its answers and the session a clear opens apply only to the clear. "
+    + "At a wave close where the checkpoint table places a checkpoint, the compaction window below opens before the close-out's first step, so a conversation cleared there leaves the whole close-out to the fresh one, and the checkpoint's STOP, which comes after the close-out, never stands in for that window. "
+    + "When this session's tools include `mcp__orchestrate-mod__schedule_clear` (orchestrate-mod's), the orchestrator calls it at every safe point, whatever its context size, with the ledger id and the integration tip's full SHA, once no background command of its own is running either and a committed PROGRESS session-log row names the LOG heading that records the work since the row before it. "
+    + 'An answer that begins `scheduled` gives the one line to post: the orchestrator posts it and ends its turn, and the mod clears the conversation two minutes later unless a message arrives first, then runs `/orchestrate continue <id> after-clear`; a mod that finds it cannot clear runs `/orchestrate continue <id> in-place <reason>` in this conversation instead, `<reason>` naming what stopped the clear. That conversation still holds the run: when it sees its own call for that ledger and the integration tip is still the SHA it passed, it posts one line naming the reason and carries on with the step it would take next, with no boot, reconcile or validation; a tip that moved, or a call it no longer sees, has it boot as any `continue` does. '
+    + 'A conversation that goes on after a `scheduled` answer, because a message or a notice arrived first, is not cleared and carries on. '
+    + "After an automatic clear, the session that `/orchestrate continue <id> after-clear` opened follows the boot its contract's §Boot sequence gives such a session; under a contract that gives none, it boots as any `continue` does. "
+    + 'Its first message to the user opens with one line saying it continued after an automatic clear and naming the LOG heading that the newest session-log row names. '
+    + "It ignores a task notice for a task it did not start, whose output file sits under another session's folder. "
+    + "An answer that begins `not needed` (the context is under the ledger's clear threshold) has the orchestrator carry on at once, with no line and no timer. "
+    + "A `declined` answer that names an agent `waiting` (returned its report; a command of its own still runs), whose report is in while the ledger awaits nothing from that command, has the orchestrator stop that agent with TaskStop on the agent's id — it ends `killed` with its shell and runs no turn, where TaskStop on the shell's id would resume it for one more turn whose report lands in whatever conversation is current — and then call the tool once more. "
+    + "If the answer is `declined` and no such retry applies, or the retry's answer is `declined` too, or the answer begins as none of those three, or there is no such tool, the orchestrator takes the timer path: it first reads its own context size as `scaffolding.md` §Preconditions step 5 reads it and compares it with the contract's `**Clear threshold**` line (300K for a contract without one), carrying on as at `not needed` when the size is under it. "
+    + "An unknown context size or an unreadable threshold, the mod's decline saying the ledger's Clear threshold line cannot be read included, is never treated as below the threshold. "
+    + 'At or past the threshold, or when either cannot be read, the orchestrator posts ONE line: its context size, the time it will continue, and the answers: `/compact` now (then wait for the timer, or say `continue`), or `go`. '
     + "It then starts a 10-minute timer, a background Bash `sleep 600`, and ends its turn; the first of the timer's completion notice, `go` or `continue` resumes it, and it ignores whatever arrives later. "
     + "That notice shows the task's description, not its output, so the description carries the reminder, verbatim: `Compaction window over: if this session was compacted, run the boot sequence and the reconcile before any transition`. "
-    + "When this session's tools include `mcp__orchestrate-mod__schedule_clear` (orchestrate-mod's), the orchestrator calls it at that point in place of that line and the timer, with the ledger id and the integration tip's full SHA, once no background command of its own is running either and a committed PROGRESS session-log row names the LOG heading that records the work since the row before it. "
-    + 'An answer that begins `scheduled` gives the one line to post: the orchestrator posts it and ends its turn, and the mod clears the conversation two minutes later unless a message arrives first, then runs `/orchestrate continue <id> after-clear`; a mod that finds it cannot clear runs `/orchestrate continue <id>` in this conversation instead. '
-    + 'Any other answer, or no such tool, takes the line and the timer above. '
-    + 'A conversation that goes on after a `scheduled` answer, because a message or a notice arrived first, is not cleared and carries on. '
-    + "One that `/orchestrate continue <id> after-clear` opened boots as any `continue` does; its first message to the user opens with one line saying it continued after an automatic clear and naming the LOG heading that the newest session-log row names, and it ignores a task notice for a task it did not start, whose output file sits under another session's folder. "
     + 'A compacted session is resumed early only through `continue`, which starts this algorithm at step 1. '
-    + 'A STOP that already waits for the user (⛔ verdicts, checkpoints), past about 300K, carries the context size and `/compact` now in its message instead of a timer. '
+    + 'A STOP that already waits for the user (⛔ verdicts, checkpoints), at or past the threshold, or when the size or the threshold cannot be read, carries the context size and `/compact` now in its message instead of a timer. '
     + 'After any compaction, an automatic one included, the boot sequence and the reconcile run before any transition, because a summary is a claim, not truth; a merge, push or third-round authorization that exists only in a summary is re-asked.'],
   practices: ['orchestrate/references/protocol.md', '**Session practices**', '\n\n**User gates are front-loaded**',
     '**Session practices** (guidance, not tooled). An investigation unrelated to the change, such as a CI failure met while scaffolding, runs in its own session. A pause of over an hour expires the prompt cache, and the first call after it writes the whole context to the cache again.'],
-  nextWave: ['orchestrate/references/execution-models.md', 'Otherwise → open the next wave immediately', '\n\n**Every `continue`',
-    'Otherwise → open the next wave immediately, same session, unless protocol.md §Session algorithm step 8 first opens its compaction window at this safe point.'],
+  // Wave mechanics step 5 whole: the window before a checkpoint's close-out (BL-100), as step 8 orders it, and before the next wave.
+  nextWave: ['orchestrate/references/execution-models.md', '5. **Checkpoint or continue**', '\n\n**Every `continue`',
+    "5. **Checkpoint or continue**: if the checkpoint table places a checkpoint here → protocol.md §Session algorithm step 8's compaction window first, then the per-checkpoint close-out (at the FINAL checkpoint, the run-end prose sweep first whenever LOG.md holds a `### prose sweep:` heading; tip validation, QA-runner pre-smoke of the agent-tagged steps with `evidence/C<n>/`, covered rows 🟢 → 🧪, `**State**: AT-CHECKPOINT`), STOP with the combined smoke script, delivered as the smoke page (`smoke-page.md`). "
+    + 'Otherwise → open the next wave immediately, same session, unless protocol.md §Session algorithm step 8 first opens its compaction window at this safe point.'],
   exploreSkill: ['orchestrate/SKILL.md', 'plan the batches (explore', '; batch',
     'plan the batches (explore, at medium thoroughness by default and "very thorough" only when the interview needs an inventory and the prompt names what it is for'],
   exploreScaffold: ['orchestrate/references/scaffolding.md', '3. **Plan** — explore the codebase', ', draft the batch table',
@@ -2094,10 +2208,12 @@ const BUDGET = {
     + 'Past about 200K, or when the size cannot be read, offer to scaffold in a fresh conversation, with the reason in one sentence: a scaffold adds about 500–800K by itself, and a conversation summarized automatically mid-scaffold loses the work in flight. '
     + 'On a yes, write the request verbatim, and whatever this conversation established that the scaffold needs, into a note under the session scratchpad, never the repository; once nothing this conversation started still runs in the background, the user runs `/clear`, then `/orchestrate new` naming the note. '
     + 'Never clear the conversation yourself.'],
+  // The registry row that names the mod's `not needed` answer beside step 8, held as PINNED_ROWS holds it.
+  clearThresholdRow: ['orchestrate/references/scaffolding.md', '| `{{CLEAR_THRESHOLD}}` |', '\n', PINNED_ROWS.CLEAR_THRESHOLD],
 };
 test('each budget rule reads exactly as pinned in every carrier the batch enumerated, the compaction rule at wave close', () => {
   const pinned = (text, from, to) => collapse(section(text, from, to)).trim();
-  assert.equal(Object.keys(BUDGET).length, 10, 'ten passages are pinned; the list may not shrink to a sample');
+  assert.equal(Object.keys(BUDGET).length, 11, 'eleven passages are pinned; the list may not shrink to a sample');
   for (const [key, [file, from, to, expected]] of Object.entries(BUDGET)) {
     const text = read(file);
     assert.equal(text.split(from).length - 1, 1, key + ': the anchor "' + from + '" must occur exactly once in ' + file);
@@ -2132,7 +2248,7 @@ const SAFE_POINT_CLAUSE = "Compaction happens only at a safe point, never mid-fl
 // or wrapped across a line and a code comment's slashes (BL-063). safePointFaults counts this one
 // family and BOUND_WORDS binds it, so the two cannot read different spellings.
 const SAFE_POINT_WORD = /safe[\W_]*points?/i;
-// The passage names "a safe point" twice: in the pinned sentence, and where the window opens.
+// The passage names "a safe point" twice: in the pinned sentence, and where the tool is called at every one.
 const SAFE_POINT_MENTIONS = 2;
 // Each safe point the passage's sentence no longer names, the sentence itself unless it reads as
 // pinned, and the passage's count of safe-point mentions unless it is SAFE_POINT_MENTIONS.
@@ -2198,14 +2314,14 @@ test('the compaction window names all three safe points and no other, and losing
   assert.deepEqual(lost, [], 'the safe-point family must read every separator the forms it replaced read');
   // A fourth point in a sentence of its own that calls itself a safe point leaves the clause as
   // pinned: the mention count reports it, however the mention is spelled, and one mention fewer (the
-  // window opening at any point).
+  // tool called at any point).
   for (const spelling of ['safe point', 'Safe point', 'safe-point', 'safepoint', 'safe_point', 'safe\n  // point']) {
     const fourth = passage.replace('no agent is in flight. ', () => 'no agent is in flight. Mid-wave, between two merges, is a ' + spelling + ' too. ');
     assert.notEqual(fourth, passage, 'the control must find the end of the clause');
     assert.deepEqual(safePointFaults(fourth), [(SAFE_POINT_MENTIONS + 1) + ' mentions of a safe point, not ' + SAFE_POINT_MENTIONS], JSON.stringify(spelling));
   }
-  const fewer = passage.replace('At a safe point with context', () => 'At any point with context');
-  assert.notEqual(fewer, passage, 'the control must find the mention where the window opens');
+  const fewer = passage.replace('calls it at every safe point', () => 'calls it at every point');
+  assert.notEqual(fewer, passage, 'the control must find the mention where the tool is called');
   assert.deepEqual(safePointFaults(fewer), [(SAFE_POINT_MENTIONS - 1) + ' mentions of a safe point, not ' + SAFE_POINT_MENTIONS]);
   // A clause that lost its opening or closing words is reported as not found, never read from a stray slice.
   for (const [find, planted] of [['Compaction happens', 'Compaction occurs'], ['no agent is in flight.', 'no agent runs.']]) {
@@ -2245,7 +2361,23 @@ const BOUND_WORDS = [
   ['the scaffold context check', /CLAUDE_CODE_SESSION_ID|\b200K\b/i, ['context'], 'tree'],
   ['a fact-finding carrier', /\bexplor(?:e|es|ed|ing)\b/i, ['exploreSkill', 'exploreScaffold'], 'prose'],
   ['the scaffold effort ask', /\beffort\b/i, ['effort'], 'prose'],
+  // Step 8's retry of a decline naming a `waiting` agent (BL-097) and its `not needed` answer (BL-099), however
+  // spelled or wrapped. README's side is tests/readme-mods.test.cjs KEY_WORDS, so these read the shipped tree alone.
+  // reconcile.mjs's header value `shipment=not-needed` and its default `'not-needed'` are another word: the row's fifth
+  // field passes those two literals, in that file and as written, and nothing else.
+  ['the TaskStop retry', /\btask[\W_]*stop/i, ['compaction'], 'skill'],
+  ['the not needed answer', /\bnot[\W_]*needed\b/i, ['compaction', 'clearThresholdRow'], 'skill',
+    { 'orchestrate/tools/reconcile.mjs': ['shipment=not-needed', "'not-needed'"] }],
 ];
+// `text` with each literal `passed` names for `file` blanked, and a fault for each of them not found there once.
+function passLiterals(file, text, passed = {}) {
+  const faults = [];
+  for (const literal of passed[file] || []) {
+    if (text.split(literal).length !== 2) faults.push(file + ': the passed literal ' + literal + ' is not found once');
+    else text = text.replace(literal, () => ' '.repeat(literal.length));
+  }
+  return { text, faults };
+}
 test('each budget rule\'s key word appears nowhere but inside its pinned carriers', () => {
   const files = documents(), prose = proseDocuments();
   assert.ok(files.includes('README.md') && files.includes('orchestrate/references/scaffolding.md') && files.some(f => f.endsWith('.mjs')),
@@ -2253,19 +2385,25 @@ test('each budget rule\'s key word appears nowhere but inside its pinned carrier
   assert.ok(prose.includes('README.md') && prose.includes('orchestrate/references/protocol.md') && prose.length < files.length
     && prose.every(f => files.includes(f) && f.endsWith('.md')), 'the prose domain is every Markdown file of that tree, and README');
   assert.equal(new Set(BOUND_WORDS.map(b => b[0])).size, BOUND_WORDS.length);
-  // The narrowing is exactly the two ordinary words; widening back is free, narrowing more is an edit here.
-  assert.deepEqual(BOUND_WORDS.filter(b => b[3] !== 'tree').map(b => b[0]), ['a fact-finding carrier', 'the scaffold effort ask'],
-    'only the explore and effort families read the prose domain alone');
-  for (const [what, pattern, allowed, domain] of BOUND_WORDS) {
-    assert.ok(domain === 'tree' || domain === 'prose', what + ': names its domain');
-    const swept = domain === 'tree' ? files : prose;
+  // The narrowings are exactly the two ordinary words, read in the prose domain alone, and the two clear-route words,
+  // read in the shipped tree without README; widening back is free, narrowing more is an edit here.
+  assert.deepEqual(BOUND_WORDS.filter(b => b[3] !== 'tree').map(b => [b[0], b[3]]),
+    [['a fact-finding carrier', 'prose'], ['the scaffold effort ask', 'prose'], ['the TaskStop retry', 'skill'], ['the not needed answer', 'skill']],
+    'only the explore and effort families read the prose domain alone, and only the TaskStop and not needed families the shipped tree alone');
+  const skill = shipped();
+  assert.ok(!skill.includes('README.md') && skill.every(f => files.includes(f)) && skill.length === files.length - 1, 'the skill domain is the whole shipped tree, README left out');
+  assert.deepEqual(BOUND_WORDS.filter(b => b[4]).map(b => [b[0], Object.keys(b[4])]), [['the not needed answer', ['orchestrate/tools/reconcile.mjs']]],
+    'only the not needed family passes literals, and only in reconcile.mjs');
+  for (const [what, pattern, allowed, domain, passed] of BOUND_WORDS) {
+    assert.ok(domain === 'tree' || domain === 'prose' || domain === 'skill', what + ': names its domain');
+    const swept = domain === 'tree' ? files : domain === 'prose' ? prose : skill;
     const carriers = [...new Set(allowed.map(key => BUDGET[key][0]))].sort();
     assert.ok(carriers.every(c => swept.includes(c)), what + ': its domain must be a superset of its carriers');
     const mentioning = [], stray = [];
     for (const file of swept) {
-      const text = read(file);
+      const { text, faults } = passLiterals(file, read(file), passed);
       if (pattern.test(text)) mentioning.push(file);
-      stray.push(...strayMentions(file, text, pattern, allowed));
+      stray.push(...faults, ...strayMentions(file, text, pattern, allowed));
     }
     assert.deepEqual(stray, [], what + ': a mention outside its pinned carriers states the rule again or contradicts it');
     assert.deepEqual(mentioning.sort(), carriers, what + ': exactly its enumerated carriers mention it');
@@ -2299,6 +2437,36 @@ test('each budget rule\'s key word appears nowhere but inside its pinned carrier
   const contextPlants = ['CLAUDE_CODE_SESSION_ID', '200K'].flatMap(word => plantedAround('context', contextText, word).map((planted, side) => [word, side, planted]));
   assert.deepEqual(contextPlants.map(([word, side, planted]) => [word, side, strayMentions(contextFile, planted, contextWord, contextAllowed).length]),
     contextPlants.map(([word, side]) => [word, side, 1]), 'context: each planted word must be reported once');
+  // The two clear-route families read their words however spelled or wrapped, just before (0) and just after (1) the
+  // compaction passage, and the not needed family just around its registry row. The counts are collected and compared
+  // together.
+  const family = what => BOUND_WORDS.find(([name]) => name === what);
+  const routePlants = [['the TaskStop retry', 'compaction', ['TaskStop', 'Task Stop', 'task_stop', 'TASK-STOP']],
+    ['the not needed answer', 'compaction', ['not needed', 'Not\n   needed', '`not needed`', 'not-needed', 'not_needed', 'Not-Needed', "'not needed'", "'not-needed'"]],
+    ['the not needed answer', 'clearThresholdRow', ['not needed', 'not-needed']]]
+    .flatMap(([what, key, spellings]) => spellings.flatMap(spelling => plantedAround(key, read(BUDGET[key][0]), spelling)
+      .map((planted, side) => [what, key, spelling, side, strayMentions(BUDGET[key][0], planted, family(what)[1], family(what)[2]).length])));
+  assert.deepEqual(routePlants, routePlants.map(([what, key, spelling, side]) => [what, key, spelling, side, 1]), 'each planted clear-route word must be reported once');
+  // reconcile.mjs's two literals pass there alone, as written: planted in protocol.md they are reported, as is the answer
+  // quoted after step 7 and in a tool's comment, reconcile.mjs's included, and a literal of reconcile.mjs reworded.
+  const [, notNeeded, notNeededAllowed, , notNeededPassed] = family('the not needed answer');
+  const RECONCILE = 'orchestrate/tools/reconcile.mjs', PROMPT_TOOL = 'orchestrate/tools/prompt.mjs', PROTOCOL = 'orchestrate/references/protocol.md';
+  const STEP_7_END = 'tip → repair mini-batch before any further merge.', QUOTED = "// An answer of 'not needed' still starts the timer.";
+  assert.equal(read(PROTOCOL).split(STEP_7_END).length, 2, 'the control anchor must be found once — ' + STEP_7_END);
+  const notNeededCount = (file, text) => {
+    const { text: blanked, faults } = passLiterals(file, text, notNeededPassed);
+    return faults.length + strayMentions(file, blanked, notNeeded, notNeededAllowed).length;
+  };
+  const literalControls = [
+    ['reconcile.mjs as it stands', RECONCILE, read(RECONCILE), 0],
+    ["reconcile.mjs's two literals in protocol.md", PROTOCOL, read(PROTOCOL) + "\nshipment=not-needed\n${ctx.shipment ?? 'not-needed'}\n", 2],
+    ['the answer quoted after step 7', PROTOCOL, read(PROTOCOL).replace(STEP_7_END, () => STEP_7_END + " An answer of 'not needed' still takes the line and the timer."), 1],
+    ["the answer quoted in a tool's comment", PROMPT_TOOL, read(PROMPT_TOOL) + '\n' + QUOTED + '\n', 1],
+    ["the answer quoted in reconcile.mjs's own comment", RECONCILE, read(RECONCILE) + '\n' + QUOTED + '\n', 1],
+    ['a literal of reconcile.mjs reworded', RECONCILE, read(RECONCILE).replace('shipment=not-needed', () => 'shipment=not needed'), 2],
+  ];
+  assert.deepEqual(literalControls.map(([what, file, text]) => [what, notNeededCount(file, text)]), literalControls.map(([what, , , count]) => [what, count]),
+    "only reconcile.mjs's two literals, in reconcile.mjs, are no mention");
 });
 
 // No polling, sleeping or notification calls while waiting: clause-level and negation-aware,
@@ -2419,7 +2587,7 @@ const CONTINUE_ID = [
   ['the argument-hint', 'argument-hint:', '\n', 'argument-hint: new <description> | continue [<id>] | status | close', 'argument-hint'],
   ["the description's mode list", ' Modes: ', '\n', 'Modes: new <description> | continue [<id>] | status | close.', 'description'],
   ['the dispatch line', '\n- `continue', '\n- `status`',
-    '- `continue [<id>]` → run the session algorithm on the active ledger, or on ledger `<id>` when one is named; `continue <id> after-clear` is the form orchestrate-mod sends after it clears the conversation (protocol.md §Session algorithm step 8)'],
+    '- `continue [<id>]` → run the session algorithm on the active ledger, or on ledger `<id>` when one is named; `continue <id> after-clear` is the form orchestrate-mod sends after it clears the conversation, and `continue <id> in-place <reason>` the one it sends in place of a skipped clear, which carries on with no boot when the tip is unchanged (protocol.md §Session algorithm step 8)'],
   ['Mode: continue step 1', '## Mode: continue\n', '\n2. Read the ledger',
     '## Mode: continue 1. Discovery → the ledger `<id>` names, when one is named (its line must route to `continue` or `close`; AMBIGUOUS, INCOMPLETE, UNKNOWN, `status` or `none` → ask), else exactly one ACTIVE ledger (else ask).'],
 ];
@@ -2552,25 +2720,37 @@ test('every mode list in the shipped tree writes `continue [<id>]`', () => {
 
 // The clear route's names, counted per file across the shipped tree: protocol.md names the tool
 // once and the after-clear command twice, every mention inside step 8's passage (BUDGET.compaction),
-// and SKILL.md names the after-clear form once, in its dispatch line. "continue <id> after-clear"
-// also counts the protocol.md command, so the form's count is both files'. Each name is also read
+// and SKILL.md names the after-clear form once, in its dispatch line; the contract template names
+// the after-clear command once, in boot step 1's after-clear sentence (AFTER_CLEAR_READ). "continue
+// <id> after-clear" also counts each command, so the form's count is all three files'. Each name is also read
 // by its key words, however spelled: the tool's short name, the after-clear word, and any
-// `/orchestrate continue` command, the in-place one included.
+// `/orchestrate continue` command, the in-place one included. The skipped clear's in-place form sits in step 8's
+// passage and the dispatch line once each, and its in-place word with it.
 const CLEAR_NAMES = [
   ['the tool', 'mcp__orchestrate-mod__schedule_clear', { 'orchestrate/references/protocol.md': 1 }],
   ['the tool, by its short name', /schedule[\W_]*clear/i, { 'orchestrate/references/protocol.md': 1 }],
-  ['the after-clear command', '/orchestrate continue <id> after-clear', { 'orchestrate/references/protocol.md': 2 }],
-  ['the after-clear form', 'continue <id> after-clear', { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 2 }],
-  ['the after-clear word', /\bafter[\W_]*clear/i, { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 2 }],
-  ['the in-place command', /\/orchestrate\W+continue\b/i, { 'orchestrate/references/protocol.md': 3 }],
+  ['the after-clear command', '/orchestrate continue <id> after-clear', { 'orchestrate/references/protocol.md': 2, [TEMPLATE]: 1 }],
+  ['the after-clear form', 'continue <id> after-clear', { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 2, [TEMPLATE]: 1 }],
+  ['the after-clear word', /\bafter[\W_]*clear/i, { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 2, [TEMPLATE]: 1 }],
+  ['the in-place command', /\/orchestrate\W+continue\b/i, { 'orchestrate/references/protocol.md': 3, [TEMPLATE]: 1 }],
+  ['the in-place form', 'continue <id> in-place <reason>', { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 1 }],
+  ['the in-place word', /\bin[-_]+place\b/i, { 'orchestrate/SKILL.md': 1, 'orchestrate/references/protocol.md': 1 }],
 ];
+// Boot step 1's after-clear sentence, the template's home for the clear route: [file, from, to, the
+// passage pinned whole]. It ends where boot step 2 opens, and its opening names no clear-route name,
+// so a control can take the mention out and leave the home's bounds standing.
+const AFTER_CLEAR_READ = [TEMPLATE, 'A session that ', '\n2. Run `git status',
+  'A session that `/orchestrate continue <id> after-clear` opened reads none of 00-request.md, 01-plan.md and PROGRESS.md: once the pin check (step 3) passes it reads the digest that '
+  + '`node "{{SKILL_DIR}}/tools/reconcile.mjs" digest --repo <repo> --ledger {{CHANGE_ID}} --integration refs/heads/{{INTEGRATION_BRANCH}}` prints, and of this contract only '
+  + '§Boot sequence, §Git model, §Validation commands and §Hard prohibitions, reading any other section by its heading when a step needs it.'];
 const namedIn = (text, name) => typeof name === 'string' ? collapse(text).split(name).length - 1
   : [...collapse(text).matchAll(new RegExp(name.source, name.flags.replace(/[gy]/g, '') + 'g'))].length;
 // Each fault in `texts` ([file, text] pairs): a name counted otherwise than CLEAR_NAMES says, and a
 // mention outside its file's passage.
 function clearNameFaults(texts) {
   const [pfile, pfrom, pto] = BUDGET.compaction, [, dfrom, dto] = CONTINUE_ID.find(([what]) => what === 'the dispatch line');
-  const homes = { [pfile]: [pfrom, pto], 'orchestrate/SKILL.md': [dfrom, dto] }, faults = [];
+  const [afile, afrom, ato] = AFTER_CLEAR_READ;
+  const homes = { [pfile]: [pfrom, pto], 'orchestrate/SKILL.md': [dfrom, dto], [afile]: [afrom, ato] }, faults = [];
   for (const [what, name, expected] of CLEAR_NAMES) {
     const counts = {};
     for (const [file, text] of texts) {
@@ -2584,35 +2764,37 @@ function clearNameFaults(texts) {
   }
   return faults;
 }
-test("the clear route's names sit in step 8's passage and SKILL.md's dispatch line only, counted", () => {
+test("the clear route's names sit in step 8's passage, SKILL.md's dispatch line and the template's after-clear sentence only, counted", () => {
   const texts = shipped().map(file => [file, read(file)]), at = file => texts.findIndex(([f]) => f === file);
   const swap = (file, text) => texts.map((pair, i) => i === at(file) ? [file, text] : pair);
-  assert.ok(at('orchestrate/SKILL.md') !== -1 && at('orchestrate/references/protocol.md') !== -1 && at('orchestrate/references/execution-models.md') !== -1);
-  assert.deepEqual(clearNameFaults(texts), [], 'the names are where step 8 and the dispatch line put them, and nowhere else');
+  assert.ok(at('orchestrate/SKILL.md') !== -1 && at('orchestrate/references/protocol.md') !== -1 && at('orchestrate/references/execution-models.md') !== -1 && at(TEMPLATE) !== -1);
+  assert.deepEqual(clearNameFaults(texts), [], "the names are where step 8, the dispatch line and boot step 1's after-clear sentence put them, and nowhere else");
   const [pfile, pfrom, pto] = BUDGET.compaction, protocol = read(pfile), skill = read('orchestrate/SKILL.md');
-  const command = '`/orchestrate continue <id> after-clear`', inPlace = '`/orchestrate continue <id>`';
+  const command = '`/orchestrate continue <id> after-clear`', inPlace = '`/orchestrate continue <id> in-place <reason>`';
   assert.ok(protocol.includes(command) && section(protocol, pfrom, pto).includes(command) && protocol.includes(inPlace), 'the control must find the commands inside the passage');
   // Each key-word family reads the full names it stands for.
   const family = what => CLEAR_NAMES.find(([name]) => name === what)[1];
   for (const [what, spellings] of [['the tool, by its short name', ['mcp__orchestrate-mod__schedule_clear']],
-    ['the after-clear word', ['/orchestrate continue <id> after-clear', 'continue <id> after-clear']], ['the in-place command', ['/orchestrate continue <id> after-clear', '/orchestrate continue <id>']]]) {
+    ['the after-clear word', ['/orchestrate continue <id> after-clear', 'continue <id> after-clear']], ['the in-place command', ['/orchestrate continue <id> after-clear', '/orchestrate continue <id>']],
+    ['the in-place word', ['continue <id> in-place <reason>']]]) {
     assert.ok(spellings.every(spelling => namedIn(spelling, family(what)) === 1), what + ': reads the full names it stands for');
   }
   // Live: one mention more just outside the passage, on either side, is reported as outside and as a count.
-  const P = '{"' + pfile + '":', SP = '{"orchestrate/SKILL.md":1,"' + pfile + '":';
+  // A count object's text: protocol.md's count, then the template's (T1 when it holds its one mention).
+  const P = '{"' + pfile + '":', SP = '{"orchestrate/SKILL.md":1,"' + pfile + '":', Tn = n => ',"' + TEMPLATE + '":' + n + '}', T1 = Tn(1);
   assert.deepEqual(clearNameFaults(swap(pfile, protocol.replace(pfrom, () => 'Call `mcp__orchestrate-mod__schedule_clear` first.\n' + pfrom))),
     ['the tool: 1 outside its passage in ' + pfile, 'the tool: counted ' + P + '2}',
       'the tool, by its short name: 1 outside its passage in ' + pfile, 'the tool, by its short name: counted ' + P + '2}'], 'the tool named before the passage');
   assert.deepEqual(clearNameFaults(swap(pfile, protocol.replace(pto, () => pto + ' Then run ' + command + '.'))),
-    ['the after-clear command: 1 outside its passage in ' + pfile, 'the after-clear command: counted ' + P + '3}',
-      'the after-clear form: 1 outside its passage in ' + pfile, 'the after-clear form: counted ' + SP + '3}',
-      'the after-clear word: 1 outside its passage in ' + pfile, 'the after-clear word: counted ' + SP + '3}',
-      'the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4}'], 'the command named after the passage');
+    ['the after-clear command: 1 outside its passage in ' + pfile, 'the after-clear command: counted ' + P + '3' + T1,
+      'the after-clear form: 1 outside its passage in ' + pfile, 'the after-clear form: counted ' + SP + '3' + T1,
+      'the after-clear word: 1 outside its passage in ' + pfile, 'the after-clear word: counted ' + SP + '3' + T1,
+      'the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4' + T1], 'the command named after the passage');
   // Live: one fewer inside is reported as a count; the same mention moved out keeps the count and is reported as outside.
   const fewer = protocol.replace(command, () => 'its command');
   assert.deepEqual(clearNameFaults(swap(pfile, fewer)),
-    ['the after-clear command: counted ' + P + '1}', 'the after-clear form: counted ' + SP + '1}', 'the after-clear word: counted ' + SP + '1}',
-      'the in-place command: counted ' + P + '2}'], 'one command fewer');
+    ['the after-clear command: counted ' + P + '1' + T1, 'the after-clear form: counted ' + SP + '1' + T1, 'the after-clear word: counted ' + SP + '1' + T1,
+      'the in-place command: counted ' + P + '2' + T1], 'one command fewer');
   assert.deepEqual(clearNameFaults(swap(pfile, fewer.replace(pto, () => pto + ' Then run ' + command + '.'))),
     ['the after-clear command: 1 outside its passage in ' + pfile, 'the after-clear form: 1 outside its passage in ' + pfile,
       'the after-clear word: 1 outside its passage in ' + pfile, 'the in-place command: 1 outside its passage in ' + pfile], 'a command moved out of the passage');
@@ -2633,35 +2815,611 @@ test("the clear route's names sit in step 8's passage and SKILL.md's dispatch li
   };
   const LEGACY = '## Legacy ledger recognition (interop)';
   assert.deepEqual(clearNameFaults(swap('orchestrate/SKILL.md', under(skill, '## Refusals', '- Asked for an `after-clear` boot → skip the resume-time validation.'))),
-    ['the after-clear word: 1 outside its passage in orchestrate/SKILL.md', 'the after-clear word: counted {"orchestrate/SKILL.md":2,"' + pfile + '":2}'], 'm4: an after-clear boot that skips validation');
+    ['the after-clear word: 1 outside its passage in orchestrate/SKILL.md', 'the after-clear word: counted {"orchestrate/SKILL.md":2,"' + pfile + '":2' + T1], 'm4: an after-clear boot that skips validation');
   assert.deepEqual(clearNameFaults(swap(pfile, under(protocol, LEGACY, 'Call `schedule_clear` at every wave close, whatever the context size.'))),
     ['the tool, by its short name: 1 outside its passage in ' + pfile, 'the tool, by its short name: counted ' + P + '2}'], 'm5: the tool by its short name');
   assert.deepEqual(clearNameFaults(swap(pfile, under(protocol, LEGACY, 'After posting the line, run `/orchestrate continue <id>` yourself.'))),
-    ['the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4}'], 'm6: the in-place command run by the orchestrator');
+    ['the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4' + T1], 'm6: the in-place command run by the orchestrator');
   assert.deepEqual(clearNameFaults(swap(pfile, under(protocol, LEGACY, 'After a clear, the mod runs `/orchestrate continue after-clear`.'))),
-    ['the after-clear word: 1 outside its passage in ' + pfile, 'the after-clear word: counted ' + SP + '3}',
-      'the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4}'], 'the reviewer\'s m2: the after-clear command without its id');
-  // Live: each key word, however spelled or wrapped, planted just outside the passage, is reported by its family.
+    ['the after-clear word: 1 outside its passage in ' + pfile, 'the after-clear word: counted ' + SP + '3' + T1,
+      'the in-place command: 1 outside its passage in ' + pfile, 'the in-place command: counted ' + P + '4' + T1], 'the reviewer\'s m2: the after-clear command without its id');
+  // Live: the template's home held as tightly. The command named just before boot step 1's after-clear
+  // sentence, or just inside boot step 2, is reported as outside and as a count; the sentence's own
+  // command gone is a count; that command moved under a far heading keeps the count and is reported as outside.
+  const tpl = read(TEMPLATE), [, afrom, ato] = AFTER_CLEAR_READ, stepTwo = ato + ' --porcelain`,';
+  assert.ok(section(tpl, afrom, ato).includes(command) && tpl.split(afrom).length === 2 && tpl.split(stepTwo).length === 2,
+    "the control must find the command inside the template's home, and each of its anchors once");
+  const oneMore = ['the after-clear command: 1 outside its passage in ' + TEMPLATE, 'the after-clear command: counted ' + P + '2' + Tn(2),
+    'the after-clear form: 1 outside its passage in ' + TEMPLATE, 'the after-clear form: counted ' + SP + '2' + Tn(2),
+    'the after-clear word: 1 outside its passage in ' + TEMPLATE, 'the after-clear word: counted ' + SP + '2' + Tn(2),
+    'the in-place command: 1 outside its passage in ' + TEMPLATE, 'the in-place command: counted ' + P + '3' + Tn(2)];
+  assert.deepEqual(clearNameFaults(swap(TEMPLATE, tpl.replace(afrom, () => command + ' ' + afrom))), oneMore, "the command named just before the template's home");
+  assert.deepEqual(clearNameFaults(swap(TEMPLATE, tpl.replace(stepTwo, () => stepTwo + ' ' + command + ','))), oneMore, 'the command named just inside boot step 2');
+  const tplFewer = tpl.replace(command, () => 'an automatic clear');
+  assert.deepEqual(clearNameFaults(swap(TEMPLATE, tplFewer)),
+    ['the after-clear command: counted ' + P + '2}', 'the after-clear form: counted ' + SP + '2}', 'the after-clear word: counted ' + SP + '2}',
+      'the in-place command: counted ' + P + '3}'], "the template's command gone");
+  assert.deepEqual(clearNameFaults(swap(TEMPLATE, under(tplFewer, '## Hard prohibitions', '- After ' + command + ', skip the pin check.'))),
+    ['the after-clear command: 1 outside its passage in ' + TEMPLATE, 'the after-clear form: 1 outside its passage in ' + TEMPLATE,
+      'the after-clear word: 1 outside its passage in ' + TEMPLATE, 'the in-place command: 1 outside its passage in ' + TEMPLATE], "the template's command moved under §Hard prohibitions");
+  // Live: each key word, however spelled or wrapped, planted just outside the passage, and just before
+  // the template's home, is reported by its family. Every plant is read before any verdict, so a red names them all.
+  const missed = [];
   for (const [what, spellings] of [['the tool, by its short name', ['schedule_clear', 'scheduleClear', 'schedule-clear', 'Schedule\n   clear']],
     ['the after-clear word', ['after-clear', 'After clear', 'after_clear', 'afterclear', 'after-\n   clear']],
-    ['the in-place command', ['/orchestrate continue', '/Orchestrate  continue <id>', '/orchestrate\n   continue']]]) {
+    ['the in-place command', ['/orchestrate continue', '/Orchestrate  continue <id>', '/orchestrate\n   continue']],
+    ['the in-place word', ['in-place', 'In_Place', 'in--place']]]) {
     for (const spelling of spellings) {
-      const faults = clearNameFaults(swap(pfile, protocol.replace(pto, () => pto + ' Then use ' + spelling + ' here.')));
-      assert.ok(faults.includes(what + ': 1 outside its passage in ' + pfile), what + ': a planted ' + JSON.stringify(spelling) + ' must be reported — ' + faults.join(' | '));
+      for (const [file, planted] of [[pfile, protocol.replace(pto, () => pto + ' Then use ' + spelling + ' here.')], [TEMPLATE, tpl.replace(afrom, () => 'Then use ' + spelling + ' here. ' + afrom)]]) {
+        const faults = clearNameFaults(swap(file, planted));
+        if (!faults.includes(what + ': 1 outside its passage in ' + file)) missed.push(what + ': ' + JSON.stringify(spelling) + ' in ' + file + ' — ' + faults.join(' | '));
+      }
     }
   }
+  assert.deepEqual(missed, [], 'each key word planted outside its passage must be reported by its family');
+});
+
+// Boot step 1's after-clear sentence reads as AFTER_CLEAR_READ pins it, last in step 1 after the LOG.md
+// sentence, and each contract section it keeps at boot names a heading of the template: a renamed
+// heading would leave a session reading a section that is not there.
+const keptSections = text => [...collapse(section(text, AFTER_CLEAR_READ[1], AFTER_CLEAR_READ[2])).matchAll(/§(\w+ \w+)/g)].map(m => m[1]);
+const unheaded = text => keptSections(text).filter(name => !text.split('\n').some(line => line.startsWith('## ' + name)));
+test("boot step 1's after-clear sentence is pinned whole, and each section it keeps is a heading of the template", () => {
+  const [file, from, to, pinned] = AFTER_CLEAR_READ;
+  assert.equal(file, TEMPLATE);
+  assert.equal(collapse(section(template, from, to)).trim(), pinned, 'the after-clear sentence changed; update AFTER_CLEAR_READ only if the change is deliberate');
+  assert.ok(template.includes('never at boot.\n   ' + from), "the sentence follows step 1's LOG.md sentence");
+  assert.deepEqual(keptSections(template), ['Boot sequence', 'Git model', 'Validation commands', 'Hard prohibitions']);
+  assert.deepEqual(unheaded(template), [], 'each section the sentence keeps must be a heading of the template');
+  // Live: a renamed heading is reported.
+  const renamed = template.replace('\n## Git model (locked)\n', () => '\n## Branch model (locked)\n');
+  assert.notEqual(renamed, template, 'the control must rename the heading');
+  assert.deepEqual(unheaded(renamed), ['Git model'], 'a kept section whose heading is gone must be reported');
+});
+
+// ===== Closed sweeps (B06 of OS-20261022): where the worktrees live, a cleared session, the close-out's order =====
+// A document's units as a reader meets them: a paragraph, a list item, a table row, a tree row or a heading each
+// starts its own, split into sentences and `;` clauses, code ticks and emphasis dropped and whitespace collapsed.
+const proseUnits = text => text.replace(/\r\n/g, '\n').split(/\n[ \t]*\n|\n(?=[ \t]*(?:[-*]|\d+\.)[ \t]|[ \t]*[|├└│]|#{1,6} )/)
+  .flatMap(block => block.replace(/[`*]/g, '').replace(/\s+/g, ' ').trim().split(/(?<=[.;])\s+/)).filter(Boolean);
+// Each unit of `texts` ([file, text] pairs) that `selects` reads and `listed` ([file, unit] pairs, word for word) does
+// not hold, then each listed one gone; a unit held twice must be listed twice.
+function closedFaults(texts, selects, listed) {
+  const left = listed.map(([file, unit]) => file + ' :: ' + unit), faults = [];
+  for (const [file, text] of texts) {
+    for (const unit of proseUnits(text).filter(selects)) {
+      const at = left.indexOf(file + ' :: ' + unit);
+      if (at === -1) faults.push(file + ' :: ' + unit);
+      else left.splice(at, 1);
+    }
+  }
+  return [...faults, ...left.map(entry => 'gone: ' + entry)];
+}
+const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// The orchestrator's worktrees live under the contract's worktree root, under the session scratchpad only for a
+// contract that names none (BL-101). Every unit of the shipped Markdown and README (proseDocuments, where the
+// conductor's directives live) that names a worktree, a working tree, a checkout or a clone (TREE_WORD, the family
+// tests/protocol-contract.test.cjs `worktreeFaults` holds for the template), or a path under the session scratchpad
+// (SCRATCH_PATH), is doubt unless SCRATCH_TREE_UNITS lists it word for word: a placement needs no particular word for
+// its place. The template is left to tests/protocol-contract.test.cjs SCRATCH_UNITS and WORKTREE_UNITS.
+const TREE_WORD = /work[\W_]*tree|working[\W_]*trees?|check[\W_]*out|\bcheck(?:s|ed|ing)?\b.*\bout\b|\bclon(?:e|es|ed|ing)\b/i;
+const SCRATCH_PATH = /<(?:session )?scratchpad>\/|\[SCRATCHPAD_PATH\]\//i;
+const namesTree = unit => SCRATCH_PATH.test(unit) || TREE_WORD.test(unit);
+const WORKTREE_FALLBACK = "under the contract's worktree root (its boot step 2 and Git model), or under the session scratchpad for a contract that names none";
+const SCRATCH_TREE_UNITS = [
+  ["orchestrate/SKILL.md", "Scaffolds and drives file-based ledgers in .agents/changes/ — locked plan with a wave map (file-disjoint batches run concurrently, one git branch per batch, worktree implementers), a mechanical fence check plus an independent hunk-to-finding reviewer gate per batch, validation on the integration tip after every merge, user smoke tests only at planned checkpoints (after hands-on-risk waves plus one final — never per batch by default), and crash-safe PROGRESS reconciliation where git is truth."],
+  ["orchestrate/SKILL.md", "Find ledgers in the WORKING TREE: glob /PROGRESS.md rooted at <repo>/.agents/changes/ — dot-dirs often escape repo-root globs, so root the search INSIDE the directory;"],
+  ["orchestrate/SKILL.md", "Find ledgers that exist only on BRANCHES — scaffold commits live on the integration branch, never on the default branch, so a checkout on main may show none of the active work."],
+  ["orchestrate/SKILL.md", "Group copies of the same ledger id across the checkout and refs;"],
+  ["orchestrate/SKILL.md", "Unknown provenance, newer/conflicting ledger commits, or uncommitted ledger edits in an associated worktree remain visible, never silently superseded."],
+  ["orchestrate/SKILL.md", "Unresolved ownership or target conflicts, divergent local/remote integration refs, or conflicting working-tree ledger edits are AMBIGUOUS."],
+  ["orchestrate/SKILL.md", "checkout is on <current>\"."],
+  ["orchestrate/SKILL.md", "Never switch the main checkout and never copy ledger files into another branch's tree."],
+  ["orchestrate/SKILL.md", "The orchestrator never switches the main checkout: it reads with git show and writes through an integration worktree under the contract's worktree root (its boot step 2 and Git model), or under the session scratchpad for a contract that names none."],
+  ["orchestrate/SKILL.md", "- Every batch passes, in order: a MECHANICAL fence check (paths, both rename endpoints, clean worktree — fence bounces are not review rounds), the failing-on-base check for fix batches, then ONE fresh independent read-only reviewer (plus any gate agents the contract names, in parallel) that maps every diff hunk to a batch item;"],
+  ["orchestrate/SKILL.md", "the user picks at plan approval) → plan checks on a draft (node \"<skill-dir>/tools/scaffold.mjs\" --answers <draft answers> --repo <scratch worktree> writes the draft ledger into a scratch worktree of the base, and check-ledger.mjs runs plan, cites and census on it, per scaffolding.md;"],
+  ["orchestrate/SKILL.md", "the draft and its worktree are removed after the last pre-flight round, so Discovery never meets a second copy of the ledger) → independent plan PRE-FLIGHT (a fresh read-only sub-agent given those three lines;"],
+  ["orchestrate/SKILL.md", "Boot (a pinned contract verifies its skill pin first) + reconcile (for a pinned contract node \"<skill-dir>/tools/reconcile.mjs\" rows --repo <repo> --ledger <id> --integration <full-ref>, <skill-dir> being its pinned directory, if the tool is there) + resume-time validation per the contract's boot sequence — a pinned contract takes up its pinned skill directory's references/protocol.md, the procedure its repo facts plug into, only on SKILL MATCH — then run the pinned protocol.md's (or a legacy contract's own) §Session algorithm: repairs (❌ / red tip) first as mini-batches → unanswered 🧪 checkpoint → open the next wave (re-run the census agent of any member an earlier wave's tests reach, cut branches + worktrees, spawn ALL of the wave's implementers concurrently) → per batch as each lands: fence check → failing-on-base → reviewer + gate agents → polish / fix rounds → integrate (dry run, merge, tip validation) → next wave, repeating until a checkpoint → per-checkpoint close-out (tip validation, QA-runner pre-smoke with evidence, page) → STOP, delivering the checkpoint's combined smoke script as an interactive smoke page per [references/smoke-page.md](references/smoke-page.md) using available HTML delivery tools, or the full plain-text script when no usable HTML delivery is available."],
+  ["orchestrate/SKILL.md", "Strictly read-only (no edits, no branch changes, no checkout switch): discovery → reconcile every row that is not ✅/👤/⛔ (dropped) against git per the §Recovery table (the pinned protocol.md's, or a legacy contract's own) → print a claim-vs-git-vs-verdict table, the checkpoint(s) awaiting the user, branch-only ledgers, and the recommended next action."],
+  ["orchestrate/references/execution-models.md", "Preserve originals and validation evidence under versioned input paths, verify raw bytes after checkout, and give QA the same registry/identities the user receives."],
+  ["orchestrate/references/execution-models.md", "- Wave — a set of batches that run AT THE SAME TIME: one implementer per batch, each in its own git worktree on its own branch."],
+  ["orchestrate/references/execution-models.md", "create one worktree per batch under the contract's worktree root (its boot step 2 and Git model), or under the session scratchpad for a contract that names none (never inside the repo);"],
+  ["orchestrate/references/execution-models.md", "run the ledger's per-worktree setup;"],
+  ["orchestrate/references/execution-models.md", "commit ONE PROGRESS flip on the integration branch through the integration worktree (member rows → 🔄, branches named, wave base SHA in the session log, State: ACTIVE)."],
+  ["orchestrate/references/execution-models.md", "The main checkout is never switched."],
+  ["orchestrate/references/execution-models.md", "Gate as they land: each finished batch, in order — structured report present → mechanical fence check (clean worktree;"],
+  ["orchestrate/references/execution-models.md", "Close the wave when every member is 🟢, ⛔ or 👤 (a recorded NEEDS_FENCE deferral does not hold it): remove the worktrees."],
+  ["orchestrate/references/execution-models.md", "the checkout had silently never happened, the user ran all twenty steps against the base, and reported the un-fixed defects as failures."],
+  ["orchestrate/references/execution-models.md", "- No sub-agent support → the orchestrator implements a wave's batches one at a time in the main checkout (worktrees unnecessary);"],
+  ["orchestrate/references/protocol.md", "Owns PROGRESS, LOG, evidence/, branches, worktrees, integration merges, close-outs, and all user communication."],
+  ["orchestrate/references/protocol.md", "Never switches the main checkout: reads any branch with git show <branch>:./<path> (keep the ./ — Git Bash on Windows mangles branch:path;"],
+  ["orchestrate/references/protocol.md", "run it from the repo or worktree root), writes through an integration worktree under the contract's worktree root (its boot step 2 and Git model), or under the session scratchpad for a contract that names none — reusing one git worktree list already shows, pruning first if its directory is gone."],
+  ["orchestrate/references/protocol.md", "Codes inside the file fence in the batch's isolated worktree, ticks the batch checklist, commits on the batch branch (one commit per fold-in item)."],
+  ["orchestrate/references/protocol.md", "Its full report goes with the Write tool to the file its rendered prompt names, under the session scratchpad and never inside a worktree or the repository, in the fixed shape: its heading ### B<NN> R<k> <role> findings;"],
+  ["orchestrate/references/protocol.md", "Each writes its full report with the Write tool to the findings file its prompt names — its only other writes are validation logs and disposable scratch under the session scratchpad, never inside a worktree or the repository — and returns four lines: its verdict, NONCE <nonce>, FINDINGS <n>, the file's path."],
+  ["orchestrate/references/protocol.md", "A test hunter proves each mutation it chooses itself with the skill's mutate.mjs, on a disposable clone of the batch's commit."],
+  ["orchestrate/references/protocol.md", "A smoke-step ASK is the exception to where that edit lands: its text lives in the batch file's Smoke section, and the batch branch changes that file only by ticks, polish: appends and a recorded Files line (6a), so the orchestrator applies it through the integration worktree, in the ledger commit that records the verdict, never on the batch branch."],
+  ["orchestrate/references/protocol.md", "After a crash, wherever §Recovery meets a SHIP … asks= tip with no polish: item listed yet — its worktree clean or holding the unfinished list edit — the orchestrator completes that list commit before any polish pass or resume, ticking each ask whose text the integration branch's batch file already carries;"],
+  ["orchestrate/references/protocol.md", "Once the polish has landed, the orchestrator classifies its diff: node \"<skill-dir>/tools/prose-only-diff.mjs\" --repo <batch worktree> --base <pre-polish sha> --head <polish tip>."],
+  ["orchestrate/references/protocol.md", "| 🟢 Integrated | Reviewed, validations green on the worktree AND the integration tip, merged;"],
+  ["orchestrate/references/protocol.md", "text node \"<skill-dir>/tools/git-evidence.mjs\" discovery --repo <repo> node \"<skill-dir>/tools/git-evidence.mjs\" worktrees --repo <repo> node \"<skill-dir>/tools/git-evidence.mjs\" ancestry --repo <repo> --ancestor <ref-or-sha> --descendant <ref-or-sha> node \"<skill-dir>/tools/git-evidence.mjs\" shipment --repo <repo> --integration <full-ref> --source local --ref <full-shipment-ref> node \"<skill-dir>/tools/git-evidence.mjs\" shipment --repo <repo> --integration <full-ref> --source remote --remote <name> --ref <full-shipment-ref> node \"<skill-dir>/tools/git-evidence.mjs\" ledger --repo <repo> --ref <full-ref> --ledger <id> --owner <ref-or-sha> --target <ref-or-sha> node \"<skill-dir>/tools/check-fence.mjs\" --repo <repo> --integration <full-ref> --batch <full-ref> --ledger <id> --batch-id <Bnn> --batch-file <repo-relative-path>"],
+  ["orchestrate/references/protocol.md", "Discovery retains refs/SHAs/ symbolic targets, worktrees and ledger locations/provenance grouped by id;"],
+  ["orchestrate/references/protocol.md", "failing-on-base.mjs performs step 6b in a disposable clone (its command is at that step) and prints one line, PROVEN, ALL-PASS (P0) or INCONCLUSIVE, exiting 0, 1 or 2."],
+  ["orchestrate/references/protocol.md", "also inspect .agents/changes directly in each worktree from git worktree list --porcelain."],
+  ["orchestrate/references/protocol.md", "never copy it into the default checkout."],
+  ["orchestrate/references/protocol.md", "Inspect every worktree's porcelain status including untracked files and both rename endpoints."],
+  ["orchestrate/references/protocol.md", "wave members run concurrently, each implementer in an isolated worktree under the contract's worktree root (its boot step 2 and Git model), or under the session scratchpad for a contract that names none."],
+  ["orchestrate/references/protocol.md", "PROGRESS, LOG and evidence/ are edited ONLY on the integration branch, by the orchestrator, through the integration worktree (the QA runner writes evidence/ files there;"],
+  ["orchestrate/references/protocol.md", "Copy raw bytes and verify hashes in the delivered checkout, including effective Git attributes and core.autocrlf=true when Git carries the package."],
+  ["orchestrate/references/protocol.md", "Generate A and B to new paths (generation refuses overwrite) and require raw SHA256(generation A) = SHA256(generation B) = SHA256(committed workbook file bytes) from a fresh checkout."],
+  ["orchestrate/references/protocol.md", "For each PROGRESS row not ✅/👤/⛔ (dropped), gather: branch exists? (git rev-parse --verify), integrated? (git merge-base --is-ancestor <branch> <integration>), shipped? (git merge-base --is-ancestor <integration-sha> <shipment-sha> only after source resolution above), commits ahead (git log <integration>..<branch> --oneline), dirty trees (git status --porcelain in each worktree from git worktree list that holds the row's branch — the main checkout only when it holds that branch), and the checklist state inside the batch file on that branch (git show <branch>:./<path>, from the root)."],
+  ["orchestrate/references/protocol.md", "| any row whose Notes end in a spent fix again | commits after @<sha>, branch not yet an ancestor of the integration branch | Third round landed → worktree dirty: re-spawn the FRESH strong-tier implementer at the open findings;"],
+  ["orchestrate/references/protocol.md", "no commit after the marker's @<sha>: never started → resume the implementer on that branch (fresh worktree);"],
+  ["orchestrate/references/protocol.md", "| 🔄 | Notes record R<k> SHIP @<sha> asks=<n> for the current tip, worktree clean | Shipped with ASKs, crashed before the polish → polish pass (ASK list in LOG.md), then its mechanical close |"],
+  ["orchestrate/references/protocol.md", "| 🔄 | Notes record R<k> SHIP @<sha> asks=<n>, commits after @<sha>, worktree clean, every polish: item ticked (at least one appended) | Polish landed, crashed before its close → 6a + validations on the tip;"],
+  ["orchestrate/references/protocol.md", "| 🔄 | branch missing, or no commits past the wave base | Implementer never landed → re-spawn it (fresh worktree) |"],
+  ["orchestrate/references/protocol.md", "| 🔄 | dirty worktree, or commits ahead + partial checklist (incl."],
+  ["orchestrate/references/protocol.md", "a recorded deferral is not a partial checklist) | Resume the implementer — a fresh agent, the original is gone — at the first unticked item (recreate the worktree if gone;"],
+  ["orchestrate/references/protocol.md", "Prune worktrees of integrated batches (git worktree remove)."],
+  ["orchestrate/references/protocol.md", "Before any polish pass or resume at a SHIP … asks= tip whose batch file lists no polish: item yet, its worktree clean or dirty, the orchestrator completes the list commit, as §Severity and round accounting says for a smoke-step ASK."],
+  ["orchestrate/references/protocol.md", "A contract carrying a Skill pin line verifies it FIRST, before reconcile: node \"<skill-dir>/tools/check-ledger.mjs\" skill --contract <ledger-dir>/00-READBEFORE.md from the integration worktree root — SKILL MATCH continues;"],
+  ["orchestrate/references/protocol.md", "a conflict → STOP AND INVESTIGATE, as in the integration procedure), then git commit-tree <tree> -p <tip> -m trial, check that commit out in a temporary worktree (git worktree add <scratchpad>/wt-trial <commit>;"],
+  ["orchestrate/references/protocol.md", "a stale wt-trial from a crashed trial is removed first), run the ledger's per-worktree setup there (skip only if n/a), then run the validations and remove the worktree;"],
+  ["orchestrate/references/protocol.md", "From the integration tip: cut every member's branch, create every worktree (setup: the ledger's per-worktree setup), then commit the wave-open PROGRESS flip (rows → 🔄, wave base SHA in the session log, State: ACTIVE)."],
+  ["orchestrate/references/protocol.md", "The cut is idempotent: a member branch that already exists with its tip equal to the current integration tip is adopted from a crashed open — its worktree, if any, removed and recreated (fresh setup);"],
+  ["orchestrate/references/protocol.md", "Spawn ALL of the wave's implementers CONCURRENTLY (one per batch, in a single message, each pinned to its worktree, on the tier the batch's weight calls for)."],
+  ["orchestrate/references/protocol.md", "Render each prompt first, from the integration worktree root: node \"<skill-dir>/tools/prompt.mjs\" --ledger <ledger-dir> --role implementer --batch <Bnn> --facts <facts.json> --out \"<session scratchpad>/prompts\" (--help lists each role's facts) prints PROMPT <path> NONCE <nonce>;"],
+  ["orchestrate/references/protocol.md", "Worktree clean (git status --porcelain empty);"],
+  ["orchestrate/references/protocol.md", "A cause that begins code changed, or a changed path that is neither Markdown nor JavaScript, returns the fold-in: one commit on the batch branch reverses only that commit's own changes (git revert --no-commit <sha>, then git restore --source=HEAD --staged --worktree -- <batch file> so its tick stays;"],
+  ["orchestrate/references/protocol.md", "In a temporary worktree at the branch's base, run the ledger's per-worktree setup there (skip only if n/a), then copy over the batch's TEST-ONLY files and run its changed tests: an assertion failure on the named behavior proves the regression test;"],
+  ["orchestrate/references/protocol.md", "the log outside the repository) performs this step in a disposable clone and prints one line, the failing-on-base result the reviewer receives: PROVEN (…) names the tests that fail on the base, the proof reviewer duty (e) confirms;"],
+  ["orchestrate/references/protocol.md", "The reviewer gets the batch file + the diff (git diff <integration>...HEAD in the batch's worktree — three-dot isolates the batch's own changes) and must (a) map every hunk to a batch item — unmapped hunks are scope creep → reject (the batch file's ticks are exempt);"],
+  ["orchestrate/references/protocol.md", "the findings go to LOG.md under the row's heading: every findings file reaches LOG.md first, closed by a newline and a marker line — from the integration worktree root, (cat -- \"<findings file>\" && echo && echo '=== end of B<NN> R<k> <role> findings ===') >> <ledger-dir>/LOG.md in Git Bash or an equivalent byte copy, never re-typed through the orchestrator's context, committed with the PROGRESS update — and only then is its path forwarded to the polish, fix-round, rework or round-2 prompt;"],
+  ["orchestrate/references/protocol.md", "Integrate serially, per the integration procedure: dry run → merge → tip validation → 🟢, apply the version/changelog cadence, remove the worktree, write the row's Notes (SHA, reviewer arc, tier, residuals) ending with the metrics token m: rounds=<n> asks=<n> fence-bounces=<n> gate=<findings/prod> tip-red=<0|1>."],
+  ["orchestrate/references/protocol.md", "its worktree is <the contract's worktree root>/sweep, or under the session scratchpad for a contract that names no root."],
+  ["orchestrate/references/protocol.md", "The mechanical check is manual: worktree clean, and every changed path, both rename endpoints, one that a recorded item names."],
+  ["orchestrate/references/protocol.md", "- No sub-agents available: the orchestrator implements a wave's batches one at a time in the main checkout (worktrees unnecessary)."],
+  ["orchestrate/references/scaffolding.md", "node \"<SKILL_DIR>/tools/detect.mjs\" --repo <repo> prints one line per registry placeholder it covers (<NAME>: <value> — <source>, or <NAME>: unknown — <why>), plus PRIOR_CONTRACT, the latest ledger contract in the working tree, whose baked answers a repeat repo offers as defaults (§Interview);"],
+  ["orchestrate/references/scaffolding.md", "Draft them first as a ledger in a scratch worktree of the base (git worktree add --detach <scratchpad>/wt-draft <base>), with step 8's command and an answers file whose coverage audit ends in a provisional Pre-flight: CLEAN (the scaffold's self-check requires the line) and whose foldins stay empty (their markers belong to the real fill): node \"<SKILL_DIR>/tools/scaffold.mjs\" --answers <draft answers> --repo <scratchpad>/wt-draft."],
+  ["orchestrate/references/scaffolding.md", "From that worktree's root run node \"<SKILL_DIR>/tools/check-ledger.mjs\" plan --dir .agents/changes/<CHANGE_ID> --repo ., node \"<SKILL_DIR>/tools/check-ledger.mjs\" cites --dir .agents/changes/<CHANGE_ID> --repo ."],
+  ["orchestrate/references/scaffolding.md", "for a PLAN FAIL, CITES FAIL or CENSUS line cut short that way, the pre-flight checks for itself what the line leaves out."],
+  ["orchestrate/references/scaffolding.md", "Once the last pre-flight round is done, delete the draft ledger directory and remove its worktree (git worktree remove <scratchpad>/wt-draft, or git worktree prune once that directory is gone), so Discovery never meets the draft as a second copy of the ledger."],
+  ["orchestrate/references/scaffolding.md", "When {{WORKTREE_SETUP}} is not n/a, also write setup.json, a validate.mjs spec holding the setup command(s), so a disposable checkout can be set up exactly like a worktree."],
+  ["orchestrate/references/scaffolding.md", "node \"<SKILL_DIR>/tools/scaffold.mjs\" --answers <answers file> --repo <root> performs this step, <root> being the root of the worktree step 10 commits from: it builds every file in memory, holds the staged copy to parse, selfcheck and plan, and only then writes .agents/changes/<CHANGE_ID>/, its validate.json and any setup.json included, in the line-ending style of the repository's tracked Markdown, and marks the accepted fold-ins (step 10)."],
+  ["orchestrate/references/scaffolding.md", "- setup — the setup.json spec, or null when {{WORKTREE_SETUP}} is n/a (an explanation may follow it)."],
+  ["orchestrate/references/scaffolding.md", "use raw-byte copies and validate the delivered checkout."],
+  ["orchestrate/references/scaffolding.md", "git archive <commit> orchestrate of <clone path>, a copy of <path> at <commit>, or unknown;"],
+  ["orchestrate/references/scaffolding.md", "| {{WORKTREE_SETUP}} | template (READBEFORE) | detected install/build step (npm install, cargo fetch, …) or n/a |"],
+  ["orchestrate/references/scaffolding.md", "| {{WORKTREE_ROOT}} | template (READBEFORE) | the interview — the absolute directory, forward slashes, that holds the integration worktree (int) and every batch worktree (b<nn>): outside the session scratchpad and outside any tmpfs (env-facts.mjs flags one), so it survives sessions and reboots."],
+  ["orchestrate/references/scaffolding.md", "Default <home>/worktrees/{{CHANGE_ID}}, the full id, since two ledgers scaffolded the same day share a prefix-and-date name such as os1022;"],
+  ["orchestrate/references/scaffolding.md", "It replaces the worktree-root bullet earlier contracts hand-wrote into {{REPO_CONVENTIONS}}, so a repeat scaffold does not copy that bullet |"],
+  ["orchestrate/references/scaffolding.md", "Neither the current checkout nor init.defaultBranch identifies this repo's default."],
+  ["orchestrate/references/smoke-page.md", "2249 / 2255 pass, from the validation run on the integration tip, never a worktree), Known failures if any |"],
+  ["orchestrate/references/smoke-page.md", "The builder refuses a sidecar without change, checkpoint, batches, branch, buildSha, ckptKey, sections, or a gate with checks, both containment commands and the tested SHA among them (write it out in each, as §The gate (Step 0) gives them);"],
+  ["orchestrate/references/smoke-page.md", "\\\":(exclude).agents/\\\"\" ], \"checks\": [ \"The second command prints <code>chore/example-ledger</code>.\", \"The containment commands exit 0, and the last prints nothing.\" ] }, \"sections\": [ {\"n\": 1, \"title\": \"The report command\", \"touchesData\": false, \"lede\": \"The command this change adds.\", \"need\": \"A terminal at the checkout root.\", \"steps\": [ {\"n\": 1, \"revision\": 1, \"do\": \"Run <code>example report --help</code>.\", \"pass\": \"It exits 0 and prints its usage.\", \"aside\": \"It writes no file.\"}, {\"n\": 2, \"do\": \"Run <code>example report</code>.\", \"pass\": \"It prints one line per batch.\"} ]}, {\"n\": 2, \"title\": \"The copied results\", \"steps\": [ {\"n\": 3, \"do\": \"Press <strong>Copy results as text</strong>.\", \"pass\": \"The copied text names build <code>4f6b2c1</code>.\"} ]} ] }"],
+  ["orchestrate/references/smoke-page.md", "The exact fetch/checkout commands for the integration branch, in the user's shell dialect, including known gotchas (e.g."],
+  ["orchestrate/references/smoke-page.md", "an untracked ledger copy blocking checkout)."],
+  ["orchestrate/references/smoke-page.md", "if it reads 0.13.0, stop — the checkout did not take)."],
+  ["orchestrate/references/smoke-page.md", "verify effective attributes and a fresh core.autocrlf=true checkout (including LF/CRLF sentinels and an unprotected conversion control)."],
+  ["orchestrate/references/subagent-prompts.md", "Work in your isolated worktree at [WORKTREE_PATH], already checked out on your batch branch ([BATCH_BRANCH])."],
+  ["orchestrate/references/subagent-prompts.md", "Setup first: [WORKTREE_SETUP]."],
+  ["orchestrate/references/subagent-prompts.md", "Stay inside the worktree — do not create or switch branches, never push, never touch the main checkout, never leave untracked files in the worktree (scratch goes under [SCRATCHPAD_PATH])."],
+  ["orchestrate/references/subagent-prompts.md", "Run the validation from the worktree root as node \"[SKILL_DIR]/tools/validate.mjs\" --spec [LEDGER_DIR]/validate.json --log \"[SCRATCHPAD_PATH]/<label>.log\": its one line is the result and its exit code the real one."],
+  ["orchestrate/references/subagent-prompts.md", "Main-checkout variant (degraded environments, or a width-1 wave run directly in the repo): replace the worktree paragraph with \"Work on the CURRENT branch ([BATCH_BRANCH]) — do not create or switch branches, never push.\" A rendered file takes no such edit, so this variant is always the manual procedure (§Spawning rules)."],
+  ["orchestrate/references/subagent-prompts.md", "Run the validation from the worktree root as node \"[SKILL_DIR]/tools/validate.mjs\" --spec [LEDGER_DIR]/validate.json --log \"[SCRATCHPAD_PATH]/<label>.log\": its one line is the result and its exit code the real one."],
+  ["orchestrate/references/subagent-prompts.md", "Work in the batch's worktree at [WORKTREE_PATH] (checked out on [BATCH_BRANCH])."],
+  ["orchestrate/references/subagent-prompts.md", "besides that ONE file you write only validation logs and disposable scratch under \"[SCRATCHPAD_PATH]\", never inside any worktree or the repository."],
+  ["orchestrate/references/subagent-prompts.md", "Beyond those, run only the two harness tools PROOF below names, which work on disposable clones."],
+  ["orchestrate/references/subagent-prompts.md", "Worktree: [WORKTREE_PATH]."],
+  ["orchestrate/references/subagent-prompts.md", "Run node \"[SKILL_DIR]/tools/mutate.mjs\" --repo \"[WORKTREE_PATH]\" --ref HEAD --mutations \"<mutations file>\" --validate \"<scoped spec>\" --log \"[SCRATCHPAD_PATH]/<label>.log\", adding --setup \"[WORKTREE_PATH]/[LEDGER_DIR]/setup.json\" when that file exists (a repository with a setup step fails its control without it)."],
+  ["orchestrate/references/subagent-prompts.md", "when that may outlast the runtime's command timeout, run it as a background task whose completion reports its lines and exit code, or pass --timeout and split the mutations across runs — a run the command timeout kills never cleans up its clone."],
+  ["orchestrate/references/subagent-prompts.md", "besides that ONE file you write only your mutations file and your scoped spec, both under \"[SCRATCHPAD_PATH]\", never inside any worktree or the repository, and running mutate.mjs and run-at-ref.mjs, which write only disposable clones and their logs, is permitted."],
+  ["orchestrate/references/subagent-prompts.md", "You are the QA RUNNER for checkpoint C[N] of [CHANGE_ID] in [REPO_PATH], on the integration tip [INTEGRATION_SHA] in the integration worktree [WT_INT_PATH]."],
+  ["orchestrate/references/subagent-prompts.md", "Work in the worktree [WORKTREE_PATH], checked out on [FIXUP_BRANCH] (cut from the integration tip [INTEGRATION_SHA])."],
+  ["orchestrate/references/subagent-prompts.md", "a conflict is STOP AND INVESTIGATE), then git commit-tree <tree> -p <tip> -m trial, check that commit out in a temporary worktree (git worktree add <scratchpad>/wt-trial <commit>;"],
+  ["orchestrate/references/subagent-prompts.md", "a stale wt-trial from a crashed trial is removed first), run the ledger's per-worktree setup there (skip only if n/a), then run the validations and remove the worktree;"],
+  ["orchestrate/references/subagent-prompts.md", "- Render, then point: node \"<skill-dir>/tools/prompt.mjs\" --ledger <ledger-dir> --role <role> --batch <Bnn> --facts <facts.json> --out \"<scratchpad>/prompts\" renders one of the seven per-batch prompts (roles implementer, polish, fix-round, rework, reviewer, reviewer-round2, test-hunter;"],
+  ["orchestrate/references/subagent-prompts.md", "A gate agent's findingsFile is <scratchpad>/gates/<change-id>-B<NN>-R<k>-<role>.md;"],
+  ["orchestrate/references/subagent-prompts.md", "the orchestrator creates <scratchpad>/gates/ before the spawn (the renderer creates its --out), and a gate agent respawned after a wrong nonce gets a new findingsFile (-2, -3… before .md), so a discarded agent's file never reaches LOG.md."],
+  ["orchestrate/references/subagent-prompts.md", "- Findings travel by path, and reach LOG.md first: the orchestrator appends each findings file to the ledger's LOG.md byte-for-byte on the integration worktree, then a newline and a closing marker line — (cat -- \"<findings file>\" && echo && echo '=== end of B<NN> R<k> <role> findings ===') >> <ledger-dir>/LOG.md from Git Bash, or an equivalent byte copy, never re-typed through its own context — commits it with the PROGRESS update, and only then forwards the path, as the findingsFile of a polish, fix-round or rework prompt or the previousFindingsFile of a round-2 review."],
+  ["orchestrate/references/subagent-prompts.md", "anything longer belongs in a commit message or under the session scratchpad, never in the orchestrator's context and never as an untracked file in a worktree."],
+  ["orchestrate/templates/PROGRESS.md", "- ⬜ Not Started · 🔄 In Progress · 🟢 Integrated (reviewed, validations green on the worktree AND the integration tip, merged;"],
+  ["README.md", "The work then runs in waves: file-disjoint batches implemented concurrently, one implementer per batch, each on its own branch in an isolated git worktree, stacking serially onto an integration branch."],
+  ["README.md", "Before any reviewer is spent, git diff --name-status against the integration branch must stay inside the fence (both ends of a rename, clean worktree)."],
+  ["README.md", "The orchestrator never switches your checkout: it reads branches with git show and writes through an integration worktree of its own."],
+  ["README.md", "Clone the repo and point your Claude Code skills folder at it, so the checked-out repo IS the deployed skill and there is nothing to keep in sync."],
+  ["README.md", "bash git clone https://github.com/hopefullyanonymous/wave-orchestrator.git && ln -s \"$PWD/wave-orchestrator/orchestrate\" ~/.claude/skills/orchestrate"],
+  ["README.md", "powershell git clone https://github.com/hopefullyanonymous/wave-orchestrator.git;"],
+  ["README.md", "Whatever branch the clone has checked out is what runs — stay on main."],
+  ["README.md", "Update an installed copy (a git pull in the clone counts) only between ledgers: a ledger's contract pins the skill's hash, and an updated copy stops that ledger's next session and asks."],
+  ["README.md", "From the root of your clone, copy the plugin to ~/.claude/orchestrate-mod/."],
+  ["README.md", "The setting names the installed copy, never the clone: loading a mod writes generated files into the directory it loads from."],
+  ["README.md", "- Sub-agents are used for census agents, implementers, reviewers, gate agents and the QA runner, but aren't required — without them the orchestrator implements a wave's batches one at a time in the main checkout and still runs the review as a separate adversarial pass per batch."],
+  ["README.md", "├── mutate.mjs proves chosen mutations on a disposable clone: control first, then KILLED or SURVIVED each, restored byte for byte"],
+  ["README.md", "├── run-at-ref.mjs runs a validation spec on a disposable clone of any ref: one AT line, validate.mjs's exit code"],
+  ["README.md", "├── failing-on-base.mjs runs protocol step 6b in a disposable clone: PROVEN, ALL-PASS (P0) or INCONCLUSIVE, one line"],
+];
+// The placement as one phrase, read across the whole shipped tree and README, code included (documents()): a tool's
+// comment or message putting a worktree in the scratchpad directs as a document does. Its words may be parted by
+// whitespace, a comment's slashes or asterisks, or a string concatenation's quotes and plus.
+const PHRASE_GAP = String.raw`(?:\s|\/\/|[*'"+])+`;
+const SCRATCH_PHRASE = new RegExp((String.raw`\b(?:work(?:ing)?[\W_]*trees?|check[\W_]*outs?|clones?)(?:GAPperGAPbatch)?GAP(?:under|in|inside|within|into|at)GAP`
+  + String.raw`(?:(?:the|a|your)GAP)?(?:session(?:['’]s)?GAP)?(?:scratch[\W_]*pad\b|<(?:session\s+)?scratchpad>|\[SCRATCHPAD_PATH\])`).replace(/GAP/g, () => PHRASE_GAP), 'gi');
+const scratchPhraseFaults = texts => texts.flatMap(([file, text]) => [...collapse(text.replace(/`/g, '')).matchAll(SCRATCH_PHRASE)].map(m => file + ': ' + m[0]));
+const scratchTreeTexts = () => proseDocuments().filter(file => file !== TEMPLATE).map(file => [file, read(file)]);
+test("the worktrees live under the contract's worktree root, the session scratchpad only without one, in every document that places them", () => {
+  const texts = scratchTreeTexts(), files = texts.map(([file]) => file);
+  assert.ok(['orchestrate/SKILL.md', 'orchestrate/references/execution-models.md', 'orchestrate/references/protocol.md', 'orchestrate/references/scaffolding.md',
+    'orchestrate/references/subagent-prompts.md', 'README.md'].every(file => files.includes(file)) && !files.includes(TEMPLATE), 'the domain holds every carrier and README, the template left out');
+  assert.deepEqual(closedFaults(texts, namesTree, SCRATCH_TREE_UNITS), []);
+  const everything = documents().map(file => [file, read(file)]);
+  assert.ok(everything.some(([file]) => file === 'orchestrate/tools/prompt.mjs') && everything.some(([file]) => file === 'README.md'), 'the phrase domain is the whole shipped tree, code included, and README');
+  assert.deepEqual(scratchPhraseFaults(everything), []);
+  const swap = (file, edit) => texts.map(([f, text]) => [f, f === file ? edit(text) : text]);
+  // Live: each of the four places put back to the session scratchpad alone, one at a time, is reported as an unlisted
+  // unit and its listed one gone. Every outcome is read before the one comparison.
+  const loose = new RegExp(escapeRe(WORKTREE_FALLBACK).split(' ').join('\\s+'), 'g'), reverted = [];
+  for (const [file, n] of [['orchestrate/SKILL.md', 1], ['orchestrate/references/execution-models.md', 1], ['orchestrate/references/protocol.md', 2]]) {
+    for (let k = 0; k < n; k++) {
+      const faults = closedFaults(swap(file, text => { let seen = -1; return text.replace(loose, m => ++seen === k ? 'under the session scratchpad' : m); }), namesTree, SCRATCH_TREE_UNITS);
+      reverted.push([file, k, faults.length === 2 && faults[0].startsWith(file + ' :: ') && faults[0].includes('under the session scratchpad') && !faults[0].includes(WORKTREE_FALLBACK)
+        && faults[1].startsWith('gone: ' + file + ' :: ') && faults[1].includes(WORKTREE_FALLBACK)]);
+    }
+  }
+  assert.deepEqual(reverted, reverted.map(([file, k]) => [file, k, true]), 'each place put back to the session scratchpad must be reported');
+  // Live: a placement in other words — README's old scratch worktree, a scratch worktree, a `<scratchpad>/b<nn>` path
+  // with and without a worktree named, the session's scratchpad, a clone and a branch checked out there, git's working
+  // tree there, a worktree under /tmp, at the repository root, in the repo, on a tmpfs mount and in $TMPDIR — each
+  // reported as the one unlisted unit, and README's listed sentence, where a plant rewords it, as gone.
+  const README_LINE = 'writes through an integration worktree of its own.', CHANGE = 'accumulates the change.';
+  const README_UNIT = 'The orchestrator never switches your checkout: it reads branches with git show and writes through an integration worktree of its own.';
+  const PLANTS = [
+    ['README.md', README_LINE, 'writes through a scratch worktree.',
+      'The orchestrator never switches your checkout: it reads branches with git show and writes through a scratch worktree.', README_UNIT],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' The orchestrator writes through a scratch worktree.', 'The orchestrator writes through a scratch worktree.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' Batch worktrees are added at `<scratchpad>/b<nn>`.', 'Batch worktrees are added at <scratchpad>/b<nn>.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' Each batch runs in `<scratchpad>/b<nn>`.', 'Each batch runs in <scratchpad>/b<nn>.'],
+    ['README.md', README_LINE, "writes through a worktree under the session's scratchpad.",
+      "The orchestrator never switches your checkout: it reads branches with git show and writes through a worktree under the session's scratchpad.", README_UNIT],
+    ['orchestrate/SKILL.md', '- No `--no-verify`', '- Each batch is cloned into the scratch pad.\n- No `--no-verify`', '- Each batch is cloned into the scratch pad.'],
+    ['orchestrate/references/execution-models.md', 'The main checkout is\n   never switched.', 'The main checkout is\n   never switched. Each batch branch is checked out in the session scratchpad.',
+      'Each batch branch is checked out in the session scratchpad.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' Each batch gets its own working tree under the session scratchpad.', 'Each batch gets its own working tree under the session scratchpad.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' On a machine short of disk, add each batch worktree under `/tmp/<id>` instead.',
+      'On a machine short of disk, add each batch worktree under /tmp/<id> instead.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' Each batch worktree is added at the repository root.', 'Each batch worktree is added at the repository root.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' Batch worktrees live in the repo.', 'Batch worktrees live in the repo.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' Each batch worktree may go on a tmpfs mount for speed.', 'Each batch worktree may go on a tmpfs mount for speed.'],
+    ['orchestrate/references/protocol.md', CHANGE, CHANGE + ' On a machine short of space, add each batch worktree in $TMPDIR instead.',
+      'On a machine short of space, add each batch worktree in $TMPDIR instead.'],
+  ];
+  const planted = PLANTS.map(([file, anchor, put]) => {
+    const text = read(file);
+    assert.equal(text.split(anchor).length, 2, file + ': the control anchor must be found once — ' + anchor);
+    return closedFaults(swap(file, () => text.replace(anchor, () => put)), namesTree, SCRATCH_TREE_UNITS);
+  });
+  assert.deepEqual(planted, PLANTS.map(([file, , , unit, gone]) => [file + ' :: ' + unit, ...(gone ? ['gone: ' + file + ' :: ' + gone] : [])]),
+    'each placement in other words must be reported');
+  // Live: the phrase in a tool's one-line comment, in a comment wrapped over two lines, in a string concatenation and in
+  // a README sentence is reported.
+  const PROMPT_TOOL = 'orchestrate/tools/prompt.mjs', inCode = '\n// Batch worktrees under the session scratchpad.\n';
+  const phrased = [[PROMPT_TOOL, inCode, 'worktrees under the session scratchpad'],
+    [PROMPT_TOOL, '\n// Batch worktrees under the\n// session scratchpad.\n', 'worktrees under the // session scratchpad'],
+    [PROMPT_TOOL, "\nconst NOTE = 'Batch worktrees under the ' +\n  'session scratchpad.';\n", "worktrees under the ' + 'session scratchpad"],
+    ['README.md', inCode, 'worktrees under the session scratchpad']];
+  assert.deepEqual(phrased.map(([file, put]) => scratchPhraseFaults(everything.map(([f, text]) => [f, f === file ? text + put : text]))),
+    phrased.map(([file, , found]) => [file + ': ' + found]), 'the phrase in code, wrapped or concatenated, and in README must be reported');
+});
+
+// The skill's Markdown — every shipped .md file, the template, smoke-page.md and the three that order the run among
+// them — read with the passages pinned whole elsewhere cut out, each cut ending where its pin ends: every BUDGET
+// passage, SKILL.md's dispatch line (CONTINUE_ID), its Mode: continue step 3 through the last sentence
+// tests/census-step.test.cjs REVIEWED_SENTENCES holds there, and protocol.md's §Recovery table through its last line
+// opening with `|`, as tests/protocol-contract.test.cjs `table()` hashes it. Three families are closed over it: a unit
+// naming a cleared or reopened conversation, or the mod that opens one (BL-101); a unit naming a close-out in any form
+// (BL-100); and, in SKILL.md's Mode: continue and §Refusals, a unit naming a session or a conversation. Each unit a
+// family reads is doubt unless PROCEDURE_UNITS lists it under that family.
+const procedureFiles = () => shipped().filter(file => file.endsWith('.md'));
+const TABLE_END = Symbol('the last line opening with |');
+// A cut ending just after `sentence`: a list item's group as tests/census-step.test.cjs reads it.
+const through = sentence => ({ through: sentence });
+// Where a cut opening at `start` ends: just before `to` when it is a string, as section() bounds a BUDGET passage; just
+// after `to.through`; or, for TABLE_END, at the end of the last line opening with `|`.
+function cutEnd(text, start, to) {
+  if (typeof to === 'string') return text.indexOf(to, start + 1);
+  if (to === TABLE_END) {
+    let end = start;
+    for (const line of text.slice(start).split('\n')) { if (!/^\s*\|/.test(line)) break; end += line.length + 1; }
+    return end - 1;
+  }
+  const at = text.indexOf(to.through, start + 1);
+  return at === -1 ? -1 : at + to.through.length;
+}
+const PROCEDURE_CUTS = [
+  ...Object.values(BUDGET).map(([file, from, to]) => [file, from, to]),
+  ['orchestrate/SKILL.md', '\n- `continue', '\n- `status`'],
+  ['orchestrate/SKILL.md', '\n3. Boot', through('live in [references/subagent-prompts.md](references/subagent-prompts.md).')],
+  ['orchestrate/references/protocol.md', '| Ledger says | Git shows | Verdict |', TABLE_END],
+];
+const PROCEDURE_FAMILIES = {
+  'a cleared conversation': { pattern: /\bclear(?:s|ed|ing)?\b|\brestart|\bre-?open|orchestrate-mod|\bthe mod\b|\bfresh conversation/i },
+  'a close-out': { pattern: /\bclos(?:e|ed|es|ing)[\W_]*outs?\b|\bcloseouts?\b/i },
+  'a session or a conversation': { pattern: /\bsessions?\b|\bconversations?\b/i,
+    within: { 'orchestrate/SKILL.md': [['## Mode: continue', '\n## Mode: status'], ['## Refusals', '\n## Skill files']] } },
+};
+// Step 8's opening points at the window its compaction passage opens, before the close-out it spells out (C1 of
+// OS-20261022); the pointer is a unit of both families below, and the test after the sweep holds its place.
+const STEP_8_POINTER = "The window at the end of this step, where the conversation may be cleared, opens before a checkpoint's close-out begins.";
+const PROCEDURE_UNITS = {
+  "a cleared conversation": [
+    ["orchestrate/SKILL.md", "A session that orchestrate-mod opened when it cleared the conversation reads the contract's §Boot sequence first, then only what that section names for such a session, or the whole contract when it names nothing for one."],
+    ["orchestrate/references/protocol.md", "Timestamp each human verdict, clear, and note edit locally as at, advancing beyond the step's previous/observed timestamp."],
+    ["orchestrate/references/protocol.md", "Different local/remote tips do not matter when the recorded source is clear."],
+    ["orchestrate/references/protocol.md", "the per-spawn token saving is forfeited until the definitions are installed — copy the skill repo's .claude/agents/.md into ~/.claude/agents/ (or one project's .claude/agents/), then restart Claude Code."],
+    ["orchestrate/references/protocol.md", STEP_8_POINTER],
+    ["orchestrate/references/smoke-page.md", "Selecting the same current verdict again clears it."],
+    ["orchestrate/references/smoke-page.md", "Each local verdict selection, clear, or note edit records at immediately in localStorage."],
+    ["orchestrate/references/subagent-prompts.md", "Before you report, end every background command you started (run_in_background, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you waiting (Claude Code shows completed), blocks the orchestrator's context clear, and resumes you when it ends."],
+    ["orchestrate/references/subagent-prompts.md", "Before you report, end every background command you started (run_in_background, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you waiting (Claude Code shows completed), blocks the orchestrator's context clear, and resumes you when it ends."],
+    ["orchestrate/references/subagent-prompts.md", "Before you report, end every background command you started (run_in_background, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you waiting (Claude Code shows completed), blocks the orchestrator's context clear, and resumes you when it ends."],
+    ["orchestrate/references/subagent-prompts.md", "Before you report, end every background command you started (run_in_background, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you waiting (Claude Code shows completed), blocks the orchestrator's context clear, and resumes you when it ends."],
+    ["orchestrate/templates/00-READBEFORE.md", "Change: {{CHANGE_ID}} Skill: {{SKILL_DIR}} · sha256 {{SKILL_SHA256}} Skill source: {{SKILL_SOURCE}} Clear threshold: {{CLEAR_THRESHOLD}} You are either the ORCHESTRATOR (the main session the user told to \"continue\") or an IMPLEMENTER/REVIEWER/GATE sub-agent given one batch."],
+    ["orchestrate/templates/00-READBEFORE.md", "A session that /orchestrate continue <id> after-clear opened reads none of 00-request.md, 01-plan.md and PROGRESS.md: once the pin check (step 3) passes it reads the digest that node \"{{SKILL_DIR}}/tools/reconcile.mjs\" digest --repo <repo> --ledger {{CHANGE_ID}} --integration refs/heads/{{INTEGRATION_BRANCH}} prints, and of this contract only §Boot sequence, §Git model, §Validation commands and §Hard prohibitions, reading any other section by its heading when a step needs it."],
+  ],
+  "a close-out": [
+    ["orchestrate/SKILL.md", "At planning and checkpoint close-out, the conductor inventories, generates, independently validates and delivers actual reproducible inputs per smoke step."],
+    ["orchestrate/SKILL.md", "Final checkpoint ✅ → change-complete close-out per protocol.md with the contract's facts: convergence pass (when the contract turns it on, a fresh read-only sub-agent classifies every item against the tip;"],
+    ["orchestrate/SKILL.md", "a ledger with every row ✅ or ⛔ (dropped) (advisory 👤 rows aside) and no COMPLETE marker resumes the change-complete close-out at its first unfinished step), distillation (new bug classes → one-line guardrails with pointers;"],
+    ["orchestrate/SKILL.md", "The final checkpoint's close-out begins with the run-end prose sweep whenever LOG.md holds a ### prose sweep: heading (protocol.md)."],
+    ["orchestrate/references/execution-models.md", "checkpoint close-out generates reproducible synthetic files, independently validates requirements, and delivers exact linked files with Pass results and working-copy/reset instructions."],
+    ["orchestrate/references/execution-models.md", "At the checkpoint close-out a QA runner performs the agent steps on the integration tip and records evidence;"],
+    ["orchestrate/references/execution-models.md", "This is not hypothetical: a pack that deferred its single bump to close-out handed over a script saying \"confirm the version reads X\" when the base branch also read X;"],
+    ["orchestrate/references/execution-models.md", "Bumping the minor at each checkpoint burns a release number per checkpoint — one pack went 0.11 → 0.12 → 0.13 → 0.14 on a 0.10.12 base and was renumbered to a single 0.11.0 at close-out."],
+    ["orchestrate/references/protocol.md", "| smoke-<Cn>.html | Created at each checkpoint close-out;"],
+    ["orchestrate/references/protocol.md", "At the FINAL checkpoint the Close-out unfinished row's close-out begins with the run-end prose sweep whenever LOG.md holds a ### prose sweep: heading, resumed from its branch by §Session algorithm step 8's adoption rule."],
+    ["orchestrate/references/protocol.md", "Owns PROGRESS, LOG, evidence/, branches, worktrees, integration merges, close-outs, and all user communication."],
+    ["orchestrate/references/protocol.md", "- QA runner — one sub-agent executing the agent-runnable smoke steps at a checkpoint close-out, writing evidence/C<n>/."],
+    ["orchestrate/references/protocol.md", "see scaffolding.md and §Two close-outs."],
+    ["orchestrate/references/protocol.md", "PROGRESS also carries State: ACTIVE | AT-CHECKPOINT C<n> | USER-BLOCKED | COMPLETE, updated at every wave open, checkpoint close-out and change-complete."],
+    ["orchestrate/references/protocol.md", "The conductor inventories required files per smoke step at planning and checkpoint close-out."],
+    ["orchestrate/references/protocol.md", "A failing agent step is a defect found before the user's time is spent: rows stay 🟢, the failure goes to Notes + evidence, a repair mini-batch fixes it, then the close-out resumes — it is NEVER ❌, which means the USER reached the checkpoint and failed it."],
+    ["orchestrate/references/protocol.md", "A checkpoint whose close-out has not run — every member of its wave 🟢, ⛔ or 👤 and its row not 🧪/✅, §Recovery's Close-out unfinished row — goes to step 8's per-checkpoint close-out before any wave opens."],
+    ["orchestrate/references/protocol.md", "A ledger with every row ✅ or ⛔ (dropped) (advisory 👤 rows aside) and no COMPLETE marker, met by continue or close, goes to the change-complete close-out's first unfinished step."],
+    ["orchestrate/references/protocol.md", "A tip the run-end prose sweep's merge turned red (step 8) takes this repair, the sweep counting as the last batch's merge, and once green the run returns to the close-out, not to step 7 or 4."],
+    ["orchestrate/references/protocol.md", STEP_8_POINTER],
+    ["orchestrate/references/protocol.md", "Whenever LOG.md holds a ### prose sweep: heading, the FINAL checkpoint's close-out begins with this sweep;"],
+    ["orchestrate/references/protocol.md", "The sweep being the close-out's first step, a crash in it meets §Recovery's Close-out unfinished row, the rows staying 🟢 and State ACTIVE throughout, and the close-out resumes the sweep from its branch by the adoption rule above (no branch: cut at the recorded SHA)."],
+    ["orchestrate/references/protocol.md", "If the checkpoint table places a checkpoint here: per-checkpoint close-out (a ⛔ member's steps are omitted from the page and appended on re-issue if it later ships) — version/changelog per cadence, tip validation, QA runner pre-smoke with evidence, covered rows 🟢 → 🧪, checkpoint-table row, session-log row with the checkpoint's integration SHA, State: AT-CHECKPOINT C<n>, the checkpoint row's token m: pre-smoke=<agent>/<human> human-smoke-min=<n> escaped=<n> (completed when the user's verdict is recorded), the filled smoke page as smoke-<Cn>.html when a page was prepared, then proof the published artifact (§Two distinct close-outs), commit → STOP, delivering the checkpoint's COMBINED smoke script per §Smoke checkpoints."],
+    ["orchestrate/references/protocol.md", "## Two distinct close-outs"],
+    ["orchestrate/references/protocol.md", "The FINAL checkpoint's close-out runs the run-end prose sweep (step 8) before all of these whenever LOG.md holds a ### prose sweep: heading."],
+    ["orchestrate/references/protocol.md", "Fold-ins are REMOVED from the backlog file in the close-out commit (the ledger row and commit message carry provenance);"],
+    ["orchestrate/references/protocol.md", "A ledger with every row ✅ or ⛔ (dropped) (advisory 👤 rows aside) and no COMPLETE marker resumes the change-complete close-out at its first unfinished step, by continue or close: a committed ### Ruling list with no recorded ruling is presented."],
+    ["orchestrate/references/protocol.md", "Distillation loop: any NEW bug class this change uncovered → ONE-LINE guardrail bullet in the project guardrails doc naming the class and pointing at the test or mechanism doc that enforces it (prefer adding the test in this close-out)."],
+    ["orchestrate/references/scaffolding.md", "A single bump deferred to close-out leaves the integration branch sharing a version with the branch it was cut from — so the smoke script's \"confirm the version\" step cannot distinguish them and passes on the wrong build."],
+    ["orchestrate/references/scaffolding.md", "A pack that read \"bump per checkpoint\" as a minor bump each time burned four minor versions on a single change (0.11 → 0.12 → 0.13 → 0.14 against a base of 0.10.12) and had to be renumbered to 0.11.0 at close-out."],
+    ["orchestrate/references/scaffolding.md", "only if detection found no guardrails section or backlog file: create them at first close-out? (default yes)."],
+    ["orchestrate/references/scaffolding.md", "Each decision is asked ONCE, its answer recorded verbatim in 00-request.md, and never re-litigated at plan approval or at close-out."],
+    ["orchestrate/references/smoke-page.md", "Inventory them at planning, including workbook sheets/columns/types/formulas/edge cases, then deliver the exact files at close-out with expected results and working-copy/reset instructions."],
+    ["orchestrate/references/smoke-page.md", "Write the filled page into the ledger as smoke-<Cn>.html and commit it in the per-checkpoint close-out commit (update it on corrections)."],
+    ["orchestrate/templates/00-READBEFORE.md", "Procedure: protocol.md, hashed with the rest of the pinned directory, now governs what this contract leaves unstated — role duties, severity and round accounting, §Fence changes, §Recovery, §Session algorithm and both close-outs."],
+    ["orchestrate/templates/00-READBEFORE.md", "- Orchestrator — owns PROGRESS, LOG, evidence/, branches, worktrees, merges, close-outs, all user communication."],
+    ["orchestrate/templates/00-READBEFORE.md", "- QA runner — one sub-agent that executes the agent-runnable smoke steps at a checkpoint close-out and writes evidence."],
+    ["orchestrate/templates/00-READBEFORE.md", "- Bump cadence: {{VERSION_BUMP_RULE}} — applied on the integration branch at integration or checkpoint close-out, never inside a wave worktree."],
+    ["orchestrate/templates/00-READBEFORE.md", "If all three lines say none, skip version/changelog work at close-out and say so."],
+    ["orchestrate/templates/00-READBEFORE.md", "The change-complete close-out is protocol.md §Two distinct close-outs, run with these facts:"],
+    ["orchestrate/templates/01-plan.md", "The conductor supplies actual usable files and evidence at close-out;"],
+    ["orchestrate/templates/PROGRESS.md", "Update it in the same commit as every wave open, checkpoint close-out and change-complete."],
+    ["orchestrate/templates/PROGRESS.md", "<!-- At close-out link the sidecar's stable-id input registry, exact immutable issue files and independent validation evidence, raw hash/size manifest and usable delivery location."],
+    ["orchestrate/templates/PROGRESS.md", "Then append one row per session, ≤200 characters: waves opened with base SHAs, batches integrated, reconciliations, checkpoint close-outs with integration SHAs, and exactly why work halted (checkpoint, ⛔, user input needed, COMPLETE)."],
+  ],
+  "a session or a conversation": [
+    ["orchestrate/SKILL.md", "A session that orchestrate-mod opened when it cleared the conversation reads the contract's §Boot sequence first, then only what that section names for such a session, or the whole contract when it names nothing for one."],
+  ],
+};
+// Each file of the domain as `reader` gives it, every cut passage, each bounded in the file as given (one passage's end
+// can be the next one's anchor), replaced by a block break so no unit joins across it; and a fault for each line at
+// column 0 after the first inside a cut ending after a sentence: that line opens a group the census-step reader no
+// longer counts as the item's.
+function procedureTexts(reader = read) {
+  const faults = [];
+  const texts = procedureFiles().map(file => {
+    const text = reader(file);
+    const ranges = PROCEDURE_CUTS.filter(([cut]) => cut === file).map(([, from, to]) => {
+      const start = text.indexOf(from), end = cutEnd(text, start, to);
+      assert.ok(text.split(from).length === 2 && end > start, file + ': the cut must resolve once — ' + JSON.stringify(from));
+      if (to.through) {
+        faults.push(...text.slice(start, end).split('\n').filter(line => line.trim()).slice(1).filter(line => !/^[ \t]/.test(line))
+          .map(line => 'the cut ' + JSON.stringify(from.trim()) + ' in ' + file + ' has a line at column 0: ' + line));
+      }
+      return [start, end];
+    }).sort((x, y) => x[0] - y[0]);
+    let kept = '', at = 0;
+    for (const [start, end] of ranges) {
+      assert.ok(start >= at, file + ': two cuts overlap');
+      kept += text.slice(at, start) + '\n\n';
+      at = end;
+    }
+    return [file, kept + text.slice(at)];
+  });
+  return { texts, faults };
+}
+function procedureFaults(reader = read) {
+  const { texts, faults } = procedureTexts(reader);
+  return [...faults, ...Object.entries(PROCEDURE_FAMILIES).flatMap(([what, { pattern, within }]) => {
+    const scoped = within ? texts.filter(([file]) => within[file]).map(([file, text]) => [file, within[file].map(([from, to]) => section(text, from, to)).join('\n\n')]) : texts;
+    return closedFaults(scoped, unit => pattern.test(unit), PROCEDURE_UNITS[what]).map(fault => what + ': ' + fault);
+  })];
+}
+test("the skill's Markdown names a cleared conversation, a close-out, and in SKILL.md's continue and refusals a session, only in the units PROCEDURE_UNITS lists", () => {
+  assert.deepEqual(Object.keys(PROCEDURE_UNITS), Object.keys(PROCEDURE_FAMILIES), 'each family has its list');
+  const files = procedureFiles();
+  assert.ok(['orchestrate/SKILL.md', 'orchestrate/references/execution-models.md', 'orchestrate/references/protocol.md', 'orchestrate/references/smoke-page.md', TEMPLATE]
+    .every(file => files.includes(file)) && files.every(file => file.startsWith('orchestrate/') && file.endsWith('.md')), 'the domain is every shipped Markdown file');
+  assert.deepEqual(procedureFaults(), []);
+  // Live: each planted unit is reported by its family alone, and a listed one reworded is reported with its listed
+  // form gone. A plant inside a cut passage is not read here: the pin holding that passage reports it. A plant just past
+  // a cut's end is read, and a line at column 0 inside the step 3 cut is reported.
+  const SKILL = 'orchestrate/SKILL.md', PROTOCOL = 'orchestrate/references/protocol.md', MODELS = 'orchestrate/references/execution-models.md';
+  const SMOKE = 'orchestrate/references/smoke-page.md';
+  const REFUSALS = '## Refusals\n', STEP_3 = 'goes to step 8\'s per-checkpoint close-out\n   before any wave opens.';
+  const SKILL_STEP_3_END = 'live in [references/subagent-prompts.md](references/subagent-prompts.md).\n', LAST_ROW = '| ⬜ | no such branch | Correct state — waits for its wave |\n';
+  const STEP_7_END = 'tip → repair mini-batch before any further merge.', SKILL_STEP_3_TAIL = '   Render the per-batch prompts with';
+  const plant = (file, anchor, put) => procedureFaults(f => {
+    const text = read(f);
+    if (f !== file) return text;
+    assert.equal(text.split(anchor).length, 2, file + ': the control anchor must be found once — ' + anchor);
+    return text.replace(anchor, () => put);
+  });
+  const C = 'a cleared conversation: ', W = 'a close-out: ', S = 'a session or a conversation: ';
+  const WHOLE = 'A session that orchestrate-mod opened when it cleared the conversation reads the whole contract before its §Boot sequence.';
+  const AFTER_NEXT = 'A checkpoint whose close-out has not run is closed out only once the next wave has closed.';
+  const REFUSED = '- A session orchestrate-mod opened when it cleared the conversation → read the whole contract before its §Boot sequence.';
+  const BEFORE_CLEAR = 'Run the whole close-out before any clear, so it never runs in a fresh conversation.';
+  const STEP_3_UNIT = PROCEDURE_UNITS['a close-out'].find(([, unit]) => unit.startsWith('A checkpoint whose close-out'))[1];
+  const POINTER_AFTER = STEP_8_POINTER.replace("opens before a checkpoint's close-out begins.", () => "opens once a checkpoint's close-out has ended.");
+  const controls = [
+    ['a cleared session sent to the whole contract', plant(SKILL, REFUSALS, REFUSALS + '\n' + REFUSED + '\n'), [C + SKILL + ' :: ' + REFUSED, S + SKILL + ' :: ' + REFUSED]],
+    ['the mod named without a clear', plant(SKILL, REFUSALS, REFUSALS + '\n- A session the mod opened reads the whole contract first.\n'),
+      [C + SKILL + ' :: - A session the mod opened reads the whole contract first.', S + SKILL + ' :: - A session the mod opened reads the whole contract first.']],
+    ['a session named with no clear word', plant(SKILL, REFUSALS, REFUSALS + '\n- A session started after an automatic reset → read the whole contract before its §Boot sequence.\n'),
+      [S + SKILL + ' :: - A session started after an automatic reset → read the whole contract before its §Boot sequence.']],
+    ['a fresh conversation', plant(MODELS, 'The main checkout is\n   never switched.', 'The main checkout is\n   never switched. A fresh conversation skips resume-time validation.'),
+      [C + MODELS + ' :: A fresh conversation skips resume-time validation.']],
+    ['a fourth step just past SKILL.md step 3', plant(SKILL, SKILL_STEP_3_END, SKILL_STEP_3_END + '4. ' + WHOLE + '\n'), [C + SKILL + ' :: ' + WHOLE, S + SKILL + ' :: ' + WHOLE]],
+    ['a paragraph just past SKILL.md step 3', plant(SKILL, SKILL_STEP_3_END, SKILL_STEP_3_END + '\n' + WHOLE + '\n'), [C + SKILL + ' :: ' + WHOLE, S + SKILL + ' :: ' + WHOLE]],
+    ['a fourth step inside the step 3 cut', plant(SKILL, SKILL_STEP_3_TAIL, '4. ' + WHOLE + '\n' + SKILL_STEP_3_TAIL),
+      ['the cut "3. Boot" in ' + SKILL + ' has a line at column 0: 4. ' + WHOLE]],
+    ['the close-out put after a wave', plant(PROTOCOL, STEP_3, STEP_3 + ' ' + AFTER_NEXT), [W + PROTOCOL + ' :: ' + AFTER_NEXT]],
+    ['step 3 reworded', plant(PROTOCOL, STEP_3, STEP_3.replace('before any wave opens', () => 'after the next wave opens')),
+      [W + PROTOCOL + ' :: ' + STEP_3_UNIT.replace('before any wave opens', () => 'after the next wave opens'), W + 'gone: ' + PROTOCOL + ' :: ' + STEP_3_UNIT]],
+    ['a checkpoint closed out after the next wave, with no wave noun before the verb', plant(PROTOCOL, STEP_7_END, STEP_7_END + ' A checkpoint is closed out only once the next wave has closed.'),
+      [W + PROTOCOL + ' :: A checkpoint is closed out only once the next wave has closed.']],
+    ['the timer put after the close-out, with no wave named', plant(PROTOCOL, BUDGET.compaction[1], 'At a checkpoint, start the 10-minute timer only once the close-out has committed.\n   ' + BUDGET.compaction[1]),
+      [W + PROTOCOL + ' :: At a checkpoint, start the 10-minute timer only once the close-out has committed.']],
+    ['a line just under the §Recovery table', plant(PROTOCOL, LAST_ROW, LAST_ROW + '- ' + AFTER_NEXT + '\n'), [W + PROTOCOL + ' :: - ' + AFTER_NEXT]],
+    ['the close-out put before the clear in smoke-page.md', plant(SMOKE, '\n## Fallback\n', '\n' + BEFORE_CLEAR + '\n\n## Fallback\n'),
+      [C + SMOKE + ' :: ' + BEFORE_CLEAR, W + SMOKE + ' :: ' + BEFORE_CLEAR]],
+    ["the close-out kept in the wave's conversation by the template", plant(TEMPLATE, '## Hard prohibitions\n',
+      "## Hard prohibitions\n\n- Finish every checkpoint's close-out in the conversation that closed its wave.\n"),
+      [W + TEMPLATE + " :: - Finish every checkpoint's close-out in the conversation that closed its wave."]],
+    ['inside the cut compaction passage', plant(PROTOCOL, BUDGET.compaction[1], BUDGET.compaction[1] + ' The mod reopens a fresh conversation after the next wave closes out.'), []],
+    ['just before the cut compaction passage', plant(PROTOCOL, BUDGET.compaction[1], 'The mod reopens a fresh conversation.\n   ' + BUDGET.compaction[1]),
+      [C + PROTOCOL + ' :: The mod reopens a fresh conversation.']],
+    ['inside the cut step 5', plant(MODELS, BUDGET.nextWave[1], BUDGET.nextWave[1] + ' The checkpoint closes out first.'), []],
+    ["step 8's pointer reworded", plant(PROTOCOL, "opens before a checkpoint's close-out begins.", "opens once a checkpoint's close-out has ended."),
+      [C + PROTOCOL + ' :: ' + POINTER_AFTER, C + 'gone: ' + PROTOCOL + ' :: ' + STEP_8_POINTER, W + PROTOCOL + ' :: ' + POINTER_AFTER, W + 'gone: ' + PROTOCOL + ' :: ' + STEP_8_POINTER]],
+  ];
+  assert.deepEqual(controls.map(([what, faults]) => [what, faults]), controls.map(([what, , faults]) => [what, faults]));
+});
+
+// Where step 8's pointer sits: between "8. Wave closed." and the frozen close-out sentence, once.
+const STEP_8_OPENING = '8. Wave closed. ' + STEP_8_POINTER + ' If the checkpoint table places a checkpoint here: per-checkpoint close-out';
+const pointerPlaceFaults = protocol => {
+  const n = collapse(protocol).split(STEP_8_OPENING).length - 1;
+  return n === 1 ? [] : ['step 8 opens with its pointer ' + n + ' times, not once'];
+};
+test("step 8 opens with the pointer to its window, ahead of the close-out it spells out", () => {
+  const protocol = read('orchestrate/references/protocol.md'), flat = collapse(protocol), CLOSE_END = "COMBINED smoke script per §Smoke checkpoints.";
+  assert.deepEqual(pointerPlaceFaults(protocol), []);
+  assert.deepEqual(pointerPlaceFaults(protocol.replace(/\n/g, '\r\n')), [], 'a CRLF checkout reads alike');
+  assert.ok([STEP_8_POINTER + ' ', CLOSE_END].every(anchor => flat.split(anchor).length === 2), 'the controls must find their anchors once');
+  // Live: the pointer taken out, moved after the close-out sentence, or put twice is reported.
+  const out = flat.replace(STEP_8_POINTER + ' ', () => '');
+  const controls = [['taken out', out, ['step 8 opens with its pointer 0 times, not once']],
+    ['moved after the close-out', out.replace(CLOSE_END, () => CLOSE_END + ' ' + STEP_8_POINTER), ['step 8 opens with its pointer 0 times, not once']],
+    ['put twice', flat + ' ' + STEP_8_OPENING, ['step 8 opens with its pointer 2 times, not once']]];
+  assert.deepEqual(controls.map(([what, text]) => [what, pointerPlaceFaults(text)]), controls.map(([what, , faults]) => [what, faults]));
+});
+
+// The first checkpoint's sidecar: protocol.md §Smoke checkpoints' **Delivery.** paragraph points where smoke-page.md's
+// delivery base does (tests/build-smoke-page.test.cjs FIRST_CHECKPOINT pins smoke-page.md's side). Every unit of
+// protocol.md naming a sidecar, a checkpoint's sidecar file, an archive or another ledger, and every unit of §Smoke
+// checkpoints naming a ledger or a JSON file, is doubt unless SIDECAR_UNITS lists it, the pointer among them. Each
+// fault: the pointer not stated once, or not directly after the sentence choosing the delivery base; such a unit
+// unlisted, or a listed one gone; smoke-page.md's pointer not stated once, or no heading for it to point at.
+const SIDECAR_POINTERS = {
+  'orchestrate/references/protocol.md': "The first checkpoint, with no committed page in the ledger, takes its sidecar's form from smoke-page.md §Sidecar shape, never from an archived ledger.",
+  'orchestrate/references/smoke-page.md': "The first checkpoint, with no committed page in the ledger, takes its sidecar's form from §Sidecar shape below, never from an archived ledger.",
+};
+const ANOTHER_LEDGER = /archiv|\b(?:closed|completed|finished|earlier|older|previous|other|another)\s+(?:ledger|change)s?\b/i;
+const SIDECAR_WORD = /sidecar|smoke-\S*?\.json/i;
+const SMOKE_LEDGER_WORD = /\bledgers?\b|\bjson\b/i;
+// The units of protocol.md the sidecar sweep reads.
+function sidecarSelector(protocol) {
+  const smoke = new Set(proseUnits(section(protocol, '\n## Smoke checkpoints', '\n## §Recovery')));
+  return unit => SIDECAR_WORD.test(unit) || ANOTHER_LEDGER.test(unit) || (smoke.has(unit) && SMOKE_LEDGER_WORD.test(unit));
+}
+const SIDECAR_UNITS = [
+  "Closed ledgers may be parked in a sibling .agents/archive/ directory;",
+  "Ledger observations expose presence, tree, lastChange, lastChangeTree, progressText and contractTexts at the requested ref, including archive presence.",
+  "Only an explicit COMPLETE or archived copy at the resolved shipment target supersedes older candidates;",
+  "Do not sweep archives into the active inventory.",
+  "The sidecar has a stable-id inputs registry;",
+  "Legacy sidecars with no inputs remain usable.",
+  "On reissue preserve the previous page/sidecar snapshot and every prior input/evidence file.",
+  "Every smoke step carries Runner: agent (executable in THIS ledger's environment by a runner the contract lists — CLI, HTTP, browser, screenshot) or Runner: human (hardware, credentials, feel, another OS, anything unlisted).",
+  "Use the newest committed smoke-.html in the ledger as the page's format and delivery base (or the session's own template), update it for this checkpoint, and commit it as smoke-<Cn>.html.",
+  "The first checkpoint, with no committed page in the ledger, takes its sidecar's form from smoke-page.md §Sidecar shape, never from an archived ledger.",
+  "A smoke-<Cn>.json sidecar beside the page is the page's source: change the sidecar and regenerate, commit both, and never hand-edit one of them alone.",
+  "Before editing a re-issue, preserve the last issued sidecar as a temporary baseline and compare against it during regeneration.",
+  "Record the CURRENT delivery location in PROGRESS's Smoke page field: URL, ledger-relative HTML path, or plain text.",
+  "propose deleting the merged branches and moving the ledger to .agents/archive/ (git mv).",
+];
+function sidecarPointerFaults(protocol, smoke) {
+  const [P, S] = Object.values(SIDECAR_POINTERS), faults = [];
+  const delivery = collapse(section(protocol, '**Delivery.**', '\n\n')).trim().split(/(?<=\.)\s+/), at = delivery.indexOf(P);
+  if (collapse(protocol).split(P).length !== 2) faults.push('protocol.md: the pointer is not stated once');
+  if (at < 1 || !delivery[at - 1].startsWith('Use the newest committed')) faults.push('protocol.md: the pointer does not follow the delivery base');
+  faults.push(...closedFaults([['protocol.md', protocol]], sidecarSelector(protocol), SIDECAR_UNITS.map(unit => ['protocol.md', unit]))
+    .map(fault => fault.startsWith('gone: ') ? 'protocol.md: a listed unit is gone: ' + fault.slice('gone: protocol.md :: '.length)
+      : 'protocol.md: an unlisted unit names a sidecar or another ledger: ' + fault.slice('protocol.md :: '.length)));
+  if (collapse(smoke).split(S).length !== 2) faults.push('smoke-page.md: its pointer is not stated once');
+  if (!smoke.split('\n').includes('### Sidecar shape')) faults.push('smoke-page.md: no ### Sidecar shape heading');
+  return faults;
+}
+test('protocol.md sends the first checkpoint to smoke-page.md §Sidecar shape, as smoke-page.md does', () => {
+  const [P, S] = Object.values(SIDECAR_POINTERS), protocol = read('orchestrate/references/protocol.md'), smoke = read('orchestrate/references/smoke-page.md');
+  assert.equal(P.replace('smoke-page.md §Sidecar shape', '§Sidecar shape'), S.replace('§Sidecar shape below', '§Sidecar shape'), 'the two pointers say the same once each names its target');
+  assert.ok(SIDECAR_UNITS.includes(P), 'the pointer is a listed unit');
+  assert.deepEqual(sidecarPointerFaults(protocol, smoke), []);
+  // The pointer as protocol.md wraps it, with its line's end, so taking it out leaves the paragraph whole.
+  const loose = new RegExp(escapeRe(P).split(' ').join('\\s+') + '\\n');
+  const sidecar = 'A `smoke-<Cn>.json` sidecar beside the page', reissue = 'Before editing a re-issue, preserve', next = 'No particular publisher or cloud verdict store is required.';
+  assert.ok(loose.test(protocol) && [sidecar, reissue, next, BUDGET.compaction[1]].every(anchor => protocol.split(anchor).length === 2) && smoke.split('\n### Sidecar shape\n').length === 2,
+    'the controls must find their anchors once');
+  const ARCHIVED = "Copy an archived ledger's smoke-c1.json for the form.", CLOSED = "Copy a closed ledger's `smoke-C1.json` for that form.";
+  const NEXT = "The first checkpoint copies an archived ledger's `smoke-C1.json` for its sidecar's form.";
+  const UNREAD = 'Where smoke-page.md cannot be read, copy the newest `smoke-<Cn>.json` the repository holds.';
+  const PRIOR = "Where that section cannot be read, copy the JSON beside a prior ledger's page.";
+  const narrowed = P.replace(', never from an archived ledger.', ', or from an archived ledger.'), unit = text => text.replace(/`/g, '');
+  const UNLISTED = 'protocol.md: an unlisted unit names a sidecar or another ledger: ', GONE = 'protocol.md: a listed unit is gone: ';
+  const controls = [
+    ['the pointer gone', protocol.replace(loose, ''), smoke, ['protocol.md: the pointer is not stated once', 'protocol.md: the pointer does not follow the delivery base', GONE + P]],
+    ['the pointer moved after the sidecar sentence', protocol.replace(loose, '').replace(reissue, () => P + '\n' + reissue), smoke, ['protocol.md: the pointer does not follow the delivery base']],
+    ['an archived ledger named beside it', protocol.replace(sidecar, () => ARCHIVED + '\n' + sidecar), smoke, [UNLISTED + ARCHIVED]],
+    ["a closed ledger's sidecar named beside it", protocol.replace(sidecar, () => CLOSED + '\n' + sidecar), smoke, [UNLISTED + unit(CLOSED)]],
+    ['an archived ledger named in the next paragraph', protocol.replace(next, () => NEXT + ' ' + next), smoke, [UNLISTED + unit(NEXT)]],
+    ['an archived ledger named in step 8', protocol.replace(BUDGET.compaction[1], () => NEXT + '\n   ' + BUDGET.compaction[1]), smoke, [UNLISTED + unit(NEXT)]],
+    ['a sidecar file named with no ledger word', protocol.replace(loose, m => m + UNREAD + '\n'), smoke, [UNLISTED + unit(UNREAD)]],
+    ["a prior ledger's JSON, with no sidecar word", protocol.replace(loose, m => m + PRIOR + '\n'), smoke, [UNLISTED + PRIOR]],
+    ['the pointer narrowed', protocol.replace(loose, () => narrowed + '\n'), smoke,
+      ['protocol.md: the pointer is not stated once', 'protocol.md: the pointer does not follow the delivery base', UNLISTED + narrowed, GONE + P]],
+    ['the heading renamed', protocol, smoke.replace('\n### Sidecar shape\n', () => '\n### The sidecar\n'), ['smoke-page.md: no ### Sidecar shape heading']],
+  ];
+  assert.deepEqual(controls.map(([what, p, s]) => [what, sidecarPointerFaults(p, s)]), controls.map(([what, , , faults]) => [what, faults]));
 });
 
 // No definition sets `model:`, and only the gate pair and the census set `effort:` (the loader takes
 // low | medium | high | max | an integer): the user pinned the reviewer, which also runs the plan
-// pre-flight, and the test hunter at max whatever the session's effort (2026-09-27), and the census at
-// medium (the user's standing choice since 2026-10-07, confirmed 2026-10-13). Stricter than the loader
-// on purpose: the admission is per file — exactly `effort: max` in each gate file and exactly
-// `effort: medium` in the census, once, and no line in any other file; any other frontmatter key
-// naming either, however quoted, cased, indented or spaced, one file's admitted line in another, and
-// a frontmatter block that cannot be found, is a finding.
+// pre-flight, at max whatever the session's effort (2026-09-27), the test hunter at medium (2026-10-25),
+// and the census at medium (the user's standing choice since 2026-10-07, confirmed 2026-10-13). Stricter
+// than the loader on purpose: the admission is per file — exactly `effort: max` in the reviewer and
+// exactly `effort: medium` in the test hunter and the census, once, and no line in any other file; any
+// other frontmatter key naming either, however quoted, cased, indented or spaced, the reviewer's line in
+// the other two and theirs in it, and a frontmatter block that cannot be found, is a finding.
 const TIER_KEY = /(?:effort|model)[\w-]*["']?\s*:/i;
-const EFFORT_LINES = new Map([['.claude/agents/reviewer.md', 'effort: max'], ['.claude/agents/test-hunter.md', 'effort: max'],
+const EFFORT_LINES = new Map([['.claude/agents/reviewer.md', 'effort: max'], ['.claude/agents/test-hunter.md', 'effort: medium'],
   ['.claude/agents/census.md', 'effort: medium']]);
 function tierKeyFaults(file, text) {
   const m = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text);
@@ -2672,8 +3430,8 @@ function tierKeyFaults(file, text) {
   return lines.filter(line => line !== admitted).map(line => file + ': ' + line.trim());
 }
 const definitionListing = () => walk(path.join(ROOT, '.claude/agents')).filter(rel => rel.endsWith('.md')).map(rel => '.claude/agents/' + rel);
-test('no agent definition sets a model, and an effort only as its own file\'s admitted line — effort: max in the gate pair, '
-  + 'effort: medium in the census — read more strictly than the loader reads it', t => {
+test('no agent definition sets a model, and an effort only as its own file\'s admitted line — effort: max in the reviewer, '
+  + 'effort: medium in the test hunter and the census — read more strictly than the loader reads it', t => {
   const def = line => '---\nname: x\ndescription: y\n' + line + '\ntools: Read\n---\n\nbody\n';
   // Every value the loader accepts, and values past both ends of that set.
   const VALUES = ['low', 'medium', 'high', 'max', '32000', 'none', '0', '-1', 'ultra', '999999', '"high"', 'opus', 'inherit'];
@@ -2833,7 +3591,7 @@ const POLISH_RULES = {
     + ONE_STRIKE + ": write `polish discarded: @<sha>` (the pre-polish `SHIP` tip) into the row's Notes first — the marker §Recovery keys on, and the recorded authorization — then ONE revert commit spanning `@<sha>..HEAD` (never a reset — no history rewriting, the R-lines' SHAs stay reachable; `git diff @<sha> HEAD` must come back empty), integrate that reviewed tree, unclosed ASKs → backlog entries, each with its wording attached (a prose ASK's replacement text). Polish never turns a batch `⛔`."],
   scopedReReview: [PROMPTS, '**Scoped re-review**', '\n\nOnly `FIX FIRST` rounds',
     '**Scoped re-review** (a polish commit touched a production file that `prose-only-diff.mjs` did not read as prose-only): a fresh reviewer given only `git diff [PRE_POLISH_SHA]..HEAD`, the ASK list, and duties 1, 2 and 4. Not a round. '
-    + "Its verdict is recorded like any other (`R<k> <verdict> @<sha>`) and never counts toward the cap. One strike: its `FIX FIRST` discards the polish at once — the orchestrator writes `polish discarded: @[PRE_POLISH_SHA]` into the row's Notes, reverts back to that reviewed tree in ONE commit (never a reset), and integrates it; unclosed ASKs → backlog, each with its wording attached."],
+    + "Its verdict is recorded like any other (`R<k> <verdict> @<sha>`) and never counts toward the cap. One strike: its `FIX FIRST` discards the polish at once — the orchestrator writes `polish discarded: @[PRE_POLISH_SHA]` into the row's Notes, reverts back to that reviewed tree in ONE commit (never a reset), and integrates it; unclosed ASKs → residuals for the change-complete ruling step, each with its wording attached."],
   polishBlock: [PROMPTS, 'First append one `- [ ] polish: <ask>`', ' then do',
     'First append one `- [ ] polish: <ask>` checklist line per ask your batch file does not list yet (an orchestrator that applied a prose ask listed every ask: those it applied ticked, yours unticked),'],
   waveGate: ['orchestrate/references/execution-models.md', 'with ASKs → polish pass', '; `FIX FIRST` → round 1',
@@ -3100,4 +3858,326 @@ test("a smoke-step ASK's text is applied through the integration worktree, and n
   assert.equal(smokeRoutes(reversed).length, 0, PROTOCOL_MD + ': the route reversed is no route');
   // Armed on the whole domain: the specimen appended to any file is reported there, once.
   for (const file of files) assert.equal(smokeOnBatch(read(file) + '\n\n' + SMOKE_SPECIMEN + '\n', SMOKE_SAFE[file]).length, 1, file + ': an appended reversal must be reported');
+});
+
+// The passages this batch's report file, fold-in proof and run-end prose sweep added to protocol.md, each pinned whole
+// between its anchors, as BUDGET pins a passage: a sentence reversed, dropped or appended inside one reddens it. The
+// closed sweeps above read only the units naming a tree, a scratch path or a close-out; these hold the rest.
+const REPORT_SWEEP_PASSAGES = {
+  // §Roles' Implementer bullet: the report file and the final message.
+  roles: ['- **Implementer** —', ' - **Reviewer**',
+    "- **Implementer** — a sub-agent given one batch. Codes inside the file fence in the batch's isolated worktree, ticks the batch checklist, commits on the batch branch (one commit per fold-in item). Wave siblings run concurrently. Its full report goes with the Write tool to the file its rendered prompt names, under the session scratchpad and never inside a worktree or the repository, in the fixed shape: its heading `### B<NN> R<k> <role> findings`; the status, one of `DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED`; `NONCE <nonce>` (the nonce its rendered prompt ends with); an evidence block (each validation run's `validate.mjs` line and exit code; SHAs; checklist n/m); ≤40 lines of prose. `NEEDS_FENCE` / `BLOCKED` use Expected / Found / Why it matters / How to proceed. The final message is four lines, or three without a nonce: the status, `NONCE <nonce>`, `checklist <n>/<m>`, the file's path."],
+  // step 5: the facts of the roles whose report is a file.
+  facts: ["The roles whose report is a file take two more facts", " When the renderer is unavailable",
+    "The roles whose report is a file take two more facts: `reportFile`, the file the orchestrator names under the session scratchpad, and `round`, `1` for a first implementer report, `<k>` for fix round `<k>` or the rework standing in for it, and the `SHIP … asks=` round for a polish report."],
+  // step 6: the report check, its fallback, the file never read in full, its LOG.md append.
+  check: ["The roles whose report is a file have it checked", " - **6a Fence check",
+    "The roles whose report is a file have it checked with `node \"<skill-dir>/tools/prompt.mjs\" --report \"<file>\" --nonce <nonce>`, `<file>` the path on the final message's last line (without `--nonce` for a fix-up or a pasted prompt, which ends with no nonce line); a `REPORT FAIL …` line, or an `UNKNOWN` line naming the report file, is no report, resumed the same way, and only `REPORT <status> checklist <n>/<m>` is a report. A check that does not run, or prints any other `UNKNOWN` line, leaves the rule before it as the manual procedure, read from the file's status, `NONCE` and `EVIDENCE:` lines alone. The orchestrator never reads the report file in full: anything that needs the whole report reads the file itself, and the file reaches LOG.md by the published append (Verdicts, below), its heading the file's first line, in the commit with that gate step's PROGRESS update. No later prompt takes that file as its findings file, so the recovery form below never meets it, and a resumed implementer writing the same heading a second time is harmless."],
+  // the SWEEP items bullet: the record form and the route of an item with no sweep left.
+  sweepItems: ["- Each item of a reviewer's `SWEEP:` list", " - Round 1: resume",
+    "- Each item of a reviewer's `SWEEP:` list (an out-of-fence prose fix carrying its verified replacement text) is recorded for the run-end prose sweep (§Session algorithm step 8) by a one-line LOG.md heading, `### prose sweep: B<NN> R<k> SWEEP <n>`, which names that findings entry's heading and, as `<n>`, the item's 1-based position in the `SWEEP:` list; the item's text is never re-typed. A prose finding outside the fence without verified wording keeps its present route, and so does a `SWEEP` item recorded after the sweep has merged (a fix-up's reviewer at a re-issue, say): no second sweep runs, and the item takes the backlog route with its findings heading named."],
+  // step 6a: the fold-in proof and its return route.
+  foldIn: ["For each fold-in the plan's §Backlog fold-ins", " - **6b Failing-on-base",
+    "For each fold-in the plan's §Backlog fold-ins marks `(prose-only)` (`<id> — <text> → B<NN> (prose-only)`; an unmarked fold-in is gated as any other), the orchestrator proves its own commit, the one whose message carries its id: it first reads that commit's paths with `git show --name-only --no-renames --format= <sha>`, and a commit changing only Markdown is decided by the path rule; otherwise the classifier of §Severity and round accounting runs with its `--base` the commit's parent and its `--head` the commit. A cause that begins `code changed`, or a changed path that is neither Markdown nor JavaScript, returns the fold-in: one commit on the batch branch reverses only that commit's own changes (`git revert --no-commit <sha>`, then `git restore --source=HEAD --staged --worktree -- <batch file>` so its tick stays; never the files' parent content, which would also undo the batch's later commits to them), the row's Notes get `fold-in returned: <id> @<sha>`, and the item stays in the backlog. A returned fold-in is not proved a second time at any later 6a of the batch. A revert whose conflicts outlast that restore (a later commit of the batch changed the same lines) is abandoned with `git revert --abort`; the fold-in then stays, and the reviewer reads its commit under the path rule. For a returned fold-in, before the reviewer is rendered, a ledger commit adds to the batch file's notes on the integration branch `[<id>] returned to the backlog at 6a: its checklist item and acceptance criterion no longer apply`, so the reviewer holds the batch to the rest. Any other cause keeps the fold-in, the reviewer reading its kept lines under the path rule, and an `UNKNOWN` line keeps the path rule for that commit, which the reviewer applies."],
+  // step 8: the run-end prose sweep.
+  sweep: ["**Run-end prose sweep.**", " Compaction happens only",
+    "**Run-end prose sweep.** Whenever LOG.md holds a `### prose sweep:` heading, the FINAL checkpoint's close-out begins with this sweep; plan approval is its standing OK, and it runs alone, so §Fence changes' mid-wave test passes trivially. The orchestrator first commits `prose sweep cut @<sha>` to the session log, `<sha>` the integration tip just before that commit, then cuts `fix/<batch>-prose-sweep` (`<batch>` the last batch merged) AT that SHA, so the branch starts one ledger-only commit behind the tip and a crash after the cut always finds the record; its worktree is `<the contract's worktree root>/sweep`, or under the session scratchpad for a contract that names no root. A branch of that name whose tip equals that SHA is adopted and its items applied; one with commits past it, not yet an ancestor of the integration branch, resumes (the missing items applied, then the check and the reviewer); one with commits past it that is an ancestor is the merged sweep (→ tip validation and the session-log row); any other, one that does not descend from that SHA (`git merge-base --is-ancestor <sha> <branch>` fails: a leftover from before this run), is STOP AND INVESTIGATE. Ancestry alone never proves the merge, since a branch cut and not yet committed to is trivially an ancestor. The orchestrator applies each item's replacement text from its findings entry itself, one commit per item, its subject naming the item's heading, and classifies each item's commit as step 6a proves a prose-only fold-in, a return there reverting that commit and sending the item to the backlog route. The mechanical check is manual: worktree clean, and every changed path, both rename endpoints, one that a recorded item names. ONE fresh reviewer, its prompt written in the scoped re-review's shape (the sweep's changes, the items, duties 1, 2 and 4), has its findings reach LOG.md under `### B<NN> R1 sweep findings` by the published append (step 6); its `FIX FIRST` reverts each item it names and sends it to the backlog route — one strike, never a round, never ⛔. Then dry run → merge → tip validation, a red tip going to step 2's tip repair. The sweep being the close-out's first step, a crash in it meets §Recovery's Close-out unfinished row, the rows staying 🟢 and State ACTIVE throughout, and the close-out resumes the sweep from its branch by the adoption rule above (no branch: cut at the recorded SHA). The session-log row records `prose sweep: <n> item(s) @<merge sha>`."],
+  // the pointer after §Recovery's table: the Close-out unfinished row's close-out begins with the sweep.
+  recoveryPointer: ["At the FINAL checkpoint the Close-out unfinished row's", ' Before any polish pass',
+    "At the FINAL checkpoint the Close-out unfinished row's close-out begins with the run-end prose sweep whenever LOG.md holds a `### prose sweep:` heading, resumed from its branch by §Session algorithm step 8's adoption rule."],
+  // step 2: a red tip after the sweep's merge, back to the close-out.
+  redTip: ["A tip the run-end prose sweep's merge", ' - **Failed pre-smoke step**',
+    "A tip the run-end prose sweep's merge turned red (step 8) takes this repair, the sweep counting as the last batch's merge, and once green the run returns to the close-out, not to step 7 or 4."],
+  // §Two distinct close-outs: the FINAL checkpoint's close-out opens with the sweep.
+  twoCloseOuts: ["The FINAL checkpoint's close-out runs the run-end prose sweep", ' **The backlog file is a to-do list.**',
+    "The FINAL checkpoint's close-out runs the run-end prose sweep (step 8) before all of these whenever LOG.md holds a `### prose sweep:` heading."],
+};
+const PROTOCOL_PATH = 'orchestrate/references/protocol.md';
+const pinnedPassage = (text, from, to) => { const flat = collapse(text); return collapse(section(flat, from, to)).trim(); };
+test('the report file, the fold-in proof and the run-end prose sweep read in protocol.md exactly as pinned', () => {
+  const text = read(PROTOCOL_PATH);
+  assert.equal(Object.keys(REPORT_SWEEP_PASSAGES).length, 9, 'nine passages are pinned; the list may not shrink to a sample');
+  const faults = [];
+  for (const [key, [from, to, expected]] of Object.entries(REPORT_SWEEP_PASSAGES)) {
+    if (collapse(text).split(from).length !== 2) { faults.push(key + ': the anchor "' + from + '" does not occur exactly once'); continue; }
+    if (pinnedPassage(text, from, to) !== expected) faults.push(key + ': the pinned passage changed; update REPORT_SWEEP_PASSAGES only on purpose');
+  }
+  assert.deepEqual(faults, []);
+  // Live controls: a sentence planted just after the opening anchor, or just before the closing one, reddens each pin.
+  for (const [key, [from, to, expected]] of Object.entries(REPORT_SWEEP_PASSAGES)) {
+    const flat = collapse(text);
+    for (const planted of [flat.replace(from, () => from + ' Skip it when in a hurry.'), flat.replace(to, () => ' Skip it when in a hurry.' + to)]) {
+      assert.notEqual(pinnedPassage(planted, from, to), expected, key + ': a planted sentence must redden the pin');
+    }
+  }
+});
+
+// The passages that make the backlog a to-do list, each pinned whole between its anchors as REPORT_SWEEP_PASSAGES
+// pins one: a sentence reversed, dropped or appended inside one reddens it. The closed sweeps read only their units
+// naming a close-out or the backlog; these hold the rest.
+const RULING_PASSAGES = {
+  // §Two distinct close-outs: the backlog as a to-do list, and the bar an item passes to enter it.
+  bar: [PROTOCOL_PATH, "**The backlog file is a to-do list.**", " **Change-complete**",
+    "**The backlog file is a to-do list.** An item enters it only through the change-complete ruling step (step 3 below), and only past the bar of the pinned skill's `references/backlog.md`: works-but verdicts, request items the coverage audit finds unimplemented and P0/P1 defects with a concrete scenario skip the bar's judgement, and the bar never lowers a severity. Below the bar a finding stays in LOG.md only."],
+  // step 2: every route to the backlog recorded as a residual for the ruling step, after the verdict table.
+  route: [PROTOCOL_PATH, "Wherever this document routes an item to the backlog", " 3. If any batch is `🧪`",
+    "Wherever this document routes an item to the backlog — this table's cells, §Severity and round accounting's discarded polish and its `SWEEP` items that keep or take the backlog route, the Status legend's `⛔ (dropped)` batch, a works-but verdict, the convergence pass, step 8's run-end prose sweep returning an item or its reviewer's `FIX FIRST` reverting one, and any other dropped item — the orchestrator records it as a residual: a LOG.md heading `### residual: <source> — <one line>`, `<source>` being `B<NN> R<k>`, `B<NN> R<k> SWEEP <n>`, `B<NN> R1 sweep`, `C<n> step <k>`, `convergence` or `audit`, that names the byte-copied findings heading holding the item's wording, or carries the wording when no findings file holds it; the change-complete ruling step decides it."],
+  // change-complete step 2: the audit's unaccounted items as residuals, and a returned fold-in kept.
+  audit: [PROTOCOL_PATH, "2. Final coverage audit in PROGRESS", " 3. **Ruling step**",
+    "2. Final coverage audit in PROGRESS: every request item (fold-ins included) maps to a merged commit, an intended-behavior resolution, or a named entry in the backlog file — zero unaccounted. An item the audit finds unaccounted is recorded as a LOG.md heading `### residual: audit — <one line>`, so it reaches the ruling list of step 3 (with convergence off, the audit is where an unimplemented request item is first found). Fold-ins are REMOVED from the backlog file in the close-out commit (the ledger row and commit message carry provenance); a partially done fold-in is edited in place there with a pointer to the ledger; residuals added get ids in the repo's id scheme. Those entries and ids are written by step 3's ruling. A fold-in whose row's Notes carry `fold-in returned: <id> @<sha>` stays in the backlog file: its `Folded into …` marker is removed, its `Since:` rewritten to the date it returned with its source naming the batch that returned it, and its coverage row names that entry."],
+  // change-complete step 3: the ruling list, its proposals, packs, the UNKNOWN route split by file, the STOP and its resume rule.
+  ruling: [PROTOCOL_PATH, "3. **Ruling step**", " 4. **Distillation loop**",
+    "3. **Ruling step** — every residual of the run reaches one list, ruled once by the user: - **The list**: every `### residual:` heading of this run's LOG.md, and each item that `node \"<skill-dir>/tools/backlog.mjs\" expired --backlog <file> --days <n> --today <YYYY-MM-DD>` names, run on the contract's backlog file with the contract's expiry (a whole number of days) and today's date. An expired item is re-checked against the code at the integration tip — does its `Failure:` still hold? — before it is proposed. Each residual's paths are checked against the contract's rulings file with `node \"<skill-dir>/tools/backlog.mjs\" rulings --rulings <file> --paths <paths>`; one a ruling covers, bringing no new evidence of exposure, is proposed LOG only, naming that ruling. - **Proposals**: for each residual the orchestrator proposes register (the form's fields filled, its paths written repository-relative as `references/backlog.md` says — `backlog.mjs check` does not refuse a `C:/…`, `~/…` or `$HOME/…` path, so the orchestrator reads them itself), rule (accepted or declined, with a reason) or LOG only; for an expired item, keep (its `Since:` rewritten), rule, or drop (removed from the to-do list; LOG.md keeps its text). A residual whose fix is prose-only and carries verified replacement text, as a `SWEEP:` item does, may be proposed fix now; a fix that changes behaviour never is. - **Packs**: `node \"<skill-dir>/tools/backlog.mjs\" packs --backlog <file> --threshold <n>` with the contract's pack threshold, over the backlog file as it stands, each file's count raised by this run's items proposed for registration that name it (nothing is written before the user rules). A file at or over the threshold that gained an item in this run and that no plan has taken is proposed as a pack, never run unasked; a declined pack returns to this list only when its file gains an item in a later run. - **A file not in the form**: when `backlog.mjs` prints `UNKNOWN` for the backlog or the rulings file (one not yet in the form, every repository's until its migration, or a missing one), the STOP says which file and why, and each item is registered or ruled in that file's current form, a missing file being created in the form. For the backlog file the list then forms from LOG.md's residuals alone and no pack is proposed; for the rulings file the expired items and packs stand, a missing one holds no ruling, and the orchestrator reads one not in the form for the rulings on the residuals' paths. Once the backlog file carries the form, every entry written to it passes `node \"<skill-dir>/tools/backlog.mjs\" check --backlog <file>`. - **The STOP**: the proposed list is committed to LOG.md under `### Ruling list` before the STOP, which presents it; the user rules once, the proposals as defaults, and only the user's word registers or rules an item. The user's words are recorded verbatim in the smoke-test verdict log (Checkpoint column `ruling`) in their own commit, before anything is written to the backlog file or the rulings file, so a crash after it never loses a ruling. A ruling found only in a summary is asked for once more, never assumed. A ledger with every row ✅ or `⛔ (dropped)` (advisory `👤` rows aside) and no COMPLETE marker resumes the change-complete close-out at its first unfinished step, by `continue` or `close`: a committed `### Ruling list` with no recorded ruling is presented. - **The page**: the list goes to the user as the ruling page whenever the runtime can hand over usable HTML, per the pinned skill's `references/ruling-page.md`: the proposals authored as `ruling.json` in the ledger, `node \"<skill-dir>/tools/build-ruling-page.mjs\" build <ledger>/ruling.json <ledger>/ruling.html` builds the page, and the block `node \"<skill-dir>/tools/build-ruling-page.mjs\" list <ledger>/ruling.json` prints is the `### Ruling list`, committed with both files. The paste is saved and checked with `node \"<skill-dir>/tools/build-ruling-page.mjs\" read <ledger>/ruling.json <paste file> --entries` before it is recorded; a `RULINGS FAIL` is asked about once more, never repaired by guess. - **The ruling sweep**: fix-now rulings run after the ruling commit as step 8's run-end prose sweep does, under its rules with these names: the record `ruling sweep cut @<sha>`, the branch `fix/<batch>-ruling-sweep`, the findings heading `### B<NN> R1 ruling-sweep findings` and the session-log row `ruling sweep: <n> item(s) @<merge sha>`. An item it returns or its reviewer's `FIX FIRST` reverts is registered with its replacement text attached, the user's fix-now ruling being its pass of the bar, and the hand-over names it. The backlog file and the rulings file are written once the sweep has merged; a `ruling sweep cut` with no `ruling sweep:` row resumes the sweep from its branch by step 8's adoption rule. - A ruling is reconsidered only on new evidence of exposure (a user hit it, a calling module changed, a smoke step failed), never on a new instance of the same gap; gate prompts never read the rulings file."],
+  // SKILL.md's Mode: close step 3: the ruling step between the audit and distillation.
+  modeClose: ["orchestrate/SKILL.md", "the ruling step (every", ", distillation (new",
+    "the ruling step (every residual of the run on one list committed to LOG.md, ruled once by the user at a STOP, the proposals as defaults; only the user's word registers or rules an item; a ledger with every row ✅ or `⛔ (dropped)` (advisory `👤` rows aside) and no COMPLETE marker resumes the change-complete close-out at its first unfinished step)"],
+  // SKILL.md's Mode: close step 1: a works-but verdict is a residual the ruling step decides.
+  worksBut: ["orchestrate/SKILL.md", "**works-but** →", "; **blocked**",
+    "**works-but** → a residual the change-complete ruling step decides, never a failure"],
+  // smoke-page.md's verdict table: the Works, but row, the same route in its own words.
+  smokeRow: ["orchestrate/references/smoke-page.md", "| Works, but |", " The user's message is the verdict",
+    "| Works, but | Passed exactly as described; user wants it different | A residual the change-complete ruling step decides (protocol.md). Never a failure, never blocks the checkpoint |"],
+  // SKILL.md's Mode: continue: the prose-sweep item, held in its place as the step after step 3.
+  modeContinue: ["orchestrate/SKILL.md", "(references/subagent-prompts.md). 4. The final checkpoint's close-out begins", " ## Mode: status",
+    "(references/subagent-prompts.md). 4. The final checkpoint's close-out begins with the run-end prose sweep whenever LOG.md holds a `### prose sweep:` heading (protocol.md)."],
+};
+test('the to-do list, its bar, the residual route and the ruling step read in protocol.md, SKILL.md and smoke-page.md exactly as pinned', () => {
+  assert.equal(Object.keys(RULING_PASSAGES).length, 8, 'eight passages are pinned; the list may not shrink to a sample');
+  const faults = [];
+  for (const [key, [file, from, to, expected]] of Object.entries(RULING_PASSAGES)) {
+    const text = read(file);
+    if (collapse(text).split(from).length !== 2) { faults.push(key + ': the anchor "' + from + '" does not occur exactly once'); continue; }
+    if (pinnedPassage(text, from, to) !== expected) faults.push(key + ': the pinned passage changed; update RULING_PASSAGES only on purpose');
+  }
+  assert.deepEqual(faults, []);
+  // Live controls: a sentence planted just after the opening anchor, or just before the closing one, reddens each pin.
+  for (const [key, [file, from, to, expected]] of Object.entries(RULING_PASSAGES)) {
+    const flat = collapse(read(file));
+    assert.equal(flat.split(to).length, 2, key + ': the closing anchor must occur once, so the control plants inside the passage');
+    for (const planted of [flat.replace(from, () => from + ' Skip it when in a hurry.'), flat.replace(to, () => ' Skip it when in a hurry.' + to)]) {
+      assert.notEqual(pinnedPassage(planted, from, to), expected, key + ': a planted sentence must redden the pin');
+    }
+  }
+});
+
+// Every unit of the skill's shipped text that a reader meets (backlogFiles: its Markdown and the smoke page) naming the
+// backlog, a to-do item, a registration or a named entry, in the skill's own words for each, is doubt unless BACKLOG_UNITS
+// lists it word for word, so no sentence registers an item in the backlog by a route the change-complete ruling step
+// does not decide: the RULING_PASSAGES pins hold their passages, and this sweep holds every other place. `backlog` has
+// no closing \b so `{{BACKLOG_FILE}}` reads; `registry` stays out.
+const BACKLOG_WORD = /\bbacklog|\bto-?do\b|\bregist(?:er|ers|ered|ering|ration)\b|\bnamed entr/i;
+const backlogFiles = () => shipped().filter(file => /\.(?:md|html)$/.test(file));
+// An HTML file is read a line at a time with its tags dropped, since its prose and its script share blocks.
+const backlogText = (file, text) => file.endsWith('.html') ? text.split('\n').map(line => line.replace(/<[^>]*>/g, ' ')).join('\n\n') : text;
+const BACKLOG_UNITS = [
+  ["orchestrate/SKILL.md","If the user says \"continue\" and nothing is active: reconcile, report completion, point at the backlog."],
+  ["orchestrate/SKILL.md","context) → detect repo facts (validation commands and their quiet form, versioning, gate agents, runners, backlog id scheme;"],
+  ["orchestrate/SKILL.md","each item its report opens with is recorded in LOG.md as carried or rejected, once the lines folded from it in other words and the fixes chosen for what it only flagged have gone back to that agent, per scaffolding.md) → backlog sweep (propose eligible fold-ins per scaffolding.md;"],
+  ["orchestrate/SKILL.md","fold-ins removed from the backlog), the ruling step (every residual of the run on one list committed to LOG.md, ruled once by the user at a STOP, the proposals as defaults;"],
+  ["orchestrate/SKILL.md","only the user's word registers or rules an item;"],
+  ["orchestrate/SKILL.md","- Asked to resume a COMPLETE ledger → reconcile, report completion, point at the backlog."],
+  ["orchestrate/SKILL.md","- [references/backlog.md](references/backlog.md) — the backlog and rulings entry forms, the bar for registering, packs by production file, expiry, reconsideration"],
+  ["orchestrate/SKILL.md","- [references/scaffolding.md](references/scaffolding.md) — detection heuristics, interview, census, backlog sweep, pre-flight, placeholder registry, self-check"],
+  ["orchestrate/references/backlog.md","# The backlog and rulings forms"],
+  ["orchestrate/references/backlog.md","A repository's backlog is its to-do list, and its rulings file (RULINGS.md) holds the user's rulings with their reasons."],
+  ["orchestrate/references/backlog.md","Both are written in the form below, which backlog.mjs reads: what this page shows is what the tool accepts."],
+  ["orchestrate/references/backlog.md","A file in the backlog form holds this exact line before its first entry:"],
+  ["orchestrate/references/backlog.md","text Form: orchestrate backlog v1"],
+  ["orchestrate/references/backlog.md","The line tells a file in the form from one that is not yet: until a backlog gains it, every backlog.mjs operation on that file prints UNKNOWN and exits 2."],
+  ["orchestrate/references/backlog.md","A file with its form line and no entry is an empty to-do list."],
+  ["orchestrate/references/backlog.md","## A backlog entry"],
+  ["orchestrate/references/backlog.md","- Since: <YYYY-MM-DD> — <source>: the date the item was registered, or the date the user last kept it;"],
+  ["orchestrate/references/backlog.md","node \"<skill-dir>/tools/backlog.mjs\" rulings --rulings <file> --paths <comma-separated paths> lists the rulings on the paths a change edits, one <id> <accepted|declined> <date>: <shared paths> line each;"],
+  ["orchestrate/references/backlog.md","An item enters the backlog only with Failure: and Done when: filled in a way a reader can check;"],
+  ["orchestrate/references/backlog.md","To-do items are counted per production file their Files: line names, a production file being one the isTestPath of failing-on-base.mjs reads as no test;"],
+  ["orchestrate/references/backlog.md","- node \"<skill-dir>/tools/backlog.mjs\" packs --backlog <file> --threshold <n> prints PACKS <k> file(s) at or over <n>, then PACK <path> <count>: <ids> for each file whose count reaches the threshold."],
+  ["orchestrate/references/backlog.md","- node \"<skill-dir>/tools/backlog.mjs\" expired --backlog <file> --days <n> --today <YYYY-MM-DD> prints EXPIRED <k> item(s) older than <n> days, then <id> since <date> for each item whose Since: date is more than the contract's expiry days before today."],
+  ["orchestrate/references/backlog.md","- node \"<skill-dir>/tools/backlog.mjs\" check --backlog <file> prints BACKLOG OK <n> item(s), or BACKLOG FAIL <k> problem(s): … naming at most ten problems, each by its entry's id or its line number, and, past ten, (+<m> more) for the rest, exit 1."],
+  ["orchestrate/references/protocol.md","accepted backlog fold-ins) + item→batch map |"],
+  ["orchestrate/references/protocol.md","git diff @<sha> HEAD must come back empty), integrate that reviewed tree, unclosed ASKs → backlog entries, each with its wording attached (a prose ASK's replacement text)."],
+  ["orchestrate/references/protocol.md","A prose finding outside the fence without verified wording keeps its present route, and so does a SWEEP item recorded after the sweep has merged (a fix-up's reviewer at a re-issue, say): no second sweep runs, and the item takes the backlog route with its findings heading named."],
+  ["orchestrate/references/protocol.md","its items live in the backlog |"],
+  ["orchestrate/references/protocol.md","Verdicts are four: pass · fail (did something else — triage to the offending batch(es) → ❌) · blocked (the step could not be performed as written — correct the STEP and re-ask, or reclassify as fail if the app lacks the behavior) · works-but (works exactly as specified, the user wants it different → named backlog entry — never a failure, never blocks the pass)."],
+  ["orchestrate/references/protocol.md","residual → severity-tagged backlog entry + one Runner: human smoke step the orchestrator authors into the batch file's Smoke section AFTER the merge, on the integration branch (next checkpoint page, or a re-issue of the passed one) | ⛔ (dropped);"],
+  ["orchestrate/references/protocol.md","items → backlog;"],
+  ["orchestrate/references/protocol.md","FIX FIRST again → capped, marker re-written | trial-validate, then merge only if green (the open finding → backlog + smoke step);"],
+  ["orchestrate/references/protocol.md","that batch → ⛔ (dropped), items → backlog |"],
+  ["orchestrate/references/protocol.md","residual → backlog | as ship;"],
+  ["orchestrate/references/protocol.md","re-issue with the failing step annotated as a known residual (backlog) | reviewed fix/<batch>-revert of the indicted batch's merge;"],
+  ["orchestrate/references/protocol.md","Wherever this document routes an item to the backlog — this table's cells, §Severity and round accounting's discarded polish and its SWEEP items that keep or take the backlog route, the Status legend's ⛔ (dropped) batch, a works-but verdict, the convergence pass, step 8's run-end prose sweep returning an item or its reviewer's FIX FIRST reverting one, and any other dropped item — the orchestrator records it as a residual: a LOG.md heading ### residual: <source> — <one line>, <source> being B<NN> R<k>, B<NN> R<k> SWEEP <n>, B<NN> R1 sweep, C<n> step <k>, convergence or audit, that names the byte-copied findings heading holding the item's wording, or carries the wording when no findings file holds it;"],
+  ["orchestrate/references/protocol.md","For each fold-in the plan's §Backlog fold-ins marks (prose-only) (<id> — <text> → B<NN> (prose-only);"],
+  ["orchestrate/references/protocol.md","never the files' parent content, which would also undo the batch's later commits to them), the row's Notes get fold-in returned: <id> @<sha>, and the item stays in the backlog."],
+  ["orchestrate/references/protocol.md","For a returned fold-in, before the reviewer is rendered, a ledger commit adds to the batch file's notes on the integration branch [<id>] returned to the backlog at 6a: its checklist item and acceptance criterion no longer apply, so the reviewer holds the batch to the rest."],
+  ["orchestrate/references/protocol.md","The orchestrator applies each item's replacement text from its findings entry itself, one commit per item, its subject naming the item's heading, and classifies each item's commit as step 6a proves a prose-only fold-in, a return there reverting that commit and sending the item to the backlog route."],
+  ["orchestrate/references/protocol.md","its FIX FIRST reverts each item it names and sends it to the backlog route — one strike, never a round, never ⛔."],
+  ["orchestrate/references/protocol.md","The backlog file is a to-do list."],
+  ["orchestrate/references/protocol.md","An item enters it only through the change-complete ruling step (step 3 below), and only past the bar of the pinned skill's references/backlog.md: works-but verdicts, request items the coverage audit finds unimplemented and P0/P1 defects with a concrete scenario skip the bar's judgement, and the bar never lowers a severity."],
+  ["orchestrate/references/protocol.md","Change-complete (after the FINAL checkpoint passes and every batch is ✅ or ⛔ (dropped)), run with the contract's convergence, backlog, guardrails and release facts:"],
+  ["orchestrate/references/protocol.md","anything but implemented becomes a named backlog entry or a convergence mini-batch the user is asked about."],
+  ["orchestrate/references/protocol.md","Final coverage audit in PROGRESS: every request item (fold-ins included) maps to a merged commit, an intended-behavior resolution, or a named entry in the backlog file — zero unaccounted."],
+  ["orchestrate/references/protocol.md","Fold-ins are REMOVED from the backlog file in the close-out commit (the ledger row and commit message carry provenance);"],
+  ["orchestrate/references/protocol.md","A fold-in whose row's Notes carry fold-in returned: <id> @<sha> stays in the backlog file: its Folded into … marker is removed, its Since: rewritten to the date it returned with its source naming the batch that returned it, and its coverage row names that entry."],
+  ["orchestrate/references/protocol.md","- The list: every ### residual: heading of this run's LOG.md, and each item that node \"<skill-dir>/tools/backlog.mjs\" expired --backlog <file> --days <n> --today <YYYY-MM-DD> names, run on the contract's backlog file with the contract's expiry (a whole number of days) and today's date."],
+  ["orchestrate/references/protocol.md","Each residual's paths are checked against the contract's rulings file with node \"<skill-dir>/tools/backlog.mjs\" rulings --rulings <file> --paths <paths>;"],
+  ["orchestrate/references/protocol.md","- Proposals: for each residual the orchestrator proposes register (the form's fields filled, its paths written repository-relative as references/backlog.md says — backlog.mjs check does not refuse a C:/…, ~/… or $HOME/… path, so the orchestrator reads them itself), rule (accepted or declined, with a reason) or LOG only;"],
+  ["orchestrate/references/protocol.md","for an expired item, keep (its Since: rewritten), rule, or drop (removed from the to-do list;"],
+  ["orchestrate/references/protocol.md","- Packs: node \"<skill-dir>/tools/backlog.mjs\" packs --backlog <file> --threshold <n> with the contract's pack threshold, over the backlog file as it stands, each file's count raised by this run's items proposed for registration that name it (nothing is written before the user rules)."],
+  ["orchestrate/references/protocol.md","- A file not in the form: when backlog.mjs prints UNKNOWN for the backlog or the rulings file (one not yet in the form, every repository's until its migration, or a missing one), the STOP says which file and why, and each item is registered or ruled in that file's current form, a missing file being created in the form."],
+  ["orchestrate/references/protocol.md","For the backlog file the list then forms from LOG.md's residuals alone and no pack is proposed;"],
+  ["orchestrate/references/protocol.md","Once the backlog file carries the form, every entry written to it passes node \"<skill-dir>/tools/backlog.mjs\" check --backlog <file>."],
+  ["orchestrate/references/protocol.md","the user rules once, the proposals as defaults, and only the user's word registers or rules an item."],
+  ["orchestrate/references/protocol.md","The user's words are recorded verbatim in the smoke-test verdict log (Checkpoint column ruling) in their own commit, before anything is written to the backlog file or the rulings file, so a crash after it never loses a ruling."],
+  ["orchestrate/references/protocol.md","An item it returns or its reviewer's FIX FIRST reverts is registered with its replacement text attached, the user's fix-now ruling being its pass of the bar, and the hand-over names it."],
+  ["orchestrate/references/protocol.md","The backlog file and the rulings file are written once the sweep has merged;"],
+  ["orchestrate/references/ruling-page-template.html","const NO = [\"decline\", \"drop\", \"skip\"], LATER = [\"register\", \"keep\", \"log\"];"],
+  ["orchestrate/references/ruling-page.md","| residual | Fix now (only when proseOnly), Register, Accept, Decline, LOG only | Fix now: the ruling sweep (protocol.md);"],
+  ["orchestrate/references/ruling-page.md","Register: an entry in the contract's backlog file;"],
+  ["orchestrate/references/ruling-page.md","source names where the item came from: the LOG.md heading of a residual, the backlog id and Since: date of an expired item, the backlog.mjs packs line of a pack."],
+  ["orchestrate/references/ruling-page.md","entry holds the form's fields (references/backlog.md) for the entry an outcome writes: id, title, kind, files, tests ([] for none), failure, doneWhen and from (the batch or round the Since: source names after the ledger id) for a backlog entry;"],
+  ["orchestrate/references/ruling-page.md","re-checked against the tip.\" }, { \"key\": \"pack\", \"title\": \"Packs\" }, { \"key\": \"done\", \"title\": \"Already ruled\" } ], \"items\": [ { \"id\": \"R01\", \"kind\": \"residual\", \"group\": \"fix\", \"proseOnly\": true, \"proposal\": \"fix\", \"what\": \"The cart total's header says every total is rounded\", \"detail\": \"A total in a zero-decimal currency is not.\", \"where\": \"src/cart/total.js · total\", \"source\": \"### prose sweep: B02 R1 SWEEP 1\" }, { \"id\": \"R02\", \"kind\": \"residual\", \"group\": \"reg\", \"proposal\": \"register\", \"what\": \"A cart total drops the discount on a reload\", \"where\": \"src/cart/store.js\", \"source\": \"### residual: B02 R1 — the store reloads without the code\", \"entry\": { \"id\": \"TD-016\", \"rulingId\": \"RL-005\", \"title\": \"A cart total drops the discount on a reload\", \"kind\": \"behaviour\", \"files\": [\"src/cart/total.js\", \"src/cart/store.js\"], \"tests\": [\"tests/cart/total.test.js\"], \"failure\": \"a shopper who reloads the cart page with a discount code applied sees the full price, and is charged it.\", \"doneWhen\": \"a reload with a code applied shows the discounted total, and a test that reloads the store asserts it.\", \"from\": \"B02 round 1\" } }, { \"id\": \"R03\", \"kind\": \"residual\", \"group\": \"reg\", \"proposal\": \"decline\", \"what\": \"The coupon parser could be a grammar\", \"source\": \"### residual: B03 R1 — parser shape\", \"entry\": { \"rulingId\": \"RL-006\", \"title\": \"Rewrite the coupon parser as a grammar\", \"files\": [\"src/coupons/parse.js\"] } }, { \"id\": \"TD-009\", \"kind\": \"expired\", \"group\": \"old\", \"proposal\": \"keep\", \"what\": \"The receipt footer misaligns on narrow printers\", \"source\": \"TD-009, since 2026-01-30\" }, { \"id\": \"P1\", \"kind\": \"pack\", \"group\": \"pack\", \"proposal\": \"skip\", \"what\": \"src/cart/total.js holds 5 to-do items\", \"source\": \"PACK src/cart/total.js 5: TD-004, TD-007, TD-011, TD-014, TD-016\" }, { \"id\": \"SCAN-3\", \"kind\": \"residual\", \"group\": \"done\", \"ruled\": \"Leave open, high priority\", \"what\": \"A refund can show as not refunded\", \"source\": \"### residual: B04 R1 — refund read\" } ] }"],
+  ["orchestrate/references/ruling-page.md","- node \"<skill-dir>/tools/build-ruling-page.mjs\" read <ledger>/ruling.json <paste file> --entries checks the saved paste: RULINGS OK with one line per outcome given (FIX, REGISTER, ACCEPT, DECLINE, LOG, KEEP, DROP, TAKE, SKIP, each with its ids), then the CHANGED and NOTED rows and the general NOTE;"],
+  ["orchestrate/references/ruling-page.md","--entries also prints the entries the rulings write, dated --today <YYYY-MM-DD> or the sidecar's date, after --- backlog entries and --- rulings entries, each read by backlog.mjs's own parser first;"],
+  ["orchestrate/references/protocol.md","On \"continue\" with nothing active: reconcile, report completion, and point at the backlog for follow-ups."],
+  ["orchestrate/references/scaffolding.md","Backlog sweep — read the repo's backlog / feature / bug files and propose fold-ins;"],
+  ["orchestrate/references/scaffolding.md","a backlog file in the form of the pinned skill's references/backlog.md is read as the to-do list, and the rulings file is never read here."],
+  ["orchestrate/references/scaffolding.md","A prose-only item — every path it changes is Markdown, or JavaScript that prose-only-diff.mjs reads as PROSE-ONLY, and none is a file agents read as instructions (the project's agent instructions wherever they load from, anything under .claude/, a skill's own Markdown) or prose that is a contract — is exempt from (d): it folds in with no per-batch cap and onto a batch of any weight, (a) still keeping waves disjoint, and the plan's Backlog fold-ins section marks its line (prose-only)."],
+  ["orchestrate/references/scaffolding.md","Eligibility comes from the entry and the proof from the batch gate (protocol.md), which reverts a fold-in commit that does not classify as prose-only and returns its item to the backlog."],
+  ["orchestrate/references/scaffolding.md","coverage rows tagged backlog <id>), gets its own checklist item, acceptance criterion and smoke step (a prose-only one no smoke step) in the host batch, and its own commit."],
+  ["orchestrate/references/scaffolding.md","Only the ACCEPTED items receive an id in the repo's scheme ({{BACKLOG_ID_PREFIX}});"],
+  ["orchestrate/references/scaffolding.md","the rest of the backlog is untouched."],
+  ["orchestrate/references/scaffolding.md","When the backlog file is in the form (it holds the form line), run node \"<SKILL_DIR>/tools/backlog.mjs\" packs --backlog <the backlog file> --threshold <the pack threshold> (the interview's {{PACK_THRESHOLD}}): each file it prints that the draft plan touches is proposed as an extra batch, holding that file's to-do items, in a later wave than the plan's batch on that file — proposed, never run unasked, and picked at PLAN APPROVAL like the fold-ins;"],
+  ["orchestrate/references/scaffolding.md","When backlog.mjs prints UNKNOWN instead (a backlog not yet in the form, or none), no pack is proposed and the plan's Backlog fold-ins section says so in one line."],
+  ["orchestrate/references/scaffolding.md","- sections — one Markdown text per instruction comment outside 02-batch.md, keyed <template> <heading line> (01-plan.md ## Backlog fold-ins);"],
+  ["orchestrate/references/scaffolding.md","Scaffold commit — batch 00 = the ledger itself (plus the ids written onto accepted fold-ins in the backlog file), committed on chore/{{CHANGE_SLUG}}-ledger, which becomes the INTEGRATION BRANCH every wave stacks onto."],
+  ["orchestrate/references/scaffolding.md","scaffold.mjs has already ended each accepted fold-in's backlog line (inside a table row's last cell) with Folded into <CHANGE_ID> <Bnn>., an item named by its \"anchor\" first taking the next id of the {{BACKLOG_ID_PREFIX}} scheme in that file;"],
+  ["orchestrate/references/scaffolding.md","| {{BACKLOG_FILE}} | template (READBEFORE) | detected (BACKLOG.md, TODO.md, issue tracker) or BACKLOG.md (create on first residual) |"],
+  ["orchestrate/references/scaffolding.md","| {{BACKLOG_ID_PREFIX}} | template (READBEFORE) | detected id scheme in the backlog files (SCAN-6, #3.5, BL-017 …) or BL- when none;"],
+  ["orchestrate/references/scaffolding.md","| {{RULINGS_FILE}} | template (READBEFORE) | the interview — the file holding the user's rulings in the form of references/backlog.md;"],
+  ["orchestrate/references/scaffolding.md","default RULINGS.md beside the backlog file, created at the first ruling;"],
+  ["orchestrate/references/scaffolding.md","| {{PACK_THRESHOLD}} | template (READBEFORE) | the interview — the count of to-do items on one file at or over which the backlog sweep proposes a pack (backlog.mjs packs --threshold <n>), a whole number;"],
+  ["orchestrate/references/scaffolding.md","| {{BACKLOG_EXPIRY}} | template (READBEFORE) | the interview — the days after its Since: date past which a to-do item has expired (backlog.mjs expired --days <n>), a whole number;"],
+  ["orchestrate/references/scaffolding.md","| Conventions / prohibitions / guardrails / backlog | project CLAUDE.md, CONTRIBUTING.md, .claude/ docs;"],
+  ["orchestrate/references/scaffolding.md","files named BACKLOG/TODO/BUGS/FEATURE;"],
+  ["orchestrate/references/scaffolding.md","the id pattern their entries carry | {{REPO_CONVENTIONS}}, {{EXTRA_PROHIBITIONS}}, {{GUARDRAILS_REF}}, {{BACKLOG_FILE}}, {{BACKLOG_ID_PREFIX}} |"],
+  ["orchestrate/references/scaffolding.md","Confirm the backlog id scheme, the rulings file, the pack threshold and the backlog expiry."],
+  ["orchestrate/references/scaffolding.md","only if detection found no guardrails section or backlog file: create them at first close-out? (default yes)."],
+  ["orchestrate/references/scaffolding.md","Defaults for a repo's FIRST ledger under this contract (the pilot): always on — the mechanical fence check, failing-on-base, plan pre-flight, the backlog sweep, the metrics token."],
+  ["orchestrate/references/smoke-page-template.html","It goes to the backlog."],
+  ["orchestrate/references/smoke-page-template.html","failure, never counts against the build, goes to the backlog."],
+  ["orchestrate/references/smoke-page-template.html","goes to the backlog.\""],
+  ["orchestrate/references/smoke-page-template.html",": marked || agent === \"stale\" ? \"rerun\" : \"todo\";"],
+  ["orchestrate/references/smoke-page-template.html","var c = { pass: 0, fail: 0, blocked: 0, change: 0, carried: 0, rerun: 0, pre: 0, todo: 0 };"],
+  ["orchestrate/references/smoke-page-template.html","document.getElementById(\"t-todo\").textContent = c.todo;"],
+  ["orchestrate/references/smoke-page-template.html","if (kind === \"todo\" || kind === \"rerun\") {"],
+  ["orchestrate/references/smoke-page-template.html","\" · needs re-run \" + c.rerun + \" · pre-verified only \" + c.pre + \" · not run \" + c.todo + \" of \" + TOTAL);"],
+  ["orchestrate/references/subagent-prompts.md","commit on your batch branch with a conventional message (\"[TYPE]: <summary> (batch [NN])\") — one separate commit per backlog fold-in item, its message carrying the item's id."],
+  ["orchestrate/references/subagent-prompts.md","The count has a blind spot: node counts a test file that registers no tests as one passing test named after the file, which the harness reports as a file that ran no tests unless node names it by a relative path whose first segment holds a space (my file.test.js, my dir/a.test.js) — there a mutation after which a one-test file registers nothing does not change the count and reads SURVIVED, so before you cite a SURVIVED line, check its run in the log for a scoped test file reported under its own file name."],
+  ["orchestrate/references/subagent-prompts.md","Then grep the repository's backlog and bug trackers and its old ledgers under .agents/ for every file this batch changes or depends on and for its main symbols;"],
+  ["orchestrate/templates/00-READBEFORE.md","- Backlog: {{BACKLOG_FILE}} is the to-do list, an item registering there only past the bar of the pinned skill's references/backlog.md, with ids in the {{BACKLOG_ID_PREFIX}} scheme;"],
+  ["orchestrate/templates/00-READBEFORE.md","expiry {{BACKLOG_EXPIRY}} days."],
+  ["orchestrate/templates/00-request.md","Accepted backlog fold-ins are decisions too: folded from <file> <id> — approved <date>."],
+  ["orchestrate/templates/00-request.md","Source = \"request\" or \"backlog <id>\"."],
+  ["orchestrate/templates/01-plan.md","## Backlog fold-ins"],
+  ["orchestrate/templates/01-plan.md","<!-- Accepted at plan approval, one line each: <id> — <backlog text, verbatim> → B<NN> (files ⊆ that batch's fence, machine-verifiable, one-line criterion, ≤2 per batch, none on L batches)."],
+  ["orchestrate/templates/01-plan.md","A prose-only item ends its line with the marker: <id> — <backlog text, verbatim> → B<NN> (prose-only);"],
+  ["orchestrate/templates/01-plan.md","where backlog.mjs packs prints UNKNOWN, one line says no pack was proposed."],
+  ["orchestrate/templates/02-batch.md","Backlog fold-ins appear as their own sub-heading with the item's id and verbatim backlog text."],
+  ["orchestrate/templates/LOG.md","pre-flight findings and how each was resolved, backlog fold-ins considered and rejected (with the reason), wave-map reasoning beyond the plan's one-liners, environment facts verified."],
+  ["orchestrate/templates/PROGRESS.md","Source = \"request\" or \"backlog <id>\" for an accepted fold-in."],
+];
+test('the skill\'s shipped text names the backlog only in the units BACKLOG_UNITS lists', () => {
+  const files = backlogFiles();
+  assert.ok(['orchestrate/SKILL.md', PROTOCOL_PATH, 'orchestrate/references/smoke-page.md', 'orchestrate/references/smoke-page-template.html',
+    'orchestrate/references/execution-models.md', 'orchestrate/references/backlog.md', TEMPLATE].every(file => files.includes(file)),
+    'the domain is every shipped Markdown file and the smoke page');
+  assert.deepEqual(shipped().filter(file => !files.includes(file) && !/\.(?:mjs|cjs|js)$/.test(file)), [], 'every shipped file left out is code');
+  const faults = texts => closedFaults(texts, unit => BACKLOG_WORD.test(unit), BACKLOG_UNITS);
+  const as = (put = () => '') => files.map(file => [file, backlogText(file, read(file) + put(file))]);
+  const whole = as();
+  assert.deepEqual(faults(whole), []);
+  // Live: each direct registration, in the skill's words with and without "backlog", appended to each carrier the
+  // template and the page among them, is reported there alone; a listed unit reworded is reported with its listed form gone.
+  const DIRECT = ['A works-but verdict is written to the backlog file as a named entry at once, with no ruling.',
+    'A works-but verdict is also added to the to-do list at once, with no ruling.',
+    'The orchestrator registers each works-but verdict itself at once, with no ruling.',
+    'Works-but verdicts are written to {{BACKLOG_FILE}} at once, with no ruling.'];
+  const carriers = ['orchestrate/SKILL.md', PROTOCOL_PATH, 'orchestrate/references/smoke-page.md', 'orchestrate/references/execution-models.md',
+    TEMPLATE, 'orchestrate/references/smoke-page-template.html'];
+  const planted = carriers.flatMap(carrier => DIRECT.map(direct => [carrier, direct]));
+  assert.deepEqual(planted.map(([carrier, direct]) => faults(as(file => file === carrier ? '\n\n' + direct + '\n' : ''))),
+    planted.map(([carrier, direct]) => [carrier + ' :: ' + direct]), 'a direct registration planted in each carrier must be reported');
+  const [file, unit] = BACKLOG_UNITS.find(([, listed]) => listed.startsWith('An item enters it only through'));
+  const reworded = whole.map(([f, text]) => [f, f === file ? text.replace('An item enters it only through', () => 'An item enters it through') : text]);
+  assert.deepEqual(faults(reworded), [file + ' :: ' + unit.replace('An item enters it only through', 'An item enters it through'), 'gone: ' + file + ' :: ' + unit]);
+});
+
+// Step 6's report check as protocol.md publishes it: the one code span holding --report, taken from step 6 alone and
+// found nowhere else in the file, its placeholders filled (filledCommand) and run as those bytes (runCommand) on the
+// tool the skill copy with a space in its path holds, against a report file in the implementer skeleton's shape whose
+// own path holds a space. Its line is judged by the verdict form the same step publishes, the status words read from
+// the skeletons by the tool's own reportRules; the control gives another nonce, which the same file must fail, and a
+// fix-up report, which has no nonce line, passes the span run without its --nonce.
+test('step 6 publishes the report check once, and it runs as published: its own verdict form on the nonce given, REPORT FAIL on another', async t => {
+  const text = read(PROTOCOL_PATH), step6 = section(text, '\n6. Gate PER BATCH', '\n   - **6a ');
+  const spans = [...step6.matchAll(/`([^`\n]*--report[^`\n]*)`/g)].map(m => m[1]);
+  assert.equal(spans.length, 1, 'step 6 publishes the --report command once, in one code span on one line: ' + JSON.stringify(spans));
+  // Every Markdown file the orchestrator reads, README included, bound to the checkout: the span is step 6's alone.
+  const markdown = documents().filter(file => file.endsWith('.md'));
+  assert.ok(['orchestrate/SKILL.md', PROTOCOL_PATH, PROMPTS, 'README.md'].every(file => markdown.includes(file)), 'the span count reads the whole Markdown domain');
+  const reportSpans = markdown.flatMap(file => [...read(file).matchAll(/`[^`\n]*--report[^`\n]*`/g)].map(() => file));
+  assert.deepEqual(reportSpans, [PROTOCOL_PATH], 'the --report command is published once, in protocol.md step 6, and in no other document');
+  const forms = [...step6.matchAll(/`(REPORT <status>[^`\n]*)`/g)].map(m => m[1]);
+  assert.equal(forms.length, 1, 'step 6 publishes the verdict form once: ' + JSON.stringify(forms));
+  const { reportRules } = await promptTool();
+  const { statuses } = reportRules(read(PROMPTS));
+  const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const VERDICT = new RegExp('^' + forms[0].split(/(<status>|<n>|<m>)/).map(part => part === '<status>' ? '(?:' + statuses.join('|') + ')'
+    : part === '<n>' || part === '<m>' ? '\\d+' : escape(part)).join('') + '\n$');
+  const { temp, env, skillDir } = fixture(t);
+  const reports = path.join(temp, 'report files'); fs.mkdirSync(reports);
+  const file = path.join(reports, 'B05 implementer.md'), fixUp = path.join(reports, 'B05 fix-up.md'), NONCE = 'c4c59f7a04c3';
+  fs.writeFileSync(file, ['### B05 R1 implementer findings', 'DONE', 'NONCE ' + NONCE, 'EVIDENCE: PASS tests 9/9 (1s) exit 0',
+    'commit 0123abc; checklist 6/6', '', 'What changed and why.', ''].join('\n'));
+  fs.writeFileSync(fixUp, ['### B05 R1 fix-up findings', 'DONE', 'EVIDENCE: PASS tests 9/9 (1s) exit 0',
+    'commit 0123abc; checklist 2/2', '', 'What changed and why.', ''].join('\n'));
+  const values = (report, nonce) => ({ '<skill-dir>': slash(skillDir), '<file>': slash(report), ...(nonce === undefined ? {} : { '<nonce>': nonce }) });
+  const run = nonce => runCommand(filledCommand(spans[0], values(file, nonce)), temp, env);
+  const passed = run(NONCE);
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+  assert.match(passed.stdout, VERDICT, 'the tool prints the verdict form step 6 publishes');
+  assert.equal(passed.stdout, 'REPORT DONE checklist 6/6\n');
+  const other = run('0123456789ab');
+  assert.equal(other.status, 1, other.stdout + other.stderr);
+  assert.match(other.stdout, /^REPORT FAIL line 3 /);
+  assert.doesNotMatch(other.stdout, VERDICT, 'a failed check is not the published verdict form');
+  // The fix-up case the sentence names: the span with its --nonce flag dropped, as the sentence says.
+  const NONCE_FLAG = ' --nonce <nonce>';
+  assert.ok(spans[0].endsWith(NONCE_FLAG), 'the span ends with its --nonce flag: ' + spans[0]);
+  const bare = runCommand(filledCommand(spans[0].slice(0, -NONCE_FLAG.length), values(fixUp)), temp, env);
+  assert.equal(bare.status, 0, bare.stdout + bare.stderr);
+  assert.match(bare.stdout, VERDICT);
+});
+
+// The two reversals of the report file the pins above cannot see outside their bounds: a final message that carries the
+// report again, and an orchestrator that reads the report file in full. Each fires only where no negator governs it
+// (fires(), the undo sweep's reader), over every shipped Markdown file and README; each specimen is reported once.
+const REPORT_REVERSALS = [
+  ['a final message carrying the report', /\bfinal message\s+(?:also\s+)?(?:carr(?:y|ies|ied)|hold(?:s|ing)?|contain(?:s|ing)?|includ(?:e|es|ing)|is)\b[^.;:]*\b(?:full|whole|entire)\s+report\b/i,
+    'Its final message also carries the full report.'],
+  ['the orchestrator reading the report file in full', /\breads?\b[^.;:]*\breport files?\b[^.;:]*\bin full\b/i, 'The orchestrator reads the report file in full first.'],
+];
+const reportReversals = text => clauses(unticked(text)).flatMap(c => REPORT_REVERSALS.filter(([, p]) => fires(p, c)).map(([name]) => name + ' — ' + c));
+test('no document lets a final message carry the report or the orchestrator read the report file in full', () => {
+  const markdown = documents().filter(file => file.endsWith('.md'));
+  assert.ok(['orchestrate/SKILL.md', PROTOCOL_PATH, PROMPTS, 'README.md'].every(file => markdown.includes(file)));
+  const hits = markdown.flatMap(file => reportReversals(read(file)).map(hit => file + ' :: ' + hit));
+  assert.deepEqual(hits, []);
+  // Must pass: protocol.md's own rule and its negations.
+  assert.deepEqual(reportReversals('The orchestrator never reads the report file in full. The final message never carries the full report.'), []);
+  // Live controls: each specimen planted where the gate's mutations put it, next to the rule it reverses, is reported once by its family alone.
+  const text = read(PROTOCOL_PATH);
+  for (const [[name, , specimen], anchor] of [[REPORT_REVERSALS[0], 'Wave siblings run concurrently. '], [REPORT_REVERSALS[1], 'resume the implementer for it (not a round). ']]) {
+    assert.equal(text.split(anchor).length - 1, 1, 'the control anchor must occur once: ' + anchor);
+    assert.deepEqual(reportReversals(text.replace(anchor, () => anchor + specimen + ' ')).map(hit => hit.split(' — ')[0]), [name], 'must be reported: ' + specimen);
+  }
 });

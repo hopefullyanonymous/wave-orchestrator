@@ -262,9 +262,9 @@ test('the checklist reader: items, wrapped lines, polish items, deferrals, comme
 const LEDGER_ID = 'FIX-1', LEDGER_DIR = `.agents/changes/${LEDGER_ID}`, INTEGRATION = 'refs/heads/int';
 const contractText = (source, ref = 'refs/heads/main', integration = 'int') => `# Contract\n\n## Git model\n\n- Default branch (protected local ref): \`refs/heads/main\`. Integration branch: \`${integration}\` — the ledger branch.\n- Shipment source: \`${source}\`. Shipment ref: \`${ref}\` — the target.\n\n## Other\n`;
 const batchText = id => `# ${id} — work\n\n**Branch**: \`feat/${id.toLowerCase()}\`\n\n## Checklist\n\n- [ ] first item\n- [ ] second item\n  wraps under it\n\n## Acceptance criteria\n\n- done\n`;
-const progressText = (rows, checkpoint = '| C1 | 2 | all | final | ⬜ | — |') => `# Progress\n\n**State**: ACTIVE\n\n## Batches\n\n| # | Batch | Branch | Wave | Version | Status | Updated | Notes |\n|---|---|---|---|---|---|---|---|\n`
+const progressText = (rows, checkpoint = '| C1 | 2 | all | final | ⬜ | — |', session = '') => `# Progress\n\n**State**: ACTIVE\n\n## Batches\n\n| # | Batch | Branch | Wave | Version | Status | Updated | Notes |\n|---|---|---|---|---|---|---|---|\n`
   + rows.map(r => `| ${r.id} | work | \`${r.branch}\` | ${r.wave ?? 1} | — | ${r.status} | 2026-09-27 | ${r.notes ?? '—'} |`).join('\n')
-  + `\n\n## Checkpoints\n\n| Checkpoint | After wave | Covers | Why here | Status | Verdict |\n|---|---|---|---|---|---|\n${checkpoint}\n\n## Session log\n\n| Date | Did | Stopped |\n|---|---|---|\n`;
+  + `\n\n## Checkpoints\n\n| Checkpoint | After wave | Covers | Why here | Status | Verdict |\n|---|---|---|---|---|---|\n${checkpoint}\n\n## Session log\n\n| Date | Did | Stopped |\n|---|---|---|\n${session}`;
 
 function repository(t) {
   const repo = makeRepo(t);
@@ -336,7 +336,7 @@ function ledgerFixture(t, specs, source = 'remote origin') {
     if (!s.worktree) repo.git('worktree', 'remove', wt); else respell(repo, wt);
   }
   for (const s of specs.filter(s => s.merge)) repo.git('merge', '-q', '--no-ff', '-m', `merge ${s.id}`, s.branch);
-  const write = (rowsOf = specs, checkpoint) => { repo.write(`${LEDGER_DIR}/PROGRESS.md`, progressText(rowsOf.map(s => ({ ...s, notes: typeof s.notes === 'function' ? s.notes((tips[s.id] ?? '').slice(0, 7), tips) : s.notes })), checkpoint)); return repo.commit('progress'); };
+  const write = (rowsOf = specs, checkpoint, session) => { repo.write(`${LEDGER_DIR}/PROGRESS.md`, progressText(rowsOf.map(s => ({ ...s, notes: typeof s.notes === 'function' ? s.notes((tips[s.id] ?? '').slice(0, 7), tips) : s.notes })), checkpoint, session)); return repo.commit('progress'); };
   write();
   return { repo, tips, write };
 }
@@ -539,6 +539,239 @@ test('rows through a skill copy: a drifted table refuses with one UNKNOWN line, 
     reworded: mutate(PROTOCOL, r => { r[9] = recell(r[9], 0, c => c.replace('🔄', '🔄 or 🟢')); return r; }),
   };
   for (const [name, text] of Object.entries(drifts)) assert.deepEqual(cli(repo, args, skillCopy(t, text)), { status: 2, lines: [TABLE_DRIFT] }, name);
+  // The digest prints rows' verdict lines, so a drifted table stops it the same way.
+  const digest = ['digest', ...args.slice(1)];
+  assert.equal(cli(repo, digest, skillCopy(t, PROTOCOL)).status, 0, 'the control: the digest runs on the checkout table');
+  assert.deepEqual(cli(repo, digest, skillCopy(t, drifts.swapped)), { status: 2, lines: [TABLE_DRIFT] });
+});
+
+// ===== digest =============================================================================
+async function digestOf(repo, listWorktrees) {
+  const { reconcileDigest } = await api, before = observe(repo);
+  const r = reconcileDigest({ repo: repo.cwd, ledger: LEDGER_ID, integration: INTEGRATION, protocolText: PROTOCOL, env: repo.env, ...(listWorktrees ? { listWorktrees } : {}) });
+  assert.deepEqual(observe(repo), before, 'an in-process digest changes no ref, worktree or status');
+  return r;
+}
+const digestArgs = repo => ['digest', '--repo', repo.cwd, '--ledger', LEDGER_ID, '--integration', INTEGRATION];
+const fileOf = id => `${LEDGER_DIR}/02-batches-${id.slice(1)}-work.md`;
+const NEWEST = '| 2026-09-28 | W2 opened: B03 cut, R2 SHIP | (in progress) |';
+const DIGEST_SPECS = [
+  { id: 'B01', status: '🟢', branch: 'feat/b01', make: 'full', merge: true, notes: 'fix-up pending: fix/B01-c1-followup → fix-up pending: fix/B01-c1-followup-2' },
+  { id: 'B02', status: '✅', branch: 'feat/b02', make: 'full', merge: true },
+  { id: 'B03', status: '🔄', branch: 'feat/b03', make: 'full', worktree: true, wave: 2, notes: tip => `R1 FIX FIRST @${tip} → R2 SHIP @${tip} asks=1 → deferred to W3: second item (\`x.md\`)` },
+  { id: 'B04', status: '⬜', branch: 'feat/b04', wave: 2, notes: 'tip repair capped: fix/B04-tip' },
+  { id: 'B07', status: '⬜', branch: 'feat/b07', wave: 3 },
+];
+
+test('digest: State and tip, the integration worktree, the open wave\'s members, the next checkpoint, rows\' lines with every marker, the newest session row', async t => {
+  const { repo, tips, write } = ledgerFixture(t, DIGEST_SPECS);
+  write(DIGEST_SPECS, '| C1 | 1 | B01, B02 | wave 1 | ✅ | pass |\n| C2 | W2 | B03, B04 | wave 2 | ⬜ | — |\n| C3 | 3 | B07 | final | ⬜ | — |',
+    `| 2026-09-27 | Scaffold | done |\n${NEWEST}\n`);
+  const v = await verdicts(), b03 = tips.B03.slice(0, 7);
+  const reconciled = [`B01 🟢 row 16: ${v[15]}`, '  fix-up pending: fix/B01-c1-followup', '  fix-up pending: fix/B01-c1-followup-2',
+    `B03 🔄 row 7: ${v[6]}`, `  R1 FIX FIRST @${b03}`, `  R2 SHIP @${b03} asks=1`, '  deferred to W3: second item (`x.md`)',
+    `B04 ⬜ row 3: ${v[2]}`, '  tip repair capped: fix/B04-tip', `B07 ⬜ row 26: ${v[25]}`];
+  const expected = [`DIGEST ${LEDGER_ID} State=ACTIVE tip=${repo.git('rev-parse', 'refs/heads/int').slice(0, 7)}`, `WORKTREE ${repo.cwd}`,
+    'WAVE 2 open', `MEMBER B03 🔄 \`feat/b03\` ${fileOf('B03')}`, `MEMBER B04 ⬜ \`feat/b04\` ${fileOf('B04')}`, 'NEXT C2 after wave 2 covers B03,B04',
+    ...reconciled, `SESSION ${NEWEST}`];
+  assert.deepEqual(await digestOf(repo), { code: 0, lines: expected });
+  // As published, once: the same lines and exit code.
+  assert.deepEqual(cli(repo, digestArgs(repo)), { status: 0, lines: expected });
+  // The verdict lines are the ones `rows` prints for the same rows, header aside.
+  assert.deepEqual(expected.filter(l => /^B\d+ /.test(l)), (await rows(repo)).lines.slice(1));
+  // The ledger, its listing included, is read at the tip, never at HEAD: with the main checkout on main, whose tree holds
+  // no ledger, only the WORKTREE line changes.
+  repo.git('checkout', '-q', 'main');
+  assert.equal(fs.existsSync(path.join(repo.cwd, LEDGER_DIR)), false, 'the control: main\'s tree holds no ledger');
+  assert.deepEqual(await digestOf(repo), { code: 0, lines: expected.map(l => l.startsWith('WORKTREE ') ? 'WORKTREE none' : l) });
+  repo.git('checkout', '-q', 'int');
+  // Read at the tip, never in the checkout: an uncommitted PROGRESS edit there, another State and a newer row, changes no line.
+  const file = path.join(repo.cwd, LEDGER_DIR, 'PROGRESS.md'), committed = fs.readFileSync(file, 'utf8'), anchor = '**State**: ACTIVE\n';
+  assert.ok(committed.split(anchor).length === 2 && committed.endsWith(`${NEWEST}\n`), 'the edit\'s anchors occur once');
+  fs.writeFileSync(file, committed.split(anchor).join('**State**: PAUSED\n') + '| 2026-09-29 | uncommitted | — |\n');
+  assert.deepEqual(await digestOf(repo), { code: 0, lines: expected });
+  // The CRLF twin, committed byte for byte: the same lines and exit code, the tip aside.
+  fs.writeFileSync(file, committed.split('\n').join('\r\n'));
+  const crlf = repo.commit('PROGRESS.md in CRLF');
+  const blob = repo.git('cat-file', 'blob', `${crlf}:${LEDGER_DIR}/PROGRESS.md`);
+  assert.ok(blob.includes(`\r\n${NEWEST}`) && !/[^\r]\n/.test(blob), 'the tip holds the CRLF twin, every line break CRLF');
+  assert.deepEqual(await digestOf(repo), { code: 0, lines: [`DIGEST ${LEDGER_ID} State=ACTIVE tip=${crlf.slice(0, 7)}`, ...expected.slice(1)] });
+});
+
+test('digest: every Notes marker of every family prints, in the order written, never only the latest', async t => {
+  const { repo, tips, write } = ledgerFixture(t, [{ id: 'B01', status: '⬜', branch: 'feat/b01' }]);
+  const at = tips.base.slice(0, 7);
+  const markers = [`R1 FIX FIRST @${at}`, 'verdict 2026-09-01 fix again spent', `third round on feat/b01 @${at}`, 'tip repair capped: fix/B01-tip',
+    'verdict 2026-09-02 ship spent', `pre-smoke repair pending: step 3, fix/B01-pre @${at}`, `polish discarded: @${at}`, 'fix-up pending: fix/B01-c1-followup',
+    'fix-up pending: fix/B01-c1-followup-2', 'deferred to W2: an item (`x.md`)', `R2 SHIP @${at} asks=2`];
+  // One marker written with a doubled inner space prints flattened, as readNotes reads it.
+  const written = markers.join(' → '), last = `R2 SHIP @${at} asks=2`;
+  assert.equal(written.split(last).length, 2, 'the doubled-space anchor occurs once');
+  write([{ id: 'B01', status: '⬜', branch: 'feat/b01', notes: written.split(last).join(`R2 SHIP @${at}  asks=2`) }]);
+  const lines = (await digestOf(repo)).lines, row = lines.findIndex(l => l.startsWith('B01 '));
+  assert.equal(lines[row], (await rows(repo)).lines[1], 'the row\'s line is rows\' own');
+  assert.deepEqual(lines.slice(row + 1, -1), markers.map(m => '  ' + m));
+  const { readNotes } = await api, read = readNotes(markers.join(' → '));
+  assert.ok(read.fixupBranch === 'fix/B01-c1-followup-2' && read.latestRound.k === 2, 'the control: readNotes keeps only the latest of these');
+});
+
+test('digest: a row it cannot reconcile is followed by its markers too', async t => {
+  const { repo } = ledgerFixture(t, [{ id: 'B01', status: '🔄', branch: 'feat/b01', make: 'full', notes: 'R1 SHIP @0000000 → deferred to W2: an item (`x.md`)' }]);
+  const r = await digestOf(repo), row = r.lines.findIndex(l => l.startsWith('B01 '));
+  assert.equal(r.lines[row], 'B01 🔄 UNKNOWN round: @0000000 is not a commit here');
+  assert.equal(r.lines[row], (await rows(repo)).lines[1], 'the row\'s line is rows\' own');
+  assert.deepEqual({ code: r.code, markers: r.lines.slice(row + 1, -1) }, { code: 2, markers: ['  R1 SHIP @0000000', '  deferred to W2: an item (`x.md`)'] });
+});
+
+test('digest: WORKTREE names the integration branch\'s holder in native spelling, none only from a complete listing, UNKNOWN otherwise', async t => {
+  const { repo } = ledgerFixture(t, [{ id: 'B01', status: '🟢', branch: 'feat/b01', make: 'full', merge: true }]);
+  const base = await digestOf(repo), others = base.lines.filter((_, i) => i !== 1);
+  assert.equal(base.code, 0, base.lines.join('\n'));
+  const worktreeLine = async list => { const r = await digestOf(repo, list); assert.deepEqual(r.lines.filter((_, i) => i !== 1), others); return [r.code, r.lines[1]]; };
+  assert.deepEqual(await worktreeLine(), [0, `WORKTREE ${repo.cwd}`], 'the main checkout holds int');
+  // A partial listing is UNKNOWN beside a live holder too: another worktree's directory gone, the main checkout still on int.
+  const other = path.join(repo.root, 'wt-other');
+  repo.git('worktree', 'add', '-q', '-b', 'feat/other', other, 'int');
+  assert.deepEqual(await worktreeLine(), [0, `WORKTREE ${repo.cwd}`], 'the control: another live worktree changes nothing');
+  fs.rmSync(other, { recursive: true, force: true });
+  assert.deepEqual(await worktreeLine(), [2, 'WORKTREE UNKNOWN the worktree listing is partial: worktree-unavailable']);
+  repo.git('worktree', 'prune');
+  repo.git('checkout', '-q', '--detach');
+  assert.deepEqual(await worktreeLine(), [0, 'WORKTREE none']);
+  const wt = path.join(repo.root, 'wt-int');
+  repo.git('worktree', 'add', '-q', wt, 'int'); respell(repo, wt);
+  assert.deepEqual(await worktreeLine(), [0, `WORKTREE ${wt}`]);
+  // Its directory gone, git lists the record prunable and its status cannot be read: the listing is partial.
+  fs.rmSync(wt, { recursive: true, force: true });
+  assert.deepEqual(await worktreeLine(), [2, 'WORKTREE UNKNOWN the worktree listing is partial: worktree-unavailable']);
+  repo.git('worktree', 'prune');
+  // On a complete listing, records planted beside the real ones: a prunable holder is never offered.
+  const listed = (await evidence).worktrees({ repo: repo.cwd, env: repo.env }), held = path.join(repo.root, 'held');
+  assert.equal(listed.completeness, 'complete');
+  const record = (prunable, at = held) => ({ path: at, head: null, branch: INTEGRATION, cleanliness: 'unknown', status: [], bare: false, prunable });
+  const planted = (...records) => () => ({ ...listed, evidence: { worktrees: [...listed.evidence.worktrees, ...records] } });
+  assert.deepEqual(await worktreeLine(planted(record(null))), [0, `WORKTREE ${held}`], 'the control: a live record is offered');
+  assert.deepEqual(await worktreeLine(planted(record('gitdir file points to non-existent location'))), [0, `WORKTREE none (prunable: ${held})`]);
+  assert.deepEqual(await worktreeLine(planted(record(null), record(null, held + '2'))), [2, `WORKTREE UNKNOWN 2 worktrees hold int: ${held}, ${held}2`]);
+  assert.deepEqual(await worktreeLine(planted({ ...record(null), bare: true })), [0, 'WORKTREE none'], 'a bare record holds no branch');
+  assert.deepEqual(await worktreeLine(() => ({ ...listed, completeness: 'unknown', diagnostics: [{ code: 'git-failed' }] })), [2, 'WORKTREE UNKNOWN the worktree listing is unknown: git-failed']);
+  assert.deepEqual(await worktreeLine(() => ({ evidence: { worktrees: [] }, diagnostics: [] })), [2, 'WORKTREE UNKNOWN the worktree listing is not graded: no diagnostic']);
+});
+
+test('digest: a Status cell, a Notes marker or a session row holding the word UNKNOWN is printed, and the digest exits 0', async t => {
+  const specs = [{ id: 'B01', status: '🟢', branch: 'feat/b01', make: 'full', merge: true }, { id: 'B02', status: '⬜', branch: 'feat/b02', wave: 2 }];
+  const { repo, write } = ledgerFixture(t, specs);
+  const VARIANTS = [['a Status cell', [specs[0], { ...specs[1], status: '⛔ green, residual finding open (an UNKNOWN cause)' }]],
+    ['a Notes marker', [specs[0], { ...specs[1], notes: 'deferred to W3: the UNKNOWN case (`x.md`)' }]],
+    ['a session row', specs, '| 2026-09-28 | rows printed UNKNOWN for B02 | asked |\n']];
+  const faults = [];
+  for (const [what, rowsOf, session] of VARIANTS) {
+    write(rowsOf, undefined, session);
+    const r = await digestOf(repo);
+    // The control: the pattern `rows` reads its own lines by would read this digest as 2.
+    if (r.code !== 0 || !r.lines.some(l => / UNKNOWN |^UNKNOWN /.test(l))) faults.push(what + ': ' + JSON.stringify(r));
+  }
+  assert.deepEqual(faults, []);
+});
+
+test('digest: each line it cannot establish, alone, prints UNKNOWN and exits 2', async t => {
+  const specs = [{ id: 'B01', status: '🟢', branch: 'feat/b01', make: 'full', merge: true }, { id: 'B02', status: '⬜', branch: 'feat/b02', wave: 2 }];
+  const { repo, write } = ledgerFixture(t, specs), v = await verdicts(), row = '| 2026-09-28 | W1 integrated | wave 2 next |';
+  const baseSha = write(specs, undefined, row + '\n');
+  const known = () => [`DIGEST ${LEDGER_ID} State=ACTIVE tip=${repo.git('rev-parse', 'refs/heads/int').slice(0, 7)}`, `WORKTREE ${repo.cwd}`, 'WAVE 2 next',
+    `MEMBER B02 ⬜ \`feat/b02\` ${fileOf('B02')}`, 'NEXT C1 after wave 2 covers all', `B01 🟢 row 16: ${v[15]}`, `B02 ⬜ row 26: ${v[25]}`, `SESSION ${row}`];
+  assert.deepEqual(await digestOf(repo), { code: 0, lines: known() }, 'the control: every line known');
+  const progress = () => fs.readFileSync(path.join(repo.cwd, LEDGER_DIR, 'PROGRESS.md'), 'utf8');
+  const swap = (find, replacement) => { const text = progress(); assert.equal(text.split(find).length, 2, 'the anchor occurs once: ' + find); repo.write(`${LEDGER_DIR}/PROGRESS.md`, text.split(find).join(replacement)); };
+  const replaced = (prefix, line) => l => l.map(x => x.startsWith(prefix) ? line : x);
+  const unknownState = why => l => [`${l[0].split('State=ACTIVE').join('State=UNKNOWN')} (${why})`, ...l.slice(1)];
+  const CASES = [
+    ['a repeated State line', () => swap('**State**: ACTIVE\n', '**State**: ACTIVE\n**State**: ACTIVE\n'), unknownState('the State line is repeated')],
+    ['a State in no accepted form', () => swap('**State**: ACTIVE\n', '**State**: PAUSED\n'), unknownState('State PAUSED is in no accepted form')],
+    ['no batch file for a member', () => fs.rmSync(path.join(repo.cwd, fileOf('B02'))), replaced('MEMBER B02', `MEMBER B02 ⬜ \`feat/b02\` UNKNOWN batch file: 0 match at the integration tip`)],
+    ['two batch files for a member', () => repo.write(`${LEDGER_DIR}/02-batches-02-more.md`, batchText('B02')), replaced('MEMBER B02', `MEMBER B02 ⬜ \`feat/b02\` UNKNOWN batch file: 2 match at the integration tip`)],
+    ['a Wave cell in no accepted form', () => swap('| `feat/b02` | 2 |', '| `feat/b02` | next |'), l => [...l.slice(0, 2), 'WAVE UNKNOWN wave: wave cell next is in no accepted form', ...l.slice(4)]],
+    ['a Status cell in no legend form', () => swap('| ⬜ | 2026-09-27 | — |', '| 🟡 | 2026-09-27 | — |'),
+      l => [...l.slice(0, 2), 'WAVE UNKNOWN status: a Status cell is in no legend form', ...l.slice(4, 6), 'B02 🟡 UNKNOWN status: the Status cell is in no legend form', l[7]]],
+    ['no Covers column', () => swap('| Checkpoint | After wave | Covers | Why here | Status | Verdict |\n|---|---|---|---|---|---|\n| C1 | 2 | all | final | ⬜ | — |',
+      '| Checkpoint | After wave | Why here | Status | Verdict |\n|---|---|---|---|---|\n| C1 | 2 | final | ⬜ | — |'), replaced('NEXT', 'NEXT C1 after wave 2 covers UNKNOWN: no Covers column')],
+    ['a Notes cell in no recorded form', () => swap('| ⬜ | 2026-09-27 | — |', '| ⬜ | 2026-09-27 | polish discarded: soon |'), replaced('B02 ', 'B02 ⬜ UNKNOWN notes: a discarded marker is not in its recorded form')],
+    ['no Session log heading', () => swap('## Session log\n', ''), replaced('SESSION', 'SESSION UNKNOWN PROGRESS.md holds 0 Session log headings, not one')],
+    ['two Session log headings', () => swap('## Session log\n', '## Session log\n\n## Session log\n'), replaced('SESSION', 'SESSION UNKNOWN PROGRESS.md holds 2 Session log headings, not one')],
+    ['a Session log with no table', () => swap(`| Date | Did | Stopped |\n|---|---|---|\n${row}\n`, ''), replaced('SESSION', 'SESSION UNKNOWN the Session log holds no table')],
+    ['a Session log table with no separator row', () => swap('| Date | Did | Stopped |\n|---|---|---|\n', '| Date | Did | Stopped |\n'), replaced('SESSION', 'SESSION UNKNOWN the Session log holds no table')],
+    ['a contract naming another integration branch', () => repo.write(`${LEDGER_DIR}/00-READBEFORE.md`, contractText('remote origin', 'refs/heads/main', 'other')),
+      l => [l[0], l[1], 'UNKNOWN contract: its integration branch is other, not int', l[l.length - 1]]],
+    ['an unreadable PROGRESS', () => fs.rmSync(path.join(repo.cwd, LEDGER_DIR, 'PROGRESS.md')), l => [...unknownState('PROGRESS.md cannot be read at the integration tip')(l).slice(0, 2),
+      `UNKNOWN ledger: ${LEDGER_DIR}/PROGRESS.md cannot be read at the integration tip`, 'SESSION UNKNOWN PROGRESS.md cannot be read at the integration tip']],
+    // Known, the boundary's other side: an empty Session log is a fact, not a doubt.
+    ['an empty Session log', () => swap(`${row}\n`, ''), replaced('SESSION', 'SESSION none'), 0],
+    // Known: a section after the Session log ends it, its table no session row.
+    ['a section with a table after the Session log', () => swap(`${row}\n`, `${row}\n\n## Notes\n\n| Item | Batch |\n|---|---|\n| x | B01 |\n`), l => l, 0],
+    // Known too: every accepted State form beside ACTIVE, no State line among them.
+    ...[['AT-CHECKPOINT C1', '**State**: AT-CHECKPOINT C1\n'], ['USER-BLOCKED', '**State**: USER-BLOCKED\n'], ['COMPLETE', '**State**: COMPLETE\n'], ['none', '']]
+      .map(([state, line]) => [`State ${state}`, () => swap('**State**: ACTIVE\n', line), l => [l[0].split('State=ACTIVE').join(`State=${state}`), ...l.slice(1)], 0]),
+  ];
+  const faults = [];
+  for (const [what, edit, expect, code = 2] of CASES) {
+    repo.git('reset', '-q', '--hard', baseSha);
+    edit(); repo.commit(what);
+    const r = await digestOf(repo), wanted = { code, lines: expect(known()) };
+    if (!isDeepStrictEqual(r, wanted)) faults.push(what + ': ' + JSON.stringify(r) + ' wanted ' + JSON.stringify(wanted));
+  }
+  assert.deepEqual(faults, []);
+  const { reconcileDigest } = await api;
+  assert.deepEqual(reconcileDigest({ repo: repo.cwd, ledger: LEDGER_ID, integration: 'refs/heads/gone', protocolText: PROTOCOL, env: repo.env }),
+    { code: 2, lines: ['UNKNOWN integration: refs/heads/gone does not exist'] });
+});
+
+test('digest: with two waves left it names the next wave and its members, then the open one, then none', async t => {
+  // Every batch merged, so each row reads known whatever status a case gives it, and every case exits 0.
+  const specs = [{ id: 'B01', status: '🟢', branch: 'feat/b01', make: 'full', merge: true }, { id: 'B02', status: '⬜', branch: 'feat/b02', make: 'full', merge: true, wave: 2 },
+    { id: 'B03', status: '⬜', branch: 'feat/b03', make: 'full', merge: true, wave: 2 }, { id: 'B04', status: '⬜', branch: 'feat/b04', make: 'full', merge: true, wave: 3 }];
+  const { repo, write } = ledgerFixture(t, specs);
+  const checkpoints = (c1, c2) => `| C1 | 1 | B01 | wave 1 | ${c1} | — |\n| C2 | Wave 3 | B02, B03, B04 | final | ${c2} | — |`;
+  const members = status => [`MEMBER B02 ${status} \`feat/b02\` ${fileOf('B02')}`, `MEMBER B03 ${status} \`feat/b03\` ${fileOf('B03')}`];
+  const section = async (rowsOf, c1 = '✅', c2 = '⬜') => {
+    write(rowsOf, checkpoints(c1, c2));
+    const r = await digestOf(repo);
+    return { code: r.code, lines: r.lines.filter(l => /^(?:WAVE|MEMBER|NEXT) /.test(l)) };
+  };
+  const NEXT_C2 = 'NEXT C2 after wave 3 covers B02,B03,B04';
+  const faults = [];
+  const check = async (what, got, lines) => { const r = await got; if (!isDeepStrictEqual(r, { code: 0, lines })) faults.push(what + ': ' + JSON.stringify(r)); };
+  await check('two waves left', section(specs), ['WAVE 2 next', ...members('⬜'), NEXT_C2]);
+  const flip = (ids, status) => specs.map(s => ids.includes(s.id) ? { ...s, status } : s);
+  await check('wave 2 opened', section(flip(['B02', 'B03'], '🔄')), ['WAVE 2 open', ...members('🔄'), NEXT_C2]);
+  // The open wave comes first, and it is the lowest holding a 🔄 row: a ⬜ row below it or a 🔄 row above it changes neither.
+  await check('a ⬜ row below the open wave', section(flip(['B02', 'B03'], '🔄').map(s => s.id === 'B01' ? { ...s, status: '⬜' } : s)), ['WAVE 2 open', ...members('🔄'), NEXT_C2]);
+  await check('a 🔄 row above the open wave', section(flip(['B02', 'B03', 'B04'], '🔄')), ['WAVE 2 open', ...members('🔄'), NEXT_C2]);
+  // No 🔄 or ⬜ row: no wave, and the first checkpoint not ✅ is still named.
+  await check('every row integrated', section(flip(['B02', 'B03', 'B04'], '🟢')), ['WAVE none (no 🔄 or ⬜ row)', NEXT_C2]);
+  await check('a failed C1 comes first', section(flip(['B02', 'B03', 'B04'], '🟢'), '❌'), ['WAVE none (no 🔄 or ⬜ row)', 'NEXT C1 after wave 1 covers B01']);
+  await check('every row and checkpoint passed', section(flip(['B01', 'B02', 'B03', 'B04'], '✅'), '✅', '✅'), ['WAVE none (no 🔄 or ⬜ row)', 'NEXT none']);
+  assert.deepEqual(faults, []);
+});
+
+test('digest: the open wave lists every member in table order, whatever its status, and a ❌ row\'s paired line is known', async t => {
+  const specs = [{ id: 'B01', status: '❌', branch: 'feat/b01', notes: 'fix-up pending: fix/B01-c1-followup' },
+    { id: 'B02', status: '🟢', branch: 'feat/b02', make: 'full', merge: true, wave: 2 }, { id: 'B03', status: '🔄', branch: 'feat/b03', wave: 2 },
+    { id: 'B04', status: '⛔ green, residual finding open (P1)', branch: 'feat/b04', wave: 2 }, { id: 'B05', status: '👤', branch: 'feat/b05', wave: 2 },
+    { id: 'B06', status: '⛔ (dropped)', branch: 'feat/b06', wave: 2 }];
+  const { repo } = ledgerFixture(t, specs), v = await verdicts();
+  // B01's fix-up, cut from int, committed to and merged: rows 22 and 23, which a tip validation decides.
+  const wt = path.join(repo.root, 'wt-fixup');
+  repo.git('worktree', 'add', '-q', '-b', 'fix/B01-c1-followup', wt, 'int');
+  repo.at(wt).write('fix.txt', 'fix\n'); repo.at(wt).commit('fix');
+  repo.git('worktree', 'remove', wt);
+  repo.git('merge', '-q', '--no-ff', '-m', 'merge fix-up', 'fix/B01-c1-followup');
+  const member = s => `MEMBER ${s.id} ${s.status} \`${s.branch}\` ${fileOf(s.id)}`;
+  const expected = [`DIGEST ${LEDGER_ID} State=ACTIVE tip=${repo.git('rev-parse', 'refs/heads/int').slice(0, 7)}`, `WORKTREE ${repo.cwd}`,
+    'WAVE 2 open', ...specs.slice(1).map(member), 'NEXT C1 after wave 2 covers all',
+    `B01 ❌ row 22 or 23: tip green → ${v[21]} | tip red → ${v[22]}`, '  fix-up pending: fix/B01-c1-followup',
+    `B02 🟢 row 16: ${v[15]}`, `B03 🔄 row 10: ${v[9]}`, `B04 ⛔ green, residual finding open (P1) row 24: ${v[23]}`, 'SESSION none'];
+  assert.deepEqual(await digestOf(repo), { code: 0, lines: expected });
+  assert.deepEqual(expected.filter(l => /^B\d+ /.test(l)), (await rows(repo)).lines.slice(1), 'the verdict lines are rows\' own');
 });
 
 // ===== discovery ==========================================================================
@@ -1152,14 +1385,24 @@ test('the CLI: --help, and every invalid invocation is one UNKNOWN line with exi
   assert.equal(flat.split(from).length, 2, 'the passage appears once');
   const rest = flat.slice(0, start) + flat.slice(end + to.length);
   assert.deepEqual([/disagree on State/, /State differs/].filter(re => re.test(rest)), [], '--help says nothing else of disagreeing States');
-  const { reconcileCli } = await api;
-  for (const args of [[], ['status'], ['discovery'], ['discovery', '--repo'], ['rows', '--repo', '.', '--ledger', 'X'], ['discovery', '--repo', '.', '--extra', 'x'], ['--help', 'x']]) {
-    const r = reconcileCli(args);
-    assert.equal(r.code, 2, JSON.stringify(args)); assert.deepEqual(r.lines, ['UNKNOWN usage: unknown operation, or an unknown, missing or duplicate flag; use --help']);
+  // The digest's synopsis, its own segment, after rows'.
+  assert.deepEqual(help.lines.filter(l => /^reconcile\.mjs \w+ /.test(l)).map(l => l.split(' ')[1]), ['discovery', 'rows', 'digest']);
+  assert.ok(help.lines.includes('reconcile.mjs digest --repo <repo> --ledger <id> --integration <full-ref>'), 'HELP shows the digest synopsis');
+  const { reconcileCli, reconcileRows, reconcileDigest, TABLE_DRIFT } = await api, faults = [];
+  const refused = (what, r, line) => { if (!isDeepStrictEqual(r, { code: 2, lines: [line] })) faults.push(what + ': ' + JSON.stringify(r)); };
+  for (const args of [[], ['status'], ['discovery'], ['discovery', '--repo'], ['rows', '--repo', '.', '--ledger', 'X'], ['discovery', '--repo', '.', '--extra', 'x'], ['--help', 'x'],
+    ['digest'], ['digest', '--repo', '.', '--ledger', 'X'], ['digest', '--repo', '.', '--integration', INTEGRATION], ['digest', '--repo', '.', '--ledger', 'X', '--integration', INTEGRATION, '--ledger', 'Y']]) {
+    refused(JSON.stringify(args), reconcileCli(args), 'UNKNOWN usage: unknown operation, or an unknown, missing or duplicate flag; use --help');
   }
-  for (const [ledger, integration] of [['../x', INTEGRATION], [LEDGER_ID, 'int'], [LEDGER_ID, 'refs/remotes/origin/int']]) {
-    const r = await (await api).reconcileRows({ repo: repo.cwd, ledger, integration, protocolText: PROTOCOL, env: repo.env });
-    assert.equal(r.code, 2); assert.match(r.lines[0], /^UNKNOWN usage: /);
+  // `refs/heads/int~1` passes the refs/heads/ prefix and is no full ref: a revision, never the integration branch.
+  for (const [ledger, integration] of [['../x', INTEGRATION], [LEDGER_ID, 'int'], [LEDGER_ID, 'refs/remotes/origin/int'], [LEDGER_ID, 'refs/heads/int~1']]) {
+    for (const [name, run] of [['rows', reconcileRows], ['digest', reconcileDigest]]) {
+      refused(`${name} ${ledger} ${integration}`, run({ repo: repo.cwd, ledger, integration, protocolText: PROTOCOL, env: repo.env }),
+        'UNKNOWN usage: a simple ledger id and a full refs/heads/ integration ref are required');
+    }
   }
-  assert.deepEqual(reconcileCli(['rows', '--repo', repo.cwd, '--ledger', LEDGER_ID, '--integration', INTEGRATION], path.join(repo.root, 'no-such-protocol.md')).lines, [(await api).TABLE_DRIFT]);
+  for (const operation of ['rows', 'digest']) {
+    refused(operation, reconcileCli([operation, '--repo', repo.cwd, '--ledger', LEDGER_ID, '--integration', INTEGRATION], path.join(repo.root, 'no-such-protocol.md')), TABLE_DRIFT);
+  }
+  assert.deepEqual(faults, []);
 });

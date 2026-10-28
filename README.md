@@ -32,10 +32,13 @@ serially onto an **integration branch**. The gates, in the order a batch meets t
 
 1. **A locked plan, pre-flighted.** Scope is agreed up front and written down. Every
    request item maps to exactly one batch, or to an exclusion you signed off on. Each
-   drafted batch first gets its own read-only census agent, whose report opens with where
-   the draft is wrong or incomplete, then names the tests that read every file the batch
-   changes and what the backlog and old ledgers already record about them; each opening
-   item is logged as carried or rejected. Before
+   drafted batch first gets its own read-only census agent, given the batch's fence,
+   whose report opens with where the draft is wrong or incomplete, then names the tests
+   that read every file the batch changes, the tests each fix it proposes would break,
+   and what the backlog and old ledgers already record about them; each opening item is
+   logged as carried or rejected once any line the conductor wrote from it in other
+   words, and any fix the conductor chose for a problem the report only flagged, have
+   gone back to the same agent to be checked. Before
    you see the plan, an independent read-only sub-agent checks it: items covered both
    ways, same-wave fences really disjoint, fences *complete* (a grep census of every
    symbol a batch touches, tests and docs included), no contradictions, criteria that a
@@ -91,7 +94,7 @@ finished? — and resumes from the real state rather than the claimed one.
 - **Statuses are claims; git is truth.** The wave-open PROGRESS commit on the
   integration branch — not any status flip — is the crash marker recovery keys on. The
   orchestrator never switches your checkout: it reads branches with `git show` and
-  writes through a scratch worktree.
+  writes through an integration worktree of its own.
 - **Your time is the scarce resource.** Waves are engineered as wide as the fences
   allow, agents pre-verify what they can, and manual smoke tests happen only at planned
   checkpoints.
@@ -196,8 +199,9 @@ sidebar doesn't open", "continue" — and it routes to the right mode.
 above the prompt, and a per-request cost log of every session it loads in, one JSONL file per
 session (a long session continues in `<session>.1.jsonl`, `<session>.2.jsonl`, …) under
 `~/.claude/orchestrate-costs/`. No orchestrate step depends on it: step 8 of the skill's session
-algorithm calls the mod's `schedule_clear` when a session has it, and keeps its 10-minute timer
-otherwise (§Clear and continue).
+algorithm calls the mod's `schedule_clear` at every point where it may pause for context when a
+session has it, and keeps its 10-minute timer for a context at or past the ledger's clear threshold
+when the mod is absent or declines (§Clear and continue).
 
 ### Install
 
@@ -247,23 +251,39 @@ from.
 - Each cost record is one JSON line, its keys in this order:
   `v`, `ts`, `session`, `agent`, `parent`, `type`, `ledger`, `batch`, `role`, `model`, `in`, `out`, `cr`, `cw`.
 - `cost-report.mjs` totals the records by ledger, batch and role, by model and by session; an
-  unpriced model's dollars are shown as unknown (`+?`), never as $0:
+  unpriced model's dollars are shown as unknown (`+?`), never as $0. The records cover the main loop
+  and sub-agents only: the agent-progress summaries Claude Code requests for each running sub-agent
+  (terminal sessions run them, desktop sessions do not) and auto mode's classifier calls are outside
+  them. `--cost-state` adds a line per session comparing its records since the session last started
+  with the `cost-state` total Claude Code last wrote in its transcript under `~/.claude/projects`,
+  which counts the summaries but not the classifier calls:
 
 ```bash
-node orchestrate-mod/tools/cost-report.mjs [--dir <dir>] [--ledger <id>] [--session <id>] [--format text|json]
+node orchestrate-mod/tools/cost-report.mjs [--dir <dir>] [--ledger <id>] [--session <id>] [--format text|json] [--cost-state [--projects <dir>]]
 ```
 
 ### Clear and continue
 
 The mod registers the tool `schedule_clear`, which the model calls by its full name
-`mcp__orchestrate-mod__schedule_clear`. At the points that step 8 of the pinned `references/protocol.md`
-§Session algorithm names, the conductor commits a PROGRESS session-log row naming the LOG heading
-of the work since the row before, then calls the tool in place of its 10-minute timer.
+`mcp__orchestrate-mod__schedule_clear`. At every point that step 8 of the pinned `references/protocol.md`
+§Session algorithm names, whatever the context, the conductor commits a PROGRESS session-log row
+naming the LOG heading of the work since the row before, then calls the tool in place of its
+10-minute timer. Where a wave closes on a checkpoint, it calls before the checkpoint's close-out, so
+a clear leaves the whole close-out to the fresh conversation.
 
+- The mod answers `not needed` when the conductor's context is under the ledger's clear threshold,
+  the contract's `**Clear threshold**` line (300K for a contract without one), and the conductor
+  carries on with no line and no timer.
 - The mod declines when the band line does not show that ledger (the session is untagged, or tagged
-  with another), the ledger's pinned protocol does not name the tool, the integration tip has moved,
-  the ledger's directory holds uncommitted files, an agent is in flight, or a clear is already
-  scheduled. The conductor then runs its timer as before.
+  with another), the ledger's clear threshold line cannot be read, the ledger's pinned protocol does
+  not name the tool, the integration tip has moved, the ledger's directory holds uncommitted files,
+  an agent is in flight, or a clear is already scheduled, naming each agent that stops it.
+  When it names an agent as waiting (it returned while a command of its own still runs) whose report
+  is in, and the ledger needs nothing from that command, the conductor stops that agent by its agent
+  id with TaskStop (the command's id would wake the agent for one more turn), then calls the tool
+  once more. After a decline that stands, or with no mod, the conductor reads its own context size
+  and runs its timer only at or past the ledger's clear threshold, or when the size or the threshold
+  cannot be read.
 - Otherwise the conductor posts the line the mod answers with and ends its turn. A two-minute
   countdown then runs in the band line: `clearing in M:SS · type anything to keep this conversation`.
   Any message keeps the conversation; a local command such as `/ledger` starts no turn, so it does
@@ -273,10 +293,12 @@ of the work since the row before, then calls the tool in place of its 10-minute 
   the LOG heading that the ledger's newest PROGRESS session-log row names, the run's record of the
   work before the clear.
 - Background work still running when the turn ends, or a scheduled task (a cron), skips the clear,
-  since its notice would wake the fresh conversation; so does an app that reports neither, and an
+  since its notice would wake the fresh conversation; so does an app that cannot report whether
+  either is present, and an
   agent found running at zero. A skipped clear continues the run in this conversation with
-  `/orchestrate continue <id>`; should the app refuse that command, or the one that follows a clear,
-  the band line names it for you to type.
+  `/orchestrate continue <id> in-place <reason>`, which carries on without booting again while the
+  integration tip is the one the conductor passed; should the app refuse that command, or the one
+  that follows a clear, the band line names a command for you to type.
 - `/ledger` lists each clear, with its time and the context it cleared, and a run total across the
   conversations the clears link.
 - To turn the clear off, remove the mod as Install above describes; the 10-minute timer is the
@@ -304,12 +326,15 @@ of the work since the row before, then calls the tool in place of its 10-minute 
 orchestrate/
 ├── SKILL.md                        entry point: mode dispatch, discovery, invariants
 ├── references/
+│   ├── backlog.md                  the backlog and rulings entry forms, the bar for registering, packs, expiry and reconsideration
 │   ├── protocol.md                 canonical spec, severity/round accounting, legacy interop, degraded environments
 │   ├── execution-models.md         the waved stack: wave map, checkpoints, integration
 │   ├── scaffolding.md              detection heuristics, interview, census, backlog sweep, pre-flight, placeholder registry
 │   ├── subagent-prompts.md         implementer / reviewer / test hunter / QA runner / artifact proofer / census / pre-flight / convergence / fix-up skeletons
 │   ├── smoke-page.md               the checkpoint hand-over format: assembly, pre-verified steps, publishing, verdict triage
-│   └── smoke-page-template.html    the smoke page itself, with slots for the run-specific content
+│   ├── smoke-page-template.html    the smoke page itself, with slots for the run-specific content
+│   ├── ruling-page.md              the change-complete ruling step's hand-over: sidecar, outcomes, paste check, delivery
+│   └── ruling-page-template.html   the ruling page itself, with slots for the title and the sidecar's rows
 ├── templates/                      the six ledger files, with placeholders
 └── tools/
     ├── git-evidence.mjs            read-only discovery, provenance and shipment facts
@@ -318,7 +343,7 @@ orchestrate/
     ├── validate.mjs                runs a ledger's validation spec in the foreground: one result line, the real exit code, a full log
     ├── ledger-parse.mjs            the one parser for plan, PROGRESS and batch tables and the contract's skill pin
     ├── check-ledger.mjs            one-line ledger checks: parse, skill (the pin hash), selfcheck, plan, cites and census
-    ├── prompt.mjs                  renders one per-batch sub-agent prompt from the ledger and a facts file, ending in the nonce its report echoes
+    ├── prompt.mjs                  renders one per-batch sub-agent prompt from the ledger and a facts file, ending in the nonce its report echoes; with --report it checks a report file and prints one line
     ├── mutate.mjs                  proves chosen mutations on a disposable clone: control first, then KILLED or SURVIVED each, restored byte for byte
     ├── run-at-ref.mjs              runs a validation spec on a disposable clone of any ref: one AT line, validate.mjs's exit code
     ├── prose-only-diff.mjs         classifies a polish diff: PROSE-ONLY when only JavaScript comments changed, else CODE or UNKNOWN, one line
@@ -327,7 +352,9 @@ orchestrate/
     ├── env-facts.mjs               prints the environment facts a contract records, one per line, flagging a tmpfs temp or repository filesystem
     ├── reconcile.mjs               read-only: discovery as one line per ledger; rows matches PROGRESS rows to their §Recovery row and Verdict
     ├── failing-on-base.mjs         runs protocol step 6b in a disposable clone: PROVEN, ALL-PASS (P0) or INCONCLUSIVE, one line
-    └── build-smoke-page.mjs        validates inputs and fills the checkpoint sidecar/template
+    ├── backlog.mjs                 reads a backlog or rulings file in its form: packs, expired, rulings and check, or UNKNOWN for a file not in the form
+    ├── build-smoke-page.mjs        validates inputs and fills the checkpoint sidecar/template
+    └── build-ruling-page.mjs       builds the ruling page from its sidecar, prints the LOG ruling list, checks the user's paste
 ```
 
 The Markdown ledger and its pinned skill directory remain the workflow authority.

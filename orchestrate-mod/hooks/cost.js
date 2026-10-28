@@ -198,7 +198,8 @@ export function fitting(used, lines, limit = PART_LIMIT) {
 // carries no 5-minute/1-hour split of its cache writes, so the write rate is an assumption: Claude Code's
 // defaults, the 1-hour rate for the main loop (agent null) and the 5-minute rate for a subagent, unless
 // `subagentPromptCacheTtl` or an agent's `experimental.cacheTtl` says otherwise. Comparing these totals with
-// Claude Code's `/cost` measures it.
+// Claude Code's `/cost` measures it together with the requests no record sees (the scope
+// orchestrate-mod/tools/cost-report.mjs `HELP` states), never it alone.
 export function priceOf(record, prices) {
   if (!Object.hasOwn(prices, record.model)) return null;
   const p = prices[record.model], write = record.agent === null ? p.cacheWrite1h : p.cacheWrite5m;

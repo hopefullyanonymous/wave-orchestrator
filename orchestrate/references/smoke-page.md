@@ -17,7 +17,9 @@ directory; never copy them into a generated ledger contract.
 ## Delivery across runtimes
 
 Use the newest committed `smoke-*.html` as the delivery base, or this template when
-starting a page. Fill and commit `smoke-<Cn>.html`, then use the current runtime's HTML
+starting a page. The first checkpoint, with no committed page in the ledger, takes its
+sidecar's form from §Sidecar shape below, never from an archived ledger.
+Fill and commit `smoke-<Cn>.html`, then use the current runtime's HTML
 preview, file hand-over, or publisher. Reuse an existing hosted URL when that runtime
 can update it; otherwise hand over the current committed HTML or use §Fallback.
 Record the CURRENT URL, ledger-relative HTML path, or `plain text` in PROGRESS's
@@ -63,7 +65,7 @@ delivery switch) to resume an existing artifact.
 | Slot | Content |
 |---|---|
 | `{{PAGE_TITLE}}` | `<Change name> Smoke Run` — never changes across checkpoints |
-| `{{EYEBROW}}` | `Checkpoint C<n> · batches B<xx>–B<yy>` |
+| `{{EYEBROW}}` | `Checkpoint C<n> · batches B<xx>–B<yy>`, its `<n>` the sidecar's `checkpoint`, a positive integer: `"checkpoint": 1` builds `Checkpoint C1`, and `"C1"` or `"1"` is refused |
 | `{{HEADLINE}}` | The change, plainly: `<what this pack does> — smoke run` |
 | `{{STANDFIRST}}` | At hand-over: step and section counts, then "When you're done — or as soon as something fails — press <strong>Copy results as text</strong> and paste it into the chat." Describe saving as browser-local or cloud-backed only according to what is available. After a run: may summarize the result and any corrected steps. |
 | `{{FACTS_HTML}}` | `<div class="fact"><dt>…</dt><dd>…</dd></div>` items: **Branch**, **Version should read** (`0.13.1 <span class="was">0.13.0</span>` — new value, struck-through old), **Tip** (short SHA), **Suite** (e.g. `2249 / 2255 pass`, from the validation run on the integration tip, never a worktree), **Known failures** if any |
@@ -115,8 +117,67 @@ first so the baseline can be checked. A fresh output path has no prior page to v
 Validation errors leave the old page intact. Use a new baseline snapshot for each
 subsequent re-issue, and commit the current JSON and HTML together.
 
+### Sidecar shape
+
+`smoke-<Cn>.json` for a first checkpoint, complete. The builder refuses a sidecar without `change`,
+`checkpoint`, `batches`, `branch`, `buildSha`, `ckptKey`, `sections`, or a `gate` with `checks`, both
+containment `commands` and the tested SHA among them (write it out in each, as §The gate (Step 0) gives them); a section
+without `n` or `steps`; or a step without `n`, `do` or `pass`. Every section also carries the `title` its
+heading shows. `checkpoint` is the number in `C<n>`: `1` builds `Checkpoint C1`. The rest is optional:
+`version` (and `was` within it), `suite`, `knownFailures`, `facts`, and `pageTitle`, `eyebrow`, `headline`,
+`standfirst` and `copyHeader`, which replace the slot defaults the table above derives; the gate's `intro`;
+a section's `touchesData`, `lede` and `need`; a step's `revision` and `aside`. A section's `order` and a
+step's `unit`, `tag`, `pre` and `inputs` follow the template's schema, §Pre-verified steps and §Input
+registry and immutable issue files.
+
+```json
+{
+  "change": "Example change",
+  "checkpoint": 1,
+  "batches": "B01–B02",
+  "branch": "chore/example-ledger",
+  "buildSha": "4f6b2c1d8e9a07b3c5d2e1f0a9b8c7d6e5f4a3b2",
+  "ckptKey": "example-change-c1",
+  "version": {"now": "1.4.0", "was": "1.3.2"},
+  "suite": "212 / 214 pass, 2 skipped",
+  "knownFailures": "none",
+  "facts": [{"dt": "Node", "dd": "<code>v24</code> or later"}],
+  "pageTitle": "Example change Smoke Run",
+  "eyebrow": "Checkpoint C1 · batches B01–B02",
+  "headline": "Example change — smoke run",
+  "standfirst": "3 steps in 2 sections. When you're done — or as soon as something fails — press <strong>Copy results as text</strong> and paste it into the chat.",
+  "copyHeader": "C1 smoke run — Example change (1.4.0)",
+  "gate": {
+    "intro": "Switch to the integration branch first. Then run both containment commands from its root.",
+    "commands": [
+      "git switch chore/example-ledger",
+      "git branch --show-current",
+      "git merge-base --is-ancestor 4f6b2c1d8e9a07b3c5d2e1f0a9b8c7d6e5f4a3b2 HEAD",
+      "git diff --name-only 4f6b2c1d8e9a07b3c5d2e1f0a9b8c7d6e5f4a3b2..HEAD -- . \":(exclude).agents/\""
+    ],
+    "checks": [
+      "The second command prints <code>chore/example-ledger</code>.",
+      "The containment commands exit 0, and the last prints nothing."
+    ]
+  },
+  "sections": [
+    {"n": 1, "title": "The report command", "touchesData": false,
+     "lede": "The command this change adds.", "need": "A terminal at the checkout root.",
+     "steps": [
+       {"n": 1, "revision": 1, "do": "Run <code>example report --help</code>.",
+        "pass": "It exits 0 and prints its usage.", "aside": "It writes no file."},
+       {"n": 2, "do": "Run <code>example report</code>.", "pass": "It prints one line per batch."}
+     ]},
+    {"n": 2, "title": "The copied results", "steps": [
+      {"n": 3, "do": "Press <strong>Copy results as text</strong>.", "pass": "The copied text names build <code>4f6b2c1</code>."}
+    ]}
+  ]
+}
+```
+
 The builder also rejects known invalid inputs: a short `buildSha`, a storage key that
-is not a nonempty string containing only `[A-Za-z0-9._-]`, section or step numbers
+is not a nonempty string containing only `[A-Za-z0-9._-]`, a `checkpoint` that is not a
+positive integer, section or step numbers
 that are not positive integers or that repeat
 (`1` and `"1"` are one DOM id and one verdict), agent evidence with no `stepRevision` or
 with a `sha` under 7 hex characters, a `gate.commands` missing either containment
@@ -132,7 +193,9 @@ table above documents as HTML (`headline`, `standfirst`, the facts, the gate) ke
 markup. Without Node, or with the sidecar lost, copy the newest committed
 `smoke-*.html`, patch the slots by hand, and run `grep -o '{{[A-Z_]\{1,\}}}'` over the
 result — zero hits; the page never
-depends on the tool that filled it.
+depends on the tool that filled it. At the first checkpoint no page is committed in the
+ledger yet: patch this template, taking its content's form from §Sidecar shape, never
+from an archived ledger.
 
 **Self-check before publishing**: the builder greps its TEMPLATE for a `{{` that is not
 a well-formed slot marker — a lower-case, spaced or hyphenated name it would leave
@@ -353,7 +416,7 @@ Verdicts are four, and they triage differently at `close`:
 | Pass | Did what the step says | Counts toward the checkpoint pass |
 | Fail | Did something else | Triage to the offending batch(es) → ❌ |
 | Blocked | Step could not be performed as written | Usually a defect in the STEP: correct it, republish, ask for that step again. If the app genuinely lacks the behavior, reclassify as fail → ❌ |
-| Works, but | Passed exactly as described; user wants it different | Named backlog entry. Never a failure, never blocks the checkpoint |
+| Works, but | Passed exactly as described; user wants it different | A residual the change-complete ruling step decides (protocol.md). Never a failure, never blocks the checkpoint |
 
 The user's message is the verdict — the page's copied text is its preferred form,
 recorded verbatim in the PROGRESS verdict log. When the runtime can read an optional

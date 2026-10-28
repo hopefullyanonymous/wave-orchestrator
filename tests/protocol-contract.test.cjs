@@ -160,6 +160,12 @@ const REWORDED = [
   ['Everything needed to drive this change lives in this ledger directory', 'template',
     ['Everything needed to drive this change lives in this ledger directory ({{LEDGER_DIR}}) and that pinned directory — assume no other context survives between sessions']],
   ['Reconcile (§Recovery below)', 'template', ['Reconcile (§Recovery) before believing any PROGRESS row']],
+  // The integration and batch worktrees moved from the session scratchpad to {{WORKTREE_ROOT}} (B03 of
+  // OS-20261022), so each sentence that placed them is carried in its new words.
+  ['Never switch the main checkout. Read ledger files', 'template',
+    ['Never switch the main checkout. Read ledger files from any branch with git show <branch>:./<path> (the ./ is required — Git Bash on Windows mangles branch:path otherwise) and write to the ledger through an integration worktree (git worktree add "{{WORKTREE_ROOT}}/int" {{INTEGRATION_BRANCH}}), using the main checkout only if it already has {{INTEGRATION_BRANCH}} checked out']],
+  ['Wave members run CONCURRENTLY', 'template',
+    ['Wave members run CONCURRENTLY: one implementer per batch, each in an isolated git worktree under {{WORKTREE_ROOT}} as b<nn> (never inside the repo)']],
   ['Verdict on line 1: SHIP (no P0/P1', 'protocol', ['Line-1 verdict: SHIP (no P0/P1; may carry ASKs)']],
   ['may carry ASKs) · FIX FIRST', 'protocol',
     ['FIX FIRST (P0 or P1 with a concrete failure scenario) / NEEDS A CLOSER LOOK (names what would confirm it); line 2 NONCE <nonce>']],
@@ -198,7 +204,7 @@ const REWORDED = [
   ['When the renderer is unavailable or refuses (UNKNOWN …)', 'protocol',
     ['When the renderer is unavailable or refuses (UNKNOWN …), the manual procedure is a pasted prompt with no nonce line, and every such prompt must be SELF-CONTAINED: the spec text + codebase facts from the batch file, the exact file fence, acceptance criteria, the applicable guardrails, the validation commands (the wrapper command and its recipe), the contract\'s conventions + prohibitions blocks, the report shape, and "tick your checklist items in the batch file as you complete them']],
   ['SHIP with ASKs → polish pass', 'protocol',
-    ['Polish pass: resume the same implementer with the pointer to its rendered polish prompt (the findings file by path)']],
+    ['Polish pass: resume the same implementer (a fresh one when the render prints FRESH — subagent-prompts.md §Spawning rules) with the pointer to its rendered polish prompt (the findings file by path)']],
   ['it appends - [ ] polish: <ask> items', 'protocol', ['it appends - [ ] polish: items to its checklist, does them, commits']],
   ['closes mechanically (6a + validations', 'protocol', ['closes mechanically (fence check + validations']],
   ['polish commits touch only test/doc/prose paths — a production file touched → a fix-diff-only', 'protocol',
@@ -231,6 +237,18 @@ const REWORDED = [
     ['any NEW bug class this change uncovered → ONE-LINE guardrail bullet in the project guardrails doc naming the class and pointing at the test or mechanism doc that enforces it (prefer adding the test in this close-out)']],
   ['propose deleting the merged branches and moving this ledger', 'protocol',
     ['propose deleting the merged branches and moving the ledger to .agents/archive/ (git mv)']],
+  // The implementer's report moved to a file and its final message to four lines (B04 of OS-20261024): the
+  // bullet's shape sentence and its evidence block's SHAs are carried by the shape protocol.md §Roles, gates, tiers
+  // states, and its checklist count and cap by the template's four-line final message and its full-report sentence.
+  ['Reports in the fixed shape: first line', 'protocol',
+    ["in the fixed shape: its heading ### B<NN> R<k> <role> findings; the status, one of DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED; NONCE <nonce> (the nonce its rendered prompt ends with); an evidence block (each validation run's validate.mjs line and exit code; SHAs; checklist n/m); ≤40 lines of prose"]],
+  ['commit SHAs', 'protocol', ["an evidence block (each validation run's validate.mjs line and exit code; SHAs; checklist n/m)"]],
+  ['checklist n/m), then ≤40 lines of prose', 'template',
+    ["the final message is four lines: the status (DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED), NONCE <nonce> (the nonce its rendered prompt ends with), checklist <n>/<m>, the file's path",
+      'Its full report goes to the file its rendered prompt names, in the fixed shape of protocol.md §Roles, gates, tiers, ≤40 lines of prose']],
+  // The backlog became the to-do list (B04 of OS-20261024): an item registers only past the bar, each with its id.
+  ['residuals added get ids in the', 'template',
+    ["{{BACKLOG_FILE}} is the to-do list, an item registering there only past the bar of the pinned skill's references/backlog.md, with ids in the {{BACKLOG_ID_PREFIX}} scheme"]],
 ];
 // [the superseded unit's opening, why, where its successor lives, the successor].
 const RETIRED = [
@@ -316,6 +334,202 @@ test('template placeholders and registry match in both directions', () => {
   const swept = shippedSkillFiles();
   assert.ok(swept.includes('orchestrate/references/scaffolding.md') && swept.includes('orchestrate/templates/00-READBEFORE.md'));
   for (const file of swept) assert.doesNotMatch(read(file), /EVIDENCE_TOOL|FENCE_TOOL/, file + ': names a retired helper-path placeholder');
+});
+
+// The template's heading lines outside fences, as flat reads them, for the closed sweeps below: a heading
+// here can carry a directive, as "(locked)" and "(binding)" do.
+function headingsOf(text) {
+  let fenced = false;
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (line.startsWith('```')) fenced = !fenced;
+    else if (!fenced && /^#{1,6} /.test(line)) out.push(flat(line));
+  }
+  return out;
+}
+// Each fault in `text`: a unit (as contractUnits reads it) or a heading (as headingsOf reads it) that
+// `pattern` selects and `listed` does not hold word for word, and a listed one gone. One added or reworded
+// is doubt until it is read and listed; text `pattern` does not select is not read.
+function closedUnitFaults(text, pattern, listed) {
+  const held = [...contractUnits(text), ...headingsOf(text)].filter(unit => pattern.test(unit));
+  return [...held.filter(unit => !listed.includes(unit)), ...listed.filter(unit => !held.includes(unit)).map(unit => 'gone: ' + unit)];
+}
+// The template's units naming a scratch area. The integration and batch worktrees live under
+// {{WORKTREE_ROOT}} (B03 of OS-20261022); a gate agent's writes, the validation log and an implementer's
+// scratch stay under the session scratchpad.
+const SCRATCH_UNITS = [
+  "Each writes its full report with the Write tool to the findings file its prompt names — its only other writes are validation logs and disposable scratch under the session scratchpad, never inside a worktree or the repository — and returns four lines: its verdict, NONCE <nonce>, FINDINGS <n>, the file's path",
+  'node "{{SKILL_DIR}}/tools/validate.mjs" --spec {{LEDGER_DIR}}/validate.json --log "<session scratchpad>/<label>.log"',
+  'never leave untracked files in the worktree (reconcile reads that as dirt — scratch goes under the session scratchpad)',
+];
+const scratchFaults = text => closedUnitFaults(text, /scratch/i, SCRATCH_UNITS);
+test('the template names a scratch area only in the units SCRATCH_UNITS lists', () => {
+  assert.deepEqual(scratchFaults(contract), []);
+  // Live: a worktree sent back to the scratchpad from the Git model and from boot step 2, a listed unit
+  // reworded, the area spelled apart, and an implementer sent there from a heading; each read before the one verdict.
+  const plant = (anchor, replacement) => {
+    assert.equal(contract.split(anchor).length - 1, 1, 'the control anchor must be found once: ' + anchor);
+    return scratchFaults(contract.replace(anchor, () => replacement));
+  };
+  const GIT_MODEL = 'Wave members run CONCURRENTLY: one implementer per batch, each in an isolated git worktree under {{WORKTREE_ROOT}} as b<nn> (never inside the repo)';
+  const STEP_TWO_TAIL = 'only if it already has `{{INTEGRATION_BRANCH}}` checked out.';
+  assert.deepEqual([
+    plant('(never inside the repo). Per-worktree setup:', '(never inside the repo), or under the session scratchpad. Per-worktree setup:'),
+    plant(STEP_TWO_TAIL, STEP_TWO_TAIL + ' Where `{{WORKTREE_ROOT}}` is not writable, add the integration worktree under the session scratchpad instead.'),
+    plant('scratch goes under the session scratchpad).', 'scratch and every worktree go under the session scratchpad).'),
+    plant('Same-wave fences were planned disjoint.', 'Same-wave fences were planned disjoint. A wave too wide for the root keeps its worktrees in a scratch pad.'),
+    plant('## Roles, gates, tiers\n', '## Roles, gates, tiers (each implementer works under the session scratchpad)\n'),
+  ], [
+    [GIT_MODEL + ', or under the session scratchpad'],
+    ['Where {{WORKTREE_ROOT}} is not writable, add the integration worktree under the session scratchpad instead'],
+    ['never leave untracked files in the worktree (reconcile reads that as dirt — scratch and every worktree go under the session scratchpad)', 'gone: ' + SCRATCH_UNITS[2]],
+    ['A wave too wide for the root keeps its worktrees in a scratch pad'],
+    ['## Roles, gates, tiers (each implementer works under the session scratchpad)'],
+  ], 'each unit naming a scratch area outside SCRATCH_UNITS, and each listed unit gone, must be reported');
+});
+
+// The template's units and headings naming a worktree by any of the template's words for one — a worktree
+// or work tree, git's working tree, a checkout or a branch checked out, a clone. Boot step 2 and the Git model place the
+// integration and batch worktrees under {{WORKTREE_ROOT}} (both pinned whole in tests/tool-wiring.test.cjs
+// PINNED); every other one is read and listed here, so a sentence that uses one of those words and places
+// one elsewhere — under /tmp, the system temp directory or inside the repository — is reported. A
+// sentence using none of them is not read.
+const WORKTREE_UNITS = [
+  'Run git status --porcelain, git branch --list, git worktree list',
+  'Never switch the main checkout. Read ledger files from any branch with git show <branch>:./<path> (the ./ is required — Git Bash on Windows mangles branch:path otherwise) and write to the ledger through an integration worktree (git worktree add "{{WORKTREE_ROOT}}/int" {{INTEGRATION_BRANCH}}), using the main checkout only if it already has {{INTEGRATION_BRANCH}} checked out',
+  'Run git show from the repo or worktree ROOT (the ./ path is cwd-relative)',
+  'Reuse an integration worktree that git worktree list already shows',
+  'if its directory is gone, git worktree prune first — never two worktrees on one branch',
+  'Run {{WORKTREE_SETUP}} in a newly created integration worktree before validating in it',
+  'Skill pin, before anything is reconciled: from the integration worktree root run node "{{SKILL_DIR}}/tools/check-ledger.mjs" skill --contract {{LEDGER_DIR}}/00-READBEFORE.md',
+  'Work ONLY in the worktree your prompt names',
+  'Orchestrator — owns PROGRESS, LOG, evidence/, branches, worktrees, merges, close-outs, all user communication',
+  'Implementer — one per batch, in its own worktree on its own branch',
+  SCRATCH_UNITS[0],
+  'Wave members run CONCURRENTLY: one implementer per batch, each in an isolated git worktree under {{WORKTREE_ROOT}} as b<nn> (never inside the repo)',
+  'Per-worktree setup: {{WORKTREE_SETUP}}',
+  'do not re-detect these facts from the current checkout',
+  'Every run goes through the validation wrapper, from the worktree root',
+  "The skill's mutate.mjs is a different tool: the test hunter proves with it only the mutations it chooses itself, each on a disposable clone of the batch's commit",
+  'Bump cadence: {{VERSION_BUMP_RULE}} — applied on the integration branch at integration or checkpoint close-out, never inside a wave worktree',
+  SCRATCH_UNITS[2],
+];
+const worktreeFaults = text => closedUnitFaults(text, /work[\W_]*tree|working[\W_]*trees?|check[\W_]*out|\bcheck(?:s|ed|ing)?\b.*\bout\b|\bclon(?:e|es|ed|ing)\b/i, WORKTREE_UNITS);
+// One planted text per control, its anchor found once in the template.
+const plantIn = (faults, anchor, replacement) => {
+  assert.equal(contract.split(anchor).length - 1, 1, 'the control anchor must be found once: ' + anchor);
+  return faults(contract.replace(anchor, () => replacement));
+};
+test('the template names a worktree only in the units WORKTREE_UNITS lists', () => {
+  assert.deepEqual(worktreeFaults(contract), []);
+  // Live: a worktree placed under /tmp beside the merge policy, under the system temp directory from the
+  // implementer's line, inside the repository from §Hard prohibitions and under /tmp from the bump cadence;
+  // work trees spelled apart; a listed unit reworded; a batch checkout, a branch checked out and a clone
+  // under /tmp, each named by that word alone; worktrees sent to /tmp from a heading, and from a fenced
+  // line that only looks like one (read once, as a fenced line). Each is read before the one verdict.
+  const MERGE = '- **Merge/push policy**: {{MERGE_POLICY}}\n', IMPLEMENTER = 'in its own worktree on its own branch.';
+  const NO_VERIFY = '- No `--no-verify`, no force-push, no history rewriting.\n', BUMP = 'never inside a wave worktree.\n';
+  const CONVENTIONS = '## Repo conventions (binding)\n';
+  assert.deepEqual([
+    plantIn(worktreeFaults, MERGE, MERGE + '- On a machine short of disk, add each batch worktree under `/tmp/{{CHANGE_ID}}` as `b<nn>` instead.\n'),
+    plantIn(worktreeFaults, IMPLEMENTER, IMPLEMENTER + ' That worktree is added under the system temp directory.'),
+    plantIn(worktreeFaults, NO_VERIFY, NO_VERIFY + '- Keep every worktree inside the repository, under `.worktrees/`, so `git worktree list` shows it beside the checkout.\n'),
+    plantIn(worktreeFaults, BUMP, 'never inside a wave worktree. Bump through an integration worktree added under `/tmp/int`.\n'),
+    plantIn(worktreeFaults, 'Same-wave fences were planned disjoint.', 'Same-wave fences were planned disjoint. A wave too wide for the root keeps its work trees under /tmp.'),
+    plantIn(worktreeFaults, 'Work ONLY in the worktree\nyour prompt names.', 'Work ONLY in the worktree\nyour prompt names, or any directory under /tmp.'),
+    plantIn(worktreeFaults, MERGE, MERGE + '- On a machine short of disk, add each batch checkout under `/tmp/{{CHANGE_ID}}` as `b<nn>` instead.\n'),
+    plantIn(worktreeFaults, MERGE, MERGE + '- When disk is short, the orchestrator checks each batch branch out under `/tmp/{{CHANGE_ID}}`.\n'),
+    plantIn(worktreeFaults, MERGE, MERGE + '- When disk is short, each batch is cloned into `/tmp/{{CHANGE_ID}}`.\n'),
+    plantIn(worktreeFaults, CONVENTIONS, '## Repo conventions (binding; worktrees go under /tmp)\n'),
+    plantIn(worktreeFaults, '```text\ngit merge-base', '```text\n# each worktree goes under /tmp\ngit merge-base'),
+    plantIn(worktreeFaults, 'Same-wave fences were planned disjoint.', 'Same-wave fences were planned disjoint. Each batch gets its own working tree under /tmp.'),
+  ], [
+    ['On a machine short of disk, add each batch worktree under /tmp/{{CHANGE_ID}} as b<nn> instead'],
+    ['That worktree is added under the system temp directory'],
+    ['Keep every worktree inside the repository, under .worktrees/, so git worktree list shows it beside the checkout'],
+    ['Bump through an integration worktree added under /tmp/int'],
+    ['A wave too wide for the root keeps its work trees under /tmp'],
+    ['Work ONLY in the worktree your prompt names, or any directory under /tmp', 'gone: Work ONLY in the worktree your prompt names'],
+    ['On a machine short of disk, add each batch checkout under /tmp/{{CHANGE_ID}} as b<nn> instead'],
+    ['When disk is short, the orchestrator checks each batch branch out under /tmp/{{CHANGE_ID}}'],
+    ['When disk is short, each batch is cloned into /tmp/{{CHANGE_ID}}'],
+    ['## Repo conventions (binding; worktrees go under /tmp)'],
+    ['# each worktree goes under /tmp'],
+    ['Each batch gets its own working tree under /tmp'],
+  ], 'each unit or heading naming a worktree outside WORKTREE_UNITS, and each listed unit gone, must be reported');
+});
+
+// The template's units and headings naming a clear, a restart or a reopen, the mod that opens such a session or a
+// fresh conversation (tests/tool-wiring.test.cjs PROCEDURE_FAMILIES' family for the procedure): the threshold line
+// orchestrate-mod reads and boot step 1's after-clear sentence (tests/tool-wiring.test.cjs thresholdFaults
+// and AFTER_CLEAR_READ). Every other one is read and listed here, so a sentence that uses one of those
+// words and sends such a session back to the files the after-clear read skips is reported; a sentence
+// naming one of those files is read by LEDGER_READ_UNITS below, and one naming neither is not read.
+const CLEAR_UNITS = [
+  'Clear threshold: {{CLEAR_THRESHOLD}}',
+  'A session that /orchestrate continue <id> after-clear opened reads none of 00-request.md, 01-plan.md and PROGRESS.md: once the pin check (step 3) passes it reads the digest that node "{{SKILL_DIR}}/tools/reconcile.mjs" digest --repo <repo> --ledger {{CHANGE_ID}} --integration refs/heads/{{INTEGRATION_BRANCH}} prints, and of this contract only §Boot sequence, §Git model, §Validation commands and §Hard prohibitions, reading any other section by its heading when a step needs it',
+];
+const clearFaults = text => closedUnitFaults(text, /clear|restart|re-?open|orchestrate-mod|\bthe mod\b|\bfresh conversation/i, CLEAR_UNITS);
+test('the template names a clear only in the units CLEAR_UNITS lists', () => {
+  assert.deepEqual(clearFaults(contract), []);
+  // Live: a cleared session sent to the plan from boot step 5; the after-clear sentence reworded to read
+  // the files it skips; a restarted and a reopened session, each named by that word alone, sent to the
+  // plan from boot step 6; a cleared session let off validation from a heading; a session the mod or orchestrate-mod
+  // opened, and a fresh conversation, each named with no clear word, sent to the whole contract from §Hard prohibitions.
+  // Each is read before the one verdict.
+  const RECONCILE = '5. **Reconcile** (protocol.md §Recovery) before believing any PROGRESS row.\n';
+  const GREEN = 'Green → follow protocol.md §Session algorithm.', BOOT = '## Boot sequence (orchestrator, every session)\n';
+  const PROHIBITIONS = '## Hard prohibitions\n';
+  assert.deepEqual([
+    plantIn(clearFaults, RECONCILE, RECONCILE.trimEnd() + ' When orchestrate-mod has cleared the conversation, read 00-request.md, 01-plan.md and PROGRESS.md first, as every session does.\n'),
+    plantIn(clearFaults, 'opened reads none of', 'opened reads all of'),
+    plantIn(clearFaults, GREEN, GREEN + ' A session the mod restarted reads 01-plan.md before reconciling.'),
+    plantIn(clearFaults, GREEN, GREEN + ' A session the mod reopened reads 01-plan.md before reconciling.'),
+    plantIn(clearFaults, BOOT, '## Boot sequence (orchestrator, every session; a cleared one skips step 6)\n'),
+    plantIn(clearFaults, PROHIBITIONS, PROHIBITIONS + '\n- A session the mod opened reads the whole contract before its §Boot sequence.\n'),
+    plantIn(clearFaults, PROHIBITIONS, PROHIBITIONS + '\n- A session orchestrate-mod opened reads the whole contract first.\n'),
+    plantIn(clearFaults, PROHIBITIONS, PROHIBITIONS + '\n- A fresh conversation reads the whole contract first.\n'),
+  ], [
+    ['When orchestrate-mod has cleared the conversation, read 00-request.md, 01-plan.md and PROGRESS.md first, as every session does'],
+    [CLEAR_UNITS[1].replace('reads none of', () => 'reads all of'), 'gone: ' + CLEAR_UNITS[1]],
+    ['A session the mod restarted reads 01-plan.md before reconciling'],
+    ['A session the mod reopened reads 01-plan.md before reconciling'],
+    ['## Boot sequence (orchestrator, every session; a cleared one skips step 6)'],
+    ['A session the mod opened reads the whole contract before its §Boot sequence'],
+    ['A session orchestrate-mod opened reads the whole contract first'],
+    ['A fresh conversation reads the whole contract first'],
+  ], 'each unit or heading naming a clear outside CLEAR_UNITS, and each listed unit gone, must be reported');
+});
+
+// The template's units and headings naming a file the after-clear read skips — 00-request.md, 01-plan.md
+// or PROGRESS.md, numbered or not: boot step 1's read list and its after-clear sentence. Every other one is
+// read and listed here, so a sentence that sends a session back to one of those files is reported whatever
+// it calls the session; a sentence naming none of the three files is not read.
+const LEDGER_READ_UNITS = [
+  "Read 00-request.md (the user's verbatim ask + decisions), 01-plan.md (locked scope, batch table, wave map + checkpoints), and PROGRESS.md, plus the project's always-loaded docs — especially {{GUARDRAILS_REF}}",
+  CLEAR_UNITS[1],
+];
+const ledgerReadFaults = text => closedUnitFaults(text, /\b(?:0[01]-)?(?:request|plan)\.md\b|\bPROGRESS\.md\b/i, LEDGER_READ_UNITS);
+test('the template names the files the after-clear read skips only in the units LEDGER_READ_UNITS lists', () => {
+  assert.deepEqual(ledgerReadFaults(contract), []);
+  // Live: a session orchestrate-mod opened sent to all three files, and a cleared one sent there from boot
+  // step 5; each file named alone, the plan unnumbered; a listed unit reworded. Each is read before the one verdict.
+  const GREEN = 'Green → follow protocol.md §Session algorithm.', RECONCILE = '5. **Reconcile** (protocol.md §Recovery) before believing any PROGRESS row.\n';
+  assert.deepEqual([
+    plantIn(ledgerReadFaults, GREEN, GREEN + ' A session orchestrate-mod opened reads 00-request.md, 01-plan.md and PROGRESS.md first, as every session does.'),
+    plantIn(ledgerReadFaults, RECONCILE, RECONCILE.trimEnd() + ' When orchestrate-mod has cleared the conversation, read 00-request.md, 01-plan.md and PROGRESS.md first, as every session does.\n'),
+    plantIn(ledgerReadFaults, GREEN, GREEN + ' A session the mod opened reads 00-request.md first.'),
+    plantIn(ledgerReadFaults, GREEN, GREEN + ' A session the mod opened reads plan.md first.'),
+    plantIn(ledgerReadFaults, GREEN, GREEN + ' A session the mod opened reads PROGRESS.md first.'),
+    plantIn(ledgerReadFaults, '(the user\'s verbatim ask + decisions)', '(the user\'s verbatim ask)'),
+  ], [
+    ['A session orchestrate-mod opened reads 00-request.md, 01-plan.md and PROGRESS.md first, as every session does'],
+    ['When orchestrate-mod has cleared the conversation, read 00-request.md, 01-plan.md and PROGRESS.md first, as every session does'],
+    ['A session the mod opened reads 00-request.md first'],
+    ['A session the mod opened reads plan.md first'],
+    ['A session the mod opened reads PROGRESS.md first'],
+    [LEDGER_READ_UNITS[0].replace(' + decisions', () => ''), 'gone: ' + LEDGER_READ_UNITS[0]],
+  ], 'each unit or heading naming a skipped file outside LEDGER_READ_UNITS, and each listed unit gone, must be reported');
 });
 
 // The manual fallback lives once, in protocol.md (the template's copy retired with B01), so
@@ -649,15 +863,15 @@ test('the shipped-skill domain both rule sweeps use recurses and filters no file
   // together stayed green. The list is compared against the non-Markdown files git tracks
   // under `orchestrate/`, each of which the walk must reach, and its own size is pinned so
   // the both-at-once edit reddens too.
-  const NON_MARKDOWN = ['orchestrate/references/smoke-page-template.html',
-    'orchestrate/tools/build-smoke-page.mjs', 'orchestrate/tools/check-fence.mjs',
+  const NON_MARKDOWN = ['orchestrate/references/ruling-page-template.html', 'orchestrate/references/smoke-page-template.html',
+    'orchestrate/tools/backlog.mjs', 'orchestrate/tools/build-ruling-page.mjs', 'orchestrate/tools/build-smoke-page.mjs', 'orchestrate/tools/check-fence.mjs',
     'orchestrate/tools/check-ledger.mjs', 'orchestrate/tools/detect.mjs', 'orchestrate/tools/env-facts.mjs',
     'orchestrate/tools/failing-on-base.mjs', 'orchestrate/tools/git-evidence.mjs',
     'orchestrate/tools/ledger-parse.mjs', 'orchestrate/tools/mutate.mjs', 'orchestrate/tools/prompt.mjs',
     'orchestrate/tools/prose-only-diff.mjs', 'orchestrate/tools/reconcile.mjs', 'orchestrate/tools/run-at-ref.mjs',
     'orchestrate/tools/scaffold.mjs', 'orchestrate/tools/smoke-inputs.mjs',
     'orchestrate/tools/validate.mjs'];
-  assert.equal(NON_MARKDOWN.length, 17, 'the pinned non-Markdown domain must not shrink to a sample');
+  assert.equal(NON_MARKDOWN.length, 20, 'the pinned non-Markdown domain must not shrink to a sample');
   assert.deepEqual(nonMarkdownFaults(NON_MARKDOWN, trackedSkillFiles(), shipped), [],
     'the sweeps must reach every non-Markdown shipped file, not only *.md; add a new tool to this list deliberately');
   // Live, on a fixture: an untracked and an ignored file under its orchestrate/ ship nothing, while a tracked file the
@@ -1497,7 +1711,7 @@ const dirtUnits = text => text.replace(/\r\n/g, '\n').replace(/^[ \t]*\/\//gm, '
 // main checkout for another reason, or reads every worktree for another fact.
 const DIRT_UNITS = [
   ['orchestrate/SKILL.md', "Never switch the main checkout and never copy ledger files into another branch's tree."],
-  ['orchestrate/SKILL.md', 'The orchestrator never switches the main checkout: it reads with git show and writes through an integration worktree under the session scratchpad.'],
+  ['orchestrate/SKILL.md', "The orchestrator never switches the main checkout: it reads with git show and writes through an integration worktree under the contract's worktree root (its boot step 2 and Git model), or under the session scratchpad for a contract that names none."],
   ['orchestrate/references/execution-models.md', 'The main checkout is never switched.'],
   ['orchestrate/references/execution-models.md', "- No sub-agent support → the orchestrator implements a wave's batches one at a time in the main checkout (worktrees unnecessary);"],
   ['orchestrate/references/protocol.md', 'Never switches the main checkout: reads any branch with git show <branch>:./<path> (keep the ./ — Git Bash on Windows mangles branch:path;'],
@@ -1508,7 +1722,7 @@ const DIRT_UNITS = [
   ['orchestrate/references/subagent-prompts.md', 'Stay inside the worktree — do not create or switch branches, never push, never touch the main checkout, never leave untracked files in the worktree (scratch goes under [SCRATCHPAD_PATH]).'],
   ['orchestrate/references/subagent-prompts.md', 'Main-checkout variant (degraded environments, or a width-1 wave run directly in the repo): replace the worktree paragraph with "Work on the CURRENT branch ([BATCH_BRANCH]) — do not create or switch branches, never push." A rendered file takes no such edit, so this variant is always the manual procedure (§Spawning rules).'],
   ['orchestrate/templates/00-READBEFORE.md', 'Never switch the main checkout.'],
-  ['orchestrate/templates/00-READBEFORE.md', 'Read ledger files from any branch with git show <branch>:./<path> (the ./ is required — Git Bash on Windows mangles branch:path otherwise) and write to the ledger through an integration worktree (git worktree add <scratchpad>/wt-int {{INTEGRATION_BRANCH}}), using the main checkout only if it already has {{INTEGRATION_BRANCH}} checked out.'],
+  ['orchestrate/templates/00-READBEFORE.md', 'Read ledger files from any branch with git show <branch>:./<path> (the ./ is required — Git Bash on Windows mangles branch:path otherwise) and write to the ledger through an integration worktree (git worktree add "{{WORKTREE_ROOT}}/int" {{INTEGRATION_BRANCH}}), using the main checkout only if it already has {{INTEGRATION_BRANCH}} checked out.'],
   ['orchestrate/tools/reconcile.mjs', "The row's dirt is read only in the trees holding its branch, the main checkout among them only while it holds that branch: dirt on any other branch is none of this row's work."],
   ['orchestrate/tools/reconcile.mjs', 'The main checkout: the worktree holding the common .git directory, never a worktree to prune.'],
   ['README.md', "- Sub-agents are used for census agents, implementers, reviewers, gate agents and the QA runner, but aren't required — without them the orchestrator implements a wave's batches one at a time in the main checkout and still runs the review as a separate adversarial pass per batch."],

@@ -3,6 +3,7 @@
 **Change**: {{CHANGE_ID}}
 **Skill**: `{{SKILL_DIR}}` · sha256 `{{SKILL_SHA256}}`
 **Skill source**: {{SKILL_SOURCE}}
+**Clear threshold**: {{CLEAR_THRESHOLD}}
 **You are** either the ORCHESTRATOR (the main session the user told to "continue") or an
 IMPLEMENTER/REVIEWER/GATE sub-agent given one batch. Neither of you has the planning
 session's context. This file is the contract: it holds this change's repo facts. Its
@@ -19,11 +20,16 @@ between sessions.
    [PROGRESS.md](PROGRESS.md), plus the project's always-loaded docs — especially
    {{GUARDRAILS_REF}}; every batch diff is checked against it. [LOG.md](LOG.md) is the
    narrative record: read it ON DEMAND by anchor (a Notes cell points at it), never at boot.
+   A session that `/orchestrate continue <id> after-clear` opened reads none of 00-request.md,
+   01-plan.md and PROGRESS.md: once the pin check (step 3) passes it reads the digest that
+   `node "{{SKILL_DIR}}/tools/reconcile.mjs" digest --repo <repo> --ledger {{CHANGE_ID}} --integration refs/heads/{{INTEGRATION_BRANCH}}`
+   prints, and of this contract only §Boot sequence, §Git model, §Validation commands and
+   §Hard prohibitions, reading any other section by its heading when a step needs it.
 2. Run `git status --porcelain`, `git branch --list`, `git worktree list`; note the current
    branch. **Never switch the main checkout.** Read ledger files from any branch with
    `git show <branch>:./<path>` (the `./` is required — Git Bash on Windows mangles
    `branch:path` otherwise) and write to the ledger through an integration worktree
-   (`git worktree add <scratchpad>/wt-int {{INTEGRATION_BRANCH}}`), using the main checkout
+   (`git worktree add "{{WORKTREE_ROOT}}/int" {{INTEGRATION_BRANCH}}`), using the main checkout
    only if it already has `{{INTEGRATION_BRANCH}}` checked out. Run `git show` from the
    repo or worktree ROOT (the `./` path is cwd-relative). Reuse an integration worktree
    that `git worktree list` already shows; if its directory is gone, `git worktree prune`
@@ -63,12 +69,12 @@ document.
 - **Orchestrator** — owns PROGRESS, LOG, `evidence/`, branches, worktrees, merges,
   close-outs, all user communication. The ONLY role that edits version files, the
   changelog, PROGRESS or LOG.
-- **Implementer** — one per batch, in its own worktree on its own branch. Reports in the
-  fixed shape: first line `DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED`, second
-  line `NONCE <nonce>` (the nonce its rendered prompt ends with), then an
-  evidence block (each validation run's `validate.mjs` line and exit code; commit SHAs;
-  checklist n/m), then ≤40 lines of prose. `NEEDS_FENCE` and `BLOCKED` use the mismatch
-  form: Expected / Found / Why it matters / How to proceed.
+- **Implementer** — one per batch, in its own worktree on its own branch. Its full report
+  goes to the file its rendered prompt names, in the fixed shape of protocol.md §Roles,
+  gates, tiers, ≤40 lines of prose; the final message is four lines: the status
+  (`DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED`), `NONCE <nonce>` (the nonce its
+  rendered prompt ends with), `checklist <n>/<m>`, the file's path. `NEEDS_FENCE` and
+  `BLOCKED` use the mismatch form: Expected / Found / Why it matters / How to proceed.
 - **Reviewer** — ONE fresh read-only sub-agent per batch per round, never the implementer,
   never reused. Its line-1 verdicts (`SHIP` · `FIX FIRST` · `NEEDS A CLOSER LOOK`), its
   `NONCE <nonce>` line 2 and the finding classes (P0 · P1 · ASK) are protocol.md's
@@ -118,7 +124,7 @@ checkpoint is recorded (`escaped` counts every fail across re-runs).
 - One branch per batch, named in the batch file (branch prefixes in this repo:
   {{BRANCH_PREFIXES}}), cut from the integration tip when the batch's wave opens.
   Wave members run CONCURRENTLY: one implementer per batch, each in an isolated git
-  worktree under the session scratchpad (never inside the repo). Per-worktree setup:
+  worktree under `{{WORKTREE_ROOT}}` as `b<nn>` (never inside the repo). Per-worktree setup:
   {{WORKTREE_SETUP}}. Same-wave fences were planned disjoint.
 - **Merge/push policy**: {{MERGE_POLICY}}
 - **Execution model: {{EXECUTION_MODEL}}** — {{EXECUTION_MODEL_RATIONALE}}
@@ -229,7 +235,9 @@ contain. Author embedded commands with no backslashes and no control characters.
 The change-complete close-out is protocol.md §Two distinct close-outs, run with these facts:
 
 - **Convergence pass** — {{CONVERGENCE}}.
-- Backlog: {{BACKLOG_FILE}} — works-but verdicts, residuals and dropped items become named
-  entries there, and residuals added get ids in the {{BACKLOG_ID_PREFIX}} scheme.
+- Backlog: {{BACKLOG_FILE}} is the to-do list, an item registering there only past the bar
+  of the pinned skill's `references/backlog.md`, with ids in the {{BACKLOG_ID_PREFIX}}
+  scheme; rulings in {{RULINGS_FILE}}; pack threshold {{PACK_THRESHOLD}}; expiry
+  {{BACKLOG_EXPIRY}} days.
 - Guardrails: new bug classes are distilled into {{GUARDRAILS_REF}}.
 - Release step (only on explicit user authorization): {{RELEASE_COMMAND}}

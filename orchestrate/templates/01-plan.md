@@ -47,7 +47,12 @@ file is the contract of repo facts, run by its pinned skill directory's
 
 <!-- Accepted at plan approval, one line each: `<id> — <backlog text, verbatim> → B<NN>`
      (files ⊆ that batch's fence, machine-verifiable, one-line criterion, ≤2 per batch,
-     none on L batches). Items considered and rejected go in LOG.md, not here. "none"
+     none on L batches). A prose-only item ends its line with the marker:
+     `<id> — <backlog text, verbatim> → B<NN> (prose-only)`; the ≤2 cap and the L-batch
+     bar apply only to items that are not prose-only, and a prose-only item needs no smoke
+     step of its own. Accepted pack proposals are listed as batches; where
+     `backlog.mjs packs` prints `UNKNOWN`, one line says no pack was proposed. Plan
+     approval is the standing OK for the run-end prose sweep. Items considered and rejected go in LOG.md, not here. "none"
      if the sweep found nothing eligible or the user declined. -->
 
 ## Per-batch specifications
@@ -57,7 +62,7 @@ file is the contract of repo facts, run by its pinned skill directory's
      their id), exploration findings (file:line facts, existing helpers to reuse),
      design decisions, edge cases, the applicable guardrails (the subset of the
      project's guardrail bullets this fence can violate). Each file:line fact is a pinned
-     citation, as `orchestrate/templates/01-plan.md:53` `## Per-batch specifications` cites
+     citation, as `orchestrate/templates/01-plan.md:58` `## Per-batch specifications` cites
      this heading (`check-ledger.mjs cites` checks each one). The batch files quote from
      here — write it complete enough that an implementer with zero other context can
      build from the batch file alone. -->

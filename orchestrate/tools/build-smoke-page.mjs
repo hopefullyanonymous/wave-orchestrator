@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Fill the frozen smoke-page template from a checkpoint's data sidecar.
 //
-//   node build-smoke-page.mjs <smoke-Cn.json> <smoke-Cn.html> [--previous <old.json>]
-//     [--template <path>] [--reset-verdicts]
+//   node build-smoke-page.mjs <smoke-Cn.json> <smoke-Cn.html> [--previous <old.json>] [--template <path>] [--reset-verdicts]
+//   node build-smoke-page.mjs --help
 //
+// The sidecar's keys, with a complete example: references/smoke-page.md §Sidecar shape.
 // The template is the settled design: fill its `{{...}}` slots and append a sidecar
 // fingerprint. The same sidecar and template always produce the same bytes.
 // Re-issues compare against the last issued sidecar to protect the step numbers
@@ -214,6 +215,11 @@ function validate(d) {
     .filter(key => d[key] === undefined || d[key] === "");
   if (missing.length) throw new Error(`sidecar is missing: ${missing.join(", ")}`);
   rejectControlCharacters(d, "sidecar");
+  // `checkpoint` is the n of C<n>, a positive integer, the form smoke-page.md §Sidecar shape shows: a "C1"
+  // here shipped two pages reading "Checkpoint CC1", so a string or any other number is refused by name.
+  if (!Number.isInteger(d.checkpoint) || d.checkpoint < 1) {
+    throw new Error(`checkpoint must be a positive integer, the n of C<n> ("checkpoint": 1 for C1), got ${JSON.stringify(d.checkpoint)}`);
+  }
   // The page refuses to run on an unfilled or malformed identity; fail here instead,
   // where the message can name the file, rather than shipping a page that stops the user.
   if (!/^[0-9a-fA-F]{40}$|^[0-9a-fA-F]{64}$/.test(d.buildSha)) {
@@ -323,22 +329,18 @@ function sameFile(left, right) {
   return a.dev === b.dev && a.ino === b.ino;
 }
 
-if (isMain(import.meta.url)) {
-  let args;
-  try {
-    args = parseArgs({ allowPositionals: true, options: {
-      template: { type: "string", default: DEFAULT_TEMPLATE },
-      previous: { type: "string" },
-      "reset-verdicts": { type: "boolean", default: false }
-    } });
-    if (args.positionals.length !== 2) throw new Error("expected a sidecar and an output path");
-  } catch (e) {
-    console.error(e.message);
-    console.error("usage: build-smoke-page.mjs <smoke-Cn.json> <smoke-Cn.html> [--previous <old.json>] [--template <path>] [--reset-verdicts]");
-    process.exit(2);
-  }
-  const [sidecar, out] = args.positionals;
-  const { template, previous, "reset-verdicts": resetVerdicts } = args.values;
+// The usage the header comment above shows. The help names the template and the sidecar's documented shape by
+// their places in the skill directory, never by a resolved path, so it prints the same through a linked skill.
+const USAGE = "usage: build-smoke-page.mjs <smoke-Cn.json> <smoke-Cn.html> [--previous <old.json>] [--template <path>] [--reset-verdicts]";
+const HELP = [USAGE,
+  "       build-smoke-page.mjs --help",
+  "Fills the smoke-page template (references/smoke-page-template.html, or --template <path>) from a checkpoint's",
+  "data sidecar. The sidecar's keys, with a complete example: references/smoke-page.md §Sidecar shape.",
+  "Exit 0: the page written, or this help; 1: an input refused, the reason on stderr; 2: an invalid invocation."
+].join("\n");
+
+// The command line's build: the page written and one line on stdout, or the reason on stderr and exit 1.
+function writePage({ positionals: [sidecar, out], values: { template, previous, "reset-verdicts": resetVerdicts } }) {
   try {
     if (previous && sameFile(sidecar, previous)) {
       throw new Error("--previous must be a separate snapshot of the last issued sidecar, not the edited input");
@@ -379,4 +381,23 @@ if (isMain(import.meta.url)) {
     console.error(`${sidecar}: ${e.message}`);
     process.exit(1);
   }
+}
+
+if (isMain(import.meta.url)) {
+  let args;
+  try {
+    args = parseArgs({ allowPositionals: true, options: {
+      template: { type: "string", default: DEFAULT_TEMPLATE },
+      previous: { type: "string" },
+      "reset-verdicts": { type: "boolean", default: false },
+      help: { type: "boolean", default: false }
+    } });
+    if (!args.values.help && args.positionals.length !== 2) throw new Error("expected a sidecar and an output path");
+  } catch (e) {
+    console.error(e.message);
+    console.error(USAGE);
+    process.exit(2);
+  }
+  if (args.values.help) console.log(HELP);
+  else writePage(args);
 }

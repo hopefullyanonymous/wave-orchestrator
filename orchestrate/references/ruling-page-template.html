@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{{PAGE_TITLE}}</title>
+<style>
+/* One narrow column: a summary strip, the rows grouped as the sidecar groups them, each a choice of outcomes. */
+:root {
+  --bg: #f6f7f4; --surface: #ffffff; --fg: #1d2420; --muted: #5d6a63; --line: #d9ded8;
+  --accent: #2f6b4f; --accent-soft: #e3efe8; --warn: #9a5b12; --warn-soft: #f7ecdc; --decline: #7a4a5a; --decline-soft: #f3e6eb;
+  --body: "Segoe UI", system-ui, -apple-system, sans-serif; --mono: ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #141917; --surface: #1c2320; --fg: #e4ebe6; --muted: #9aa8a0; --line: #2e3833;
+  --accent: #7cc4a0; --accent-soft: #1f3329; --warn: #e0a85c; --warn-soft: #33281a; --decline: #d49aae; --decline-soft: #33232a; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #141917; --surface: #1c2320; --fg: #e4ebe6; --muted: #9aa8a0; --line: #2e3833;
+  --accent: #7cc4a0; --accent-soft: #1f3329; --warn: #e0a85c; --warn-soft: #33281a; --decline: #d49aae; --decline-soft: #33232a; color-scheme: dark }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 15px; line-height: 1.5; padding: 28px 16px 64px; }
+main { max-width: 860px; margin: 0 auto; display: grid; gap: 28px; }
+h1 { font-weight: 600; font-size: 1.8rem; margin: 0; }
+h2 { font-weight: 600; font-size: 1.15rem; margin: 0; }
+.lede { color: var(--muted); max-width: 65ch; margin: 6px 0 0; }
+.eyebrow { font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 0 0 4px; }
+.strip { display: flex; flex-wrap: wrap; gap: 10px; }
+.chip { font-size: .85rem; padding: 4px 10px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+section { display: grid; gap: 10px; }
+.sec-head p { margin: 2px 0 0; color: var(--muted); font-size: .9rem; max-width: 70ch; }
+.item { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; display: grid; gap: 8px; }
+.item-top { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.id { font-family: var(--mono); font-size: .8rem; color: var(--muted); }
+.what { font-weight: 600; flex: 1 1 300px; min-width: 0; }
+.detail { color: var(--muted); font-size: .9rem; margin: 0; }
+.where { font-family: var(--mono); font-size: .78rem; color: var(--muted); overflow-wrap: anywhere; }
+.choice { display: flex; flex-wrap: wrap; gap: 6px; }
+.choice label { cursor: pointer; font-size: .85rem; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; display: inline-flex; gap: 6px; align-items: center; }
+.choice input { accent-color: var(--accent); }
+.choice label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+.choice label.no:has(input:checked) { background: var(--decline-soft); border-color: var(--decline); }
+.choice label.later:has(input:checked) { background: var(--warn-soft); border-color: var(--warn); }
+.changed { font-size: .75rem; color: var(--warn); }
+.note-btn { font-size: .85rem; font-weight: 600; background: transparent; color: var(--accent); border: 1px dashed var(--line); padding: 4px 10px; }
+.note-btn[aria-expanded="true"], .note-btn.has-note { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
+.ruled { border-style: dashed; }
+.out { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / .08); }
+.out-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+button { font: inherit; font-weight: 600; background: var(--accent); color: var(--bg); border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
+button:focus-visible, .choice label:focus-within, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+textarea { font: inherit; width: 100%; box-sizing: border-box; min-height: 44px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+#status { font-size: .85rem; color: var(--muted); }
+#copybox { font-family: var(--mono); font-size: .78rem; min-height: 120px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="eyebrow" id="eyebrow"></p>
+    <h1 id="headline"></h1>
+    <p class="lede">Everything the run set aside, in one list. Each row starts on the proposal; change any you disagree with, add a note where you want one, then press <strong>Copy rulings</strong> and paste the text into the chat. Nothing is written or fixed until you paste it.</p>
+  </header>
+  <div class="strip" id="strip"></div>
+  <div id="groups"></div>
+  <div class="out">
+    <label for="note" class="eyebrow">Anything else (optional)</label>
+    <textarea id="note"></textarea>
+    <div class="out-row">
+      <button id="copy" type="button">Copy rulings</button>
+      <span id="status"></span>
+    </div>
+    <textarea id="copybox" hidden readonly aria-label="Rulings text to copy"></textarea>
+  </div>
+</main>
+<script>
+// The sidecar as build-ruling-page.mjs reads it: every row's choices, labels and proposal come from there.
+const DATA = {{DATA_JSON}};
+const LABEL = DATA.labels;
+const KEY = DATA.storageKey + ":" + DATA.pageKey;
+const NO = ["decline", "drop", "skip"], LATER = ["register", "keep", "log"];
+const open = DATA.items.filter((i) => !i.ruled);
+function load(name) { try { const v = JSON.parse(localStorage.getItem(KEY + ":" + name) || "{}"); return v && typeof v === "object" ? v : {}; } catch (_e) { return {}; } }
+function save(name, value) { try { localStorage.setItem(KEY + ":" + name, JSON.stringify(value)); } catch (_e) {} }
+const saved = load("picks"), notes = load("notes"), picks = {};
+for (const it of open) picks[it.id] = it.choices.includes(saved[it.id]) ? saved[it.id] : it.proposal;
+const oneLine = (s) => (typeof s === "string" ? s.trim().replace(/\s+/g, " ") : "");
+
+function el(tag, cls, text) { const e = document.createElement(tag); if (cls) e.className = cls; if (text) e.textContent = text; return e; }
+function render() {
+  document.getElementById("eyebrow").textContent = DATA.eyebrow;
+  document.getElementById("headline").textContent = DATA.headline;
+  const groups = document.getElementById("groups");
+  for (const g of DATA.groups) {
+    const items = DATA.items.filter((i) => i.group === g.key);
+    if (!items.length) continue;
+    const sec = el("section"), head = el("div", "sec-head");
+    head.append(el("h2", "", g.title + " (" + items.length + ")"));
+    if (g.blurb) head.append(el("p", "", g.blurb));
+    sec.append(head);
+    for (const it of items) sec.append(row(it));
+    groups.append(sec);
+  }
+  summary();
+}
+function row(it) {
+  const box = el("div", "item" + (it.ruled ? " ruled" : "")), top = el("div", "item-top");
+  top.append(el("span", "id", it.id), el("span", "what", it.what));
+  box.append(top);
+  if (it.detail) box.append(el("p", "detail", it.detail));
+  if (it.where) box.append(el("div", "where", it.where));
+  if (it.ruled) { box.append(el("p", "detail", "Already ruled: " + it.ruled)); return box; }
+  const ch = el("div", "choice"); ch.setAttribute("role", "radiogroup");
+  for (const k of it.choices) {
+    const lab = el("label", NO.includes(k) ? "no" : LATER.includes(k) ? "later" : "");
+    const inp = document.createElement("input");
+    inp.type = "radio"; inp.name = "r-" + it.id; inp.value = k; inp.checked = picks[it.id] === k;
+    inp.addEventListener("change", () => { picks[it.id] = k; save("picks", picks); summary(); mark(box, it); });
+    lab.append(inp, document.createTextNode(LABEL[k] + (k === it.proposal ? " (proposed)" : "")));
+    ch.append(lab);
+  }
+  const nb = el("button", "note-btn"), ta = el("textarea");
+  nb.type = "button"; ta.id = "note-" + it.id; ta.setAttribute("aria-label", "Note for " + it.id);
+  ta.placeholder = "Your note or reason for this row";
+  ta.value = typeof notes[it.id] === "string" ? notes[it.id] : "";
+  ta.hidden = !ta.value;
+  const label = () => { nb.textContent = ta.value.trim() ? "Note ✓" : "Note"; nb.classList.toggle("has-note", !!ta.value.trim()); nb.setAttribute("aria-expanded", String(!ta.hidden)); };
+  nb.setAttribute("aria-controls", ta.id);
+  nb.addEventListener("click", () => { ta.hidden = !ta.hidden; label(); if (!ta.hidden) ta.focus(); });
+  ta.addEventListener("input", () => { notes[it.id] = ta.value; save("notes", notes); label(); });
+  label();
+  ch.append(nb);
+  box.append(ch, ta);
+  mark(box, it);
+  return box;
+}
+function mark(box, it) {
+  let m = box.querySelector(".changed");
+  if (picks[it.id] !== it.proposal) {
+    if (!m) { m = el("span", "changed"); box.querySelector(".item-top").append(m); }
+    m.textContent = "changed from proposal";
+  } else if (m) m.remove();
+}
+function summary() {
+  const c = {}; let changed = 0;
+  for (const it of open) { c[picks[it.id]] = (c[picks[it.id]] || 0) + 1; if (picks[it.id] !== it.proposal) changed++; }
+  const s = document.getElementById("strip");
+  s.textContent = "";
+  for (const k of Object.keys(LABEL)) if (c[k]) s.append(el("span", "chip", c[k] + " " + LABEL[k]));
+  s.append(el("span", "chip", changed ? changed + " changed from proposal" : "all on proposal"));
+}
+// The pasted text, in the shape build-ruling-page.mjs read checks: the header line names this page's fingerprint.
+function text() {
+  const lines = [DATA.change + " rulings (page " + DATA.pageKey + ")"];
+  const changed = open.filter((i) => picks[i.id] !== i.proposal);
+  lines.push(changed.length ? (open.length - changed.length) + " on proposal, " + changed.length + " changed:" : "All " + open.length + " on proposal.");
+  const noted = (i) => (oneLine(notes[i.id]) ? " — note: " + oneLine(notes[i.id]) : "");
+  for (const i of changed) lines.push(i.id + " " + LABEL[picks[i.id]] + " (proposed " + LABEL[i.proposal] + ") — " + i.what + noted(i));
+  lines.push("", "Full list:");
+  for (const i of open) lines.push(i.id + ": " + LABEL[picks[i.id]] + noted(i));
+  const note = oneLine(document.getElementById("note").value);
+  if (note) lines.push("", "Note: " + note);
+  return lines.join("\n");
+}
+document.getElementById("copy").addEventListener("click", () => {
+  const t = text(), box = document.getElementById("copybox"), st = document.getElementById("status");
+  box.value = t;
+  const manual = () => { box.hidden = false; box.focus(); box.select(); st.textContent = "Couldn't copy automatically. The text is selected below; copy it yourself."; };
+  if (!navigator.clipboard) return manual();
+  navigator.clipboard.writeText(t).then(() => { st.textContent = "Copied. Paste it into the chat."; box.hidden = true; }).catch(manual);
+});
+render();
+</script>
+</body>
+</html>

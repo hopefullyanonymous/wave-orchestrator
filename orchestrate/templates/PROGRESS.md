@@ -74,11 +74,13 @@ before believing any row (§Recovery of the pinned skill directory's `references
 | Date | Checkpoint | Verdict | User notes |
 |------|------------|---------|------------|
 <!-- record the user's VERBATIM words for every checkpoint verdict — and for every
-     verdict on a ⛔ batch or a capped repair (Checkpoint column = `B<NN>`) — including any
+     verdict on a ⛔ batch or a capped repair (Checkpoint column = `B<NN>`), and for the
+     change-complete ruling (Checkpoint column = `ruling`) — including any
      merge/push/release authorization in the same message (that wording IS the
      authorization record) and which batch(es) a partial fail indicts. Verbatim quotes are
      exempt from every length cap. The smoke page's "Copy results as text" paste is the
-     preferred form; works-but items become backlog entries, not failures. -->
+     preferred form; works-but items are not failures: each reaches the change-complete
+     ruling step, skipping the bar. -->
 
 ## Item → batch coverage audit
 
@@ -86,7 +88,8 @@ before believing any row (§Recovery of the pinned skill directory's `references
 |--------------|--------|-------|---------|--------|
 <!-- one row per user item from 00-request.md; Source = "request" or "backlog <id>" for
      an accepted fold-in. The final pass must show ZERO unaccounted items: each row ends
-     as a merged commit SHA, an intended-behavior resolution, or a named backlog entry,
+     as a merged commit SHA, an intended-behavior resolution, or an item that reaches the
+     change-complete ruling step (works-but and unimplemented request items skip the bar),
      and carries the convergence class (implemented / partial / contradicts — from the
      convergence pass when the contract has it on, else from PROGRESS + git). -->
 

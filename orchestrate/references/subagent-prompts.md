@@ -73,13 +73,22 @@ reports the one line and the exit code, and never read the log before it exits.
 Never open another agent's prompt or facts file.
 
 REPORT (fixed shape — the orchestrator acts on nothing else):
+Write your full report with the Write tool to "[REPORT_FILE]". Its first line is exactly
+`### B[NN] R[ROUND] implementer findings`; then line 1 below; then the same `NONCE` line as
+line 2 of your final message (when this prompt does not end with that line, neither the
+file nor your final message has one, and your final message is three lines); then the
+EVIDENCE block below, one line per validation run (its `validate.mjs` line, then
+`exit <code>`), ended by a blank line.
 Line 1, exactly one of: DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED
 EVIDENCE: for each validation run — its `validate.mjs` line and its exit code;
-the commit SHA(s); checklist ticked n/m.
+the commit SHA(s); `checklist <n>/<m>` (<n> items ticked of <m>).
+Before you report, end every background command you started (`run_in_background`, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you `waiting` (Claude Code shows `completed`), blocks the orchestrator's context clear, and resumes you when it ends.
 Then at most 40 lines: what you changed and why; anything out-of-fence you noticed
 (notes only). For NEEDS_FENCE or BLOCKED use exactly:
   Expected: … / Found: … / Why it matters: … / How to proceed: …
   (NEEDS_FENCE names the path(s), the checklist item, and why the fence must grow.)
+FINAL MESSAGE (four lines, nothing else): line 1 the status line; line 3
+`checklist <n>/<m>`; line 4 the path [REPORT_FILE].
 Line 2, directly under line 1: NONCE [NONCE]
 ```
 
@@ -89,7 +98,8 @@ repo): replace the worktree paragraph with "Work on the CURRENT branch
 no such edit, so this variant is always the manual procedure (§Spawning rules).
 
 **Polish pass** (after a `SHIP` that carries ASKs): resume the SAME implementer
-(SendMessage) with the pointer to this block, rendered as role `polish`:
+(SendMessage; a FRESH one when the render prints `FRESH` — §Spawning rules) with the
+pointer to this block, rendered as role `polish`:
 
 ```prompt:polish
 Your batch reviewed SHIP with ASKs (in-fence, no production behavior change); the
@@ -100,12 +110,14 @@ unticked), then do them, tick them, run the validation commands, commit ("polish
 Touch only test, doc and prose paths; if an ask turns out to need a production change,
 STOP and report it as DONE_WITH_CONCERNS naming the file — do not make the change.
 Never open another agent's prompt or facts file.
+Before you report, end every background command you started (`run_in_background`, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you `waiting` (Claude Code shows `completed`), blocks the orchestrator's context clear, and resumes you when it ends.
 Same REPORT shape.
+Its file this time is "[REPORT_FILE]", its first line exactly `### B[NN] R[ROUND] polish findings`.
 Line 2, directly under line 1: NONCE [NONCE]
 ```
 
-**Fix round 1** (after a `FIX FIRST`): resume the SAME implementer (past about 400K tokens
-of its context, a FRESH one with the `rework` prompt below — §Spawning rules) with the
+**Fix round 1** (after a `FIX FIRST`): resume the SAME implementer (a FRESH one with the
+`rework` prompt below when the render prints `FRESH` — §Spawning rules) with the
 pointer to this block, rendered as role `fix-round`:
 
 ```prompt:fix-round
@@ -119,7 +131,9 @@ its one line is the result and its exit code the real one. Never pipe or tail it
 may outlast the runtime's command timeout, run it as a background task whose completion
 reports the one line and the exit code, and never read the log before it exits.
 Never open another agent's prompt or facts file.
+Before you report, end every background command you started (`run_in_background`, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you `waiting` (Claude Code shows `completed`), blocks the orchestrator's context clear, and resumes you when it ends.
 Same REPORT shape.
+Its file this time is "[REPORT_FILE]", its first line exactly `### B[NN] R[ROUND] fix-round findings`.
 Line 2, directly under line 1: NONCE [NONCE]
 ```
 
@@ -198,6 +212,13 @@ SHIP = no P0/P1 (ASKs allowed). FIX FIRST = at least one P0/P1. NEEDS A CLOSER L
 suspected but unconfirmed — say exactly what check would confirm it. At most 40 lines
 of prose beyond the findings. Never pad: one real bug named precisely outweighs a page
 of maybes.
+SWEEP: an optional list after the findings, one entry per prose-only fix outside the
+batch's own work: `file:line`, the current text and the replacement text, whose fact you
+verified; it is no finding class, line 3's counts never include it, and it never blocks.
+A fix is prose-only when every path it changes is Markdown, or JavaScript that
+`prose-only-diff.mjs` reads as `PROSE-ONLY`. Prose that is a contract and files agents read
+as instructions (`CLAUDE.md`, `.claude/**`, a skill's own Markdown) are never listed there;
+the classes above still apply to them.
 FINAL MESSAGE (four lines, nothing else): line 1 the verdict line; line 3
 `P0=<n> P1=<n> ASK=<n>`; line 4 the path [FINDINGS_FILE].
 Line 2, directly under line 1: NONCE [NONCE]
@@ -225,7 +246,7 @@ only `git diff [PRE_POLISH_SHA]..HEAD`, the ASK list, and duties 1, 2 and 4. Not
 Its verdict is recorded like any other (`R<k> <verdict> @<sha>`) and never counts toward
 the cap. One strike: its `FIX FIRST` discards the polish at once — the orchestrator
 writes `polish discarded: @[PRE_POLISH_SHA]` into the row's Notes, reverts back to that
-reviewed tree in ONE commit (never a reset), and integrates it; unclosed ASKs → backlog,
+reviewed tree in ONE commit (never a reset), and integrates it; unclosed ASKs → residuals for the change-complete ruling step,
 each with its wording attached.
 
 Only `FIX FIRST` rounds count toward the cap of two. The SECOND `FIX FIRST` makes the
@@ -411,6 +432,7 @@ nothing, and write only disposable scratch under your session scratchpad.
 Never open another agent's prompt or facts file.
 
 THE BATCH'S PLANNED CHANGE: [the draft batch file's planned change]
+THE BATCH'S FENCE: [the draft batch file's Files line; where the repository keeps a map of its files' tests and callers, each fenced file's rows from it]
 FACTS TO FIND: [numbered; each names the files and symbols to settle]
 
 Open your report with a short list headed "Where the draft is wrong or incomplete": each
@@ -421,13 +443,25 @@ Then, for every file this batch changes, list every test that reads it (search t
 
 Then grep the repository's backlog and bug trackers and its old ledgers under `.agents/` for every file this batch changes or depends on and for its main symbols; open the hits, and report any recorded finding, measurement or decision that bears on the planned change.
 
+Then, for every fix you propose, in that opening list or anywhere else in your report, list every test that reads a file the fix changes or a name it adds or changes (search the tests for both), and say what the fix would break; do this before you hand back.
+
 Report: one bullet per file: `path:line — what — why`. At most 80 lines. Mark as UNVERIFIED anything you did not read in the file it depends on or run yourself, including your own inferences and recommendations, and name the platform of anything you ran.
+```
+
+**Send-back** — after the orchestrator folds the report, it resumes the same agent (SendMessage) with this block, holding the lines `scaffolding.md` step 3 names:
+
+```
+THE LINES WRITTEN INTO B[NN]'S BATCH FILE FROM YOUR REPORT, exactly as written, each with the item of your report it came from: [the lines]
+Never open another agent's prompt or facts file.
+
+For each line, list every test that reads a file it changes or a name it adds or changes (search the tests for both), say what it would break, and say whether it still says what your report found. Open with one bullet per line: `holds`, or what breaks or differs, with `path:line`. Mark as UNVERIFIED anything you did not read in the file it depends on or run yourself.
 ```
 
 One census per batch, never one agent for several batches. The report comes back as the
 agent's final message. `scaffolding.md` step 3 says how the orchestrator records its opening
 list in LOG.md; `protocol.md` §Fence changes and §Session algorithm step 4 say when a batch's
-`census` agent runs again during the run.
+`census` agent runs again during the run. The send-back's answer also comes back as the agent's
+final message; `scaffolding.md` step 3 says which lines go back and how the answer is recorded.
 
 ## Plan pre-flight (scaffold time — read-only)
 
@@ -539,10 +573,20 @@ DO: trace the failure to its root cause in the shipped code paths; fix it inside
 fence; add or re-point the test that fails on the un-fixed code (this repair is a `fix`
 batch — the orchestrator runs failing-on-base against it); run the validation commands;
 commit "fix: batch [NN] repair — [symptom]".
+Before you report, end every background command you started (`run_in_background`, or a command moved to the background at its timeout): wait for it to finish or kill it, since one still running when you hand back leaves you `waiting` (Claude Code shows `completed`), blocks the orchestrator's context clear, and resumes you when it ends.
 
 REPORT: same fixed shape as the implementer, without its nonce line (status line,
 evidence block, ≤40 lines:
 root cause, the fix, and what the user's checkpoint re-run should now check).
+Write it with the Write tool to "[REPORT_FILE]", and give neither it nor your final message
+the nonce line. Its first line is exactly `### B[NN] R[ROUND] fix-up findings`; its second
+exactly one of: DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED; its third `EVIDENCE:`,
+then one line per validation run (its `validate.mjs` line, then `exit <code>`), the commit
+SHA(s) and `checklist <n>/<m>`, ended by a blank line; then the ≤40 lines. For NEEDS_FENCE
+or BLOCKED add exactly:
+  Expected: … / Found: … / Why it matters: … / How to proceed: …
+FINAL MESSAGE (three lines, nothing else): the status line; `checklist <n>/<m>`; the path
+[REPORT_FILE].
 ```
 
 **Revert variant** (`fix/<batch>-revert`, a user-ordered drop): no implementer. The
@@ -579,10 +623,11 @@ unmerged and the session STOPs with the three verdicts.
   user-authorized third round is a FRESH implementer on the strong tier; reviewers are
   fresh every round; any agent lost to a crash is respawned fresh at the first unticked
   item — an implementer owed a fix round with its rendered `rework` prompt, one owed a
-  polish pass with its rendered implementer prompt first, then the `polish` pointer. A fix
-  round goes instead to a FRESH implementer with the rendered `rework` prompt when the
-  implementer it would resume shows `subagent_tokens` (its current context) past about
-  400K in its last task notification.
+  polish pass with its rendered implementer prompt first, then the `polish` pointer. A polish
+  or fix-round render takes, as fact `subagentTokens`, the `subagent_tokens` (its current
+  context) the implementer it would resume shows in its last task notification; at or past
+  the renderer's line it prints `FRESH <route>` instead of a prompt, and the pass goes to a
+  FRESH implementer by the route that line names.
 - Tiers: the reviewer never runs on a less capable model than the implementer; L-weight
   reviews and the fresh implementer of an authorized third round on the most capable
   model available (the strong tier); record

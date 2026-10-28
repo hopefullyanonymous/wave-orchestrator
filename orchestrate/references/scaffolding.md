@@ -64,26 +64,53 @@
    input construction to the tester or invent a pre-verified result.
    **Census** — once the batches are drafted, spawn one `census` agent per batch, never one agent
    for several batches, with the `subagent-prompts.md` §Census skeleton filled with the batch's
-   planned change and the facts it must find. Each report opens with where the draft is wrong or
+   planned change, its fence and the facts it must find. Each report opens with where the draft is wrong or
    incomplete; before the pre-flight, record every one of those items in LOG.md as carried (the
-   batch-file line that now holds it) or rejected (the reason). Whenever a later planning step — a
+   batch-file line that now holds it) or rejected (the reason). Before that record, every line written
+   into a batch file from a census report in words other than the report's, and every fix chosen for a
+   problem the report only flagged, goes back to the same `census` agent, resumed with §Census's
+   send-back block holding those lines exactly as written, and each item of its answer is recorded the
+   same way; an agent that cannot be resumed is replaced by the batch's `census` agent run again over
+   the batch file as it then reads. Whenever a later planning step — a
    pre-flight fix, an accepted fold-in or an adjustment at approval — adds a file, a hook or a
    behaviour to a batch, run the batch's `census` agent again and record its items the same way
-   before the fill.
+   before the fill. The prompt of a re-run may name what changed since the batch's last census, but
+   once a fold has added text to the batch file it never says the rest was censused before.
 
 4. **Backlog sweep** — read the repo's backlog / feature / bug files and propose
-   fold-ins. Eligible only if ALL hold: (a) the item's files are a SUBSET of one draft
-   batch's fence; (b) it is machine-verifiable or covered by that batch's existing
+   fold-ins; a backlog file in the form of the pinned skill's `references/backlog.md` is
+   read as the to-do list, and the rulings file is never read here. Eligible only if ALL
+   hold: (a) the item's files are a SUBSET of one draft batch's fence; (b) it is machine-verifiable or covered by that batch's existing
    agent-runnable smoke steps — it never adds a human step and never changes the batch's
    hands-on class; (c) a one-line acceptance criterion, no design decision, no
-   migration; (d) at most two per batch, none on an L-weight batch. Present the eligible
-   list (id or a proposed id, verbatim text, host batch, why cheap) for the user to pick
+   migration; (d) at most two per batch, none on an L-weight batch. A prose-only item —
+   every path it changes is Markdown, or JavaScript that `prose-only-diff.mjs` reads as
+   `PROSE-ONLY`, and none is a file agents read as instructions (the project's agent
+   instructions wherever they load from, anything under `.claude/`, a skill's own
+   Markdown) or prose that is a contract — is exempt from (d): it
+   folds in with no per-batch cap and onto a batch of any weight, (a) still keeping waves
+   disjoint, and the plan's Backlog fold-ins section marks its line `(prose-only)`. It adds
+   no file, hook or behaviour, so it needs no census re-run. Eligibility comes from the
+   entry and the proof from the batch gate (protocol.md), which reverts a fold-in commit
+   that does not classify as prose-only and returns its item to the backlog. Present the
+   eligible list (id or a proposed id, verbatim text, host batch, why cheap) for the user to pick
    at PLAN APPROVAL — not a separate interview round. Items considered and rejected are
    noted in LOG.md. An accepted fold-in becomes a request item (00-request.md decision
    "folded from <file> <id> — approved <date>"; coverage rows tagged `backlog <id>`),
-   gets its own checklist item, acceptance criterion and smoke step in the host batch,
-   and its own commit. Only the ACCEPTED items receive an id in the repo's scheme
-   (`{{BACKLOG_ID_PREFIX}}`); the rest of the backlog is untouched.
+   gets its own checklist item, acceptance criterion and smoke step (a prose-only one no
+   smoke step) in the host batch, and its own commit. Only the ACCEPTED items receive an
+   id in the repo's scheme (`{{BACKLOG_ID_PREFIX}}`); the rest of the backlog is untouched. Plan approval is also
+   the standing OK for the run-end prose sweep.
+   Then propose packs. When the backlog file is in the form (it holds the form line), run
+   `node "<SKILL_DIR>/tools/backlog.mjs" packs --backlog <the backlog file> --threshold <the pack threshold>`
+   (the interview's `{{PACK_THRESHOLD}}`): each file it prints that the draft plan touches is
+   proposed as an extra batch, holding that file's to-do items, in a later wave than the
+   plan's batch on that file — proposed, never run unasked, and picked at PLAN APPROVAL like
+   the fold-ins; a declined pack is proposed whenever a later plan touches its file. When
+   `backlog.mjs` prints `UNKNOWN` instead (a backlog not yet in the form, or none), no pack
+   is proposed and the plan's Backlog fold-ins section says so in one line. An accepted
+   pack's items are fold-ins of its batch, marked as step 10 marks any fold-in, and that
+   batch's `census` agent runs before the fill, as for an adjustment at approval.
 5. **Pre-flight** — spawn ONE fresh read-only sub-agent with the `subagent-prompts.md`
    pre-flight skeleton over the draft request, plan and batch files (fold-ins included).
    Draft them first as a ledger in a scratch worktree of the base (`git worktree add
@@ -242,7 +269,9 @@ See smoke-page.md for the complete schema and commands.
   starting at `01` (`00` is reserved for ledger scaffolding).
 - Repair branches: `fix/<batch-slug>-c<n>-followup` (checkpoint failure),
   `fix/<batch-slug>-tip` (red integration tip), `fix/<batch-slug>-presmoke-<step>`,
-  `fix/<batch-slug>-revert` (user-ordered revert of a merge); NEEDS_FENCE continuations:
+  `fix/<batch-slug>-revert` (user-ordered revert of a merge),
+  `fix/<batch-slug>-prose-sweep` (the run-end prose sweep, `<batch-slug>` the last batch
+  merged); NEEDS_FENCE continuations:
   `<batch-branch>-w<n+1>`.
 - Ledger root is always repo-root `.agents/changes/` — it is the discovery anchor every
   mode globs for. Closed ledgers may move to the sibling `.agents/archive/`. Override
@@ -279,7 +308,9 @@ appear in the templates — check both directions when editing either.
 | `{{SKILL_DIR}}` | template (READBEFORE) | the absolute path of the directory holding the skill's `SKILL.md` (the base directory the skill loader reports), forward slashes, stored RAW between the pin line's backticks — never quoted there; every command that uses it quotes it. Never relative or `~`: the pin check reads it from the working directory |
 | `{{SKILL_SHA256}}` | template (READBEFORE) | the hex field of `node "<SKILL_DIR>/tools/check-ledger.mjs" skill --dir "<SKILL_DIR>"`, run at fill time |
 | `{{SKILL_SOURCE}}` | template (READBEFORE) | filled at fill time next to `{{SKILL_SHA256}}`: how the pinned directory was produced — e.g. ``git archive <commit> orchestrate`` of `<clone path>`, a copy of `<path>` at `<commit>`, or `unknown`; a restore after a pin mismatch rebuilds the directory byte-for-byte from it |
+| `{{CLEAR_THRESHOLD}}` | template (READBEFORE) | the interview — the context size, as `<n>K` in whole thousands with no space (`300K`), under which orchestrate-mod answers `not needed` instead of clearing the conversation, since a clear repays its restart only past the break-even of about 280–355K; default `300K`, a repeat repo offering its prior contract value as the default. The mod reads the line in exactly that form, and a contract without it as `300K` |
 | `{{WORKTREE_SETUP}}` | template (READBEFORE) | detected install/build step (`npm install`, `cargo fetch`, …) or `n/a` |
+| `{{WORKTREE_ROOT}}` | template (READBEFORE) | the interview — the absolute directory, forward slashes, that holds the integration worktree (`int`) and every batch worktree (`b<nn>`): outside the session scratchpad and outside any `tmpfs` (`env-facts.mjs` flags one), so it survives sessions and reboots. Default `<home>/worktrees/{{CHANGE_ID}}`, the full id, since two ledgers scaffolded the same day share a prefix-and-date name such as `os1022`; its length plus `/b<nn>/` and the repository's longest tracked path stays under 248 characters, the limit Git for Windows puts on a directory without `core.longpaths` (a file's is 260). It replaces the worktree-root bullet earlier contracts hand-wrote into `{{REPO_CONVENTIONS}}`, so a repeat scaffold does not copy that bullet |
 | `{{REPO_CONVENTIONS}}` | template (READBEFORE) | distilled from the project CLAUDE.md/docs — the BINDING subset, ≤25 lines, plus a pointer to the source doc; never a wholesale copy |
 | `{{EXTRA_PROHIBITIONS}}` | template (READBEFORE) | interview #7 / CLAUDE.md — repo-specific never-touch items; `(none beyond the above)` if empty |
 | `{{GUARDRAILS_REF}}` | template (READBEFORE) | detected guardrails section (e.g. `` `CLAUDE.md` §Bug-Class Guardrails ``) or `the project guardrails doc (none yet — create a CLAUDE.md guardrails section at first distill)` |
@@ -287,6 +318,9 @@ appear in the templates — check both directions when editing either.
 | `{{ROLE_TIERS}}` | template (READBEFORE) | interview #7 — model-agnostic wording per role, e.g. "implementers and gate agents: default; reviewer: at least the implementer's tier, most capable available for L batches and the fresh implementer of an authorized third round" |
 | `{{BACKLOG_FILE}}` | template (READBEFORE) | detected (`BACKLOG.md`, `TODO.md`, issue tracker) or `` `BACKLOG.md` (create on first residual) `` |
 | `{{BACKLOG_ID_PREFIX}}` | template (READBEFORE) | detected id scheme in the backlog files (`SCAN-6`, `#3.5`, `BL-017` …) or `BL-` when none; only accepted fold-ins and new residual entries receive ids |
+| `{{RULINGS_FILE}}` | template (READBEFORE) | the interview — the file holding the user's rulings in the form of `references/backlog.md`; default `RULINGS.md` beside the backlog file, created at the first ruling; a repeat repo offering its prior contract's value as the default |
+| `{{PACK_THRESHOLD}}` | template (READBEFORE) | the interview — the count of to-do items on one file at or over which the backlog sweep proposes a pack (`backlog.mjs packs --threshold <n>`), a whole number; default `5`, a repeat repo offering its prior contract's value as the default |
+| `{{BACKLOG_EXPIRY}}` | template (READBEFORE) | the interview — the days after its `Since:` date past which a to-do item has expired (`backlog.mjs expired --days <n>`), a whole number; default `30`, a repeat repo offering its prior contract's value as the default |
 | `{{RELEASE_COMMAND}}` | template (READBEFORE) | detected build/release script or `none` |
 | `{{BATCH_NUM}}` | template (batch file) | per batch, two digits |
 | `{{BATCH_SLUG}}` | naming only | per batch, kebab-case |
@@ -376,7 +410,8 @@ detection. Do not run it or fetch automatically.
    adjust (PR flow, orchestrator ff-merge on recorded verdict, squash — note that squash
    collapses per-fold-in commits, so surgical reverts stop being available).
 6. **ID prefix** — default: initials of the repo directory name
-   (`inventory-sync-tool` → `IST`); confirm. Confirm the backlog id scheme.
+   (`inventory-sync-tool` → `IST`); confirm. Confirm the backlog id scheme, the rulings
+   file, the pack threshold and the backlog expiry.
 7. **Gates, tiers, distillation targets, prohibitions** — offer the detected gate agents,
    the convergence toggle, and the tier wording; only if detection found no guardrails section or backlog file:
    create them at first close-out? (default yes). Any never-touch files beyond the

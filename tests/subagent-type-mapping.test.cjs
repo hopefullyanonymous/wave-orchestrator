@@ -18,9 +18,10 @@ const CAVEAT = 'Write and Bash can still write, so "read-only" stays partly conv
 
 // Heading → the type its spawn line must name, plus the opening of the prompt block
 // that line governs, in document order. Enumerated rather than counted, so a skeleton
-// added later cannot inherit the silence. The opening line is pinned because two of
+// added later cannot inherit the silence. The opening line is pinned because three of
 // these sections hold further fenced blocks (the Implementer's polish, fix-round and rework
-// prompts, the Reviewer's round-2 block): without it, deleting a skeleton's actual prompt
+// prompts, the Reviewer's round-2 block, the Census's send-back block): without it,
+// deleting a skeleton's actual prompt
 // body would leave a later block to satisfy every structural check here. RESUMES below
 // pins those further blocks, so the whole block set is enumerated.
 const SKELETONS = [
@@ -120,12 +121,14 @@ test('no prompt block escapes the mapping', () => {
 });
 
 // The blocks a skeleton section holds after its prompt: resumed or composed, never spawned,
-// so they carry no spawn line. Paired with the fence line prompt.mjs renders them by.
+// so they carry no spawn line. Each is paired with the fence line prompt.mjs renders it by, or with
+// none (info '') when it is pasted rather than rendered.
 const RESUMES = [
   { heading: '## Implementer', opens: 'Your batch reviewed SHIP with ASKs', info: 'prompt:polish' },
   { heading: '## Implementer', opens: 'Your batch reviewed FIX FIRST', info: 'prompt:fix-round' },
   { heading: '## Implementer', opens: 'DO: your batch is already built', info: 'prompt:rework' },
   { heading: '## Reviewer (the gate — read-only)', opens: 'PREVIOUS FINDINGS:', info: 'prompt:round-2' },
+  { heading: '## Census (scaffold time — read-only)', opens: 'THE LINES WRITTEN INTO', info: '' },
 ];
 // Which skeletons prompt.mjs renders (the rest are filled and pasted), by fence line.
 const RENDERED = new Map([['## Implementer', 'prompt:implementer'], ['## Reviewer (the gate — read-only)', 'prompt:reviewer'],
@@ -144,8 +147,8 @@ test('the whole block set: every fenced block is a mapped skeleton or a named re
   });
   assert.deepEqual(actual, expected, 'a fenced block was added, dropped, reordered or re-fenced');
   assert.equal(expected.length, SKELETONS.length + RESUMES.length);
-  // The pasted skeletons carry a bare fence: rendering one would need prompt.mjs to know it.
-  assert.deepEqual(doc.blocks.filter(b => b.info).length, RENDERED.size + RESUMES.length);
+  // The pasted skeletons and pasted resume blocks carry a bare fence: rendering one would need prompt.mjs to know it.
+  assert.deepEqual(doc.blocks.filter(b => b.info).length, RENDERED.size + RESUMES.filter(r => r.info).length);
   // No spawn line governs a resume block: each sits after its section's spawned prompt block.
   for (const r of RESUMES) {
     const block = doc.blocks.find(b => b.first.startsWith(r.opens));

@@ -25,13 +25,18 @@ const plain = text => text.replace(new RegExp(`${ESC}\\[[0-?]*[ -/]*[@-~]`, 'g')
 const slash = text => text.replace(/\\/g, '/');
 const withoutTestContext = env => Object.fromEntries(Object.entries(env).filter(([key]) => key.toUpperCase() !== 'NODE_TEST_CONTEXT'));
 const NOTES_ERROR = 'notes: a round marker is not in its recorded form';
-const BLANK = { state: null, integration: null, skillDir: null, waves: null, currentWave: null, nextCheckpoint: null, rows: [], checkpoints: [], error: null, warning: null };
+// The clear threshold of a contract with no `**Clear threshold**` line.
+const DEFAULT = { tokens: 300000, source: 'default' };
+const BLANK = { state: null, integration: null, skillDir: null, clearThreshold: null, waves: null, currentWave: null, nextCheckpoint: null, rows: [], checkpoints: [], error: null, warning: null };
 
 // ===== Ledger text in the shapes tests/reconcile.test.cjs writes, plus the skill pin and a plan ===========
 const HEX = 'ab'.repeat(32);
 const contract = (integration, skill = SKILL) => `# Contract\n\n**Change**: fixture\n**Skill**: \`${skill}\` · sha256 \`${HEX}\`\n\n## Git model\n\n`
   + `- Default branch (protected local ref): \`refs/heads/main\`. Integration branch: \`${integration}\` — the ledger branch.\n`
   + '- Shipment source: `local`. Shipment ref: `refs/heads/main` — the target.\n\n## Other\n';
+// The contract `text` with `line` inserted under its skill pin, where the template writes the clear threshold: line 5.
+const withLine = (text, line) => text.replace(/^\*\*Skill\*\*.*$/m, pin => `${pin}\n${line}`);
+const crlf = text => text.replace(/\n/g, String.fromCharCode(13, 10));
 // A Markdown table of `columns`, each record keyed by column; `omit` drops columns, as a ledger lacking them would.
 const tableOf = (columns, records, omit = []) => {
   const kept = columns.filter(c => !omit.includes(c));
@@ -242,6 +247,35 @@ test('tables: rows, weights, rounds and State come through the pinned parser and
     plan(rows.slice(0, 2), ['Batch', 'Type', 'Branch', 'Wave']), pinned, 'DIR'), readTables(text, planText, pinned, 'DIR'), 'the control: the columns no read needs can go');
 });
 
+test('clearThreshold: one line in exactly its form is the contract\'s, none is the default, LF and CRLF alike; two, or a near-miss, is an error', async () => {
+  const { clearThreshold, DEFAULT_CLEAR_THRESHOLD } = await api;
+  assert.equal(DEFAULT_CLEAR_THRESHOLD, DEFAULT.tokens);
+  const base = contract('int'), own = tokens => ({ tokens, source: 'contract' }), malformed = { error: 'line 5 is not **Clear threshold**: <n>K' };
+  const cases = [
+    [base, DEFAULT], [withLine(base, '**Clear threshold**: 300K'), own(300000)], [withLine(base, '**Clear threshold**: 250K'), own(250000)],
+    [withLine(base, '**Clear threshold**: 0K'), own(0)], [base + '**Clear threshold**: 7K', own(7000)],
+    // Either side of the largest safe integer: n×1000 is a count up to 9007199254740K, and no count past it.
+    [withLine(base, '**Clear threshold**: 9007199254740K'), own(9007199254740000)], [withLine(base, '**Clear threshold**: 9007199254741K'), malformed],
+    [withLine(withLine(base, '**Clear threshold**: 300K'), '**Clear threshold**: 300K'), { error: 'lines 5, 6 each open with **Clear threshold**' }],
+    [withLine(withLine(base, '**Clear threshold**: 300K'), '**clear threshold**: 250K'), { error: 'lines 5, 6 each open with **Clear threshold**' }],
+    // A near-miss: `skillPin`'s candidates (an indent, another case), and the label with other spacing or punctuation inside its bold.
+    ...[' **Clear threshold**: 300K', '**clear threshold**: 300K', '**Clear Threshold**: 300K', '**Clear threshold:** 300K', '**Clear  threshold**: 300K',
+      '**Clear-threshold**: 300K', '** Clear threshold**: 300K', '**Clear threshold**: 300k', '**Clear threshold**: 300 K', '**Clear threshold**:300K',
+      '**Clear threshold**: 300K ', '**Clear threshold**: 300,000', '**Clear threshold**: 300000', '**Clear threshold**: K', '**Clear threshold**: -300K',
+      '**Clear threshold**: 1.5K', '**Clear threshold**: 300K tokens', '**Clear threshold**:',
+      // Any punctuation or none between the two words, and an indent of two spaces or a tab.
+      '**Clear_threshold**: 300K', '**Clear.threshold**: 300K', '**Clearthreshold**: 300K', '  **Clear threshold**: 300K',
+      String.fromCharCode(9) + '**Clear threshold**: 300K'].map(line => [withLine(base, line), malformed]),
+    // The controls: lines whose bold label is another are no candidates.
+    [withLine(base, '**Clear**: 250K'), DEFAULT], [withLine(base, '**Change threshold**: 250K'), DEFAULT],
+    // Deliberately no candidates either: the label behind a list, quote or table opener, unbolded, or bolded with `__`.
+    ...['- **Clear threshold**: 250K', '> **Clear threshold**: 250K', '| **Clear threshold** | 250K |', 'Clear threshold: 250K', '__Clear threshold__: 250K']
+      .map(line => [withLine(base, line), DEFAULT]),
+  ];
+  assert.ok(crlf(base).includes(String.fromCharCode(13, 10)) && !base.includes(String.fromCharCode(13)), 'the control: the twins differ in their line ends');
+  assert.deepEqual(cases.map(([text]) => [clearThreshold(text), clearThreshold(crlf(text))]), cases.map(([, want]) => [want, want]));
+});
+
 // ===== Fixture repositories ==============================================================================
 test('one ACTIVE ledger only on its integration branch: rows, weights, verdicts, derived fields and the tip, in-process and as published', async t => {
   const repo = fixture(t);
@@ -263,7 +297,7 @@ test('one ACTIVE ledger only on its integration branch: rows, weights, verdicts,
   assert.ok(!fs.existsSync(path.join(repo.cwd, '.agents')), 'the control: the ledger lives only on its integration branch');
   const v = await verdicts(), sha = repo.git('rev-parse', 'refs/heads/int');
   const expected = { v: 1, repo: slash(repo.cwd), incomplete: false, ledgers: [{
-    id: 'L-ONE', state: 'ACTIVE', integration: { branch: 'int', sha }, skillDir: slash(SKILL), waves: 2, currentWave: 1, nextCheckpoint: 'C2',
+    id: 'L-ONE', state: 'ACTIVE', integration: { branch: 'int', sha }, skillDir: slash(SKILL), clearThreshold: DEFAULT, waves: 2, currentWave: 1, nextCheckpoint: 'C2',
     rows: [
       viewRow(rows[0], { git: { row: '10', verdict: v[9] } }),
       viewRow(rows[1], { round: 'R2 SHIP' }),
@@ -303,7 +337,7 @@ test('two active ledgers; the working-tree contract is read before a branch copy
   repo.git('branch', 'int2');
   repo.write('.agents/changes/L-B/00-READBEFORE.md', contract('refs/heads/int2'));
   assert.match(repo.git('show', 'int2:.agents/changes/L-B/00-READBEFORE.md'), /no-such-skill/, 'the control: the branch copy pins a missing directory');
-  const v = await verdicts(), entry = (id, branch, row) => ({ id, state: 'ACTIVE', integration: { branch, sha: repo.git('rev-parse', `refs/heads/${branch}`) }, skillDir: slash(SKILL),
+  const v = await verdicts(), entry = (id, branch, row) => ({ id, state: 'ACTIVE', integration: { branch, sha: repo.git('rev-parse', `refs/heads/${branch}`) }, skillDir: slash(SKILL), clearThreshold: DEFAULT,
     waves: 1, currentWave: 1, nextCheckpoint: 'C1', checkpoints: [{ id: 'C1', afterWave: '1', status: '⬜' }], error: null, warning: null, rows: [row] });
   // Through the spawn seam: every child the view runs is recorded with the options it ran under, once with a
   // timeout given and once with none, as the CLI calls it (the batch's "a 30 s timeout each").
@@ -321,6 +355,30 @@ test('two active ledgers; the working-tree contract is read before a branch copy
         { env: true, timeout, shell: false, windowsHide: true, cwd: repo.cwd }, `${command} ${args.join(' ')}`);
     }
   }
+});
+
+test('a contract\'s clear threshold is read on a branch and in the working tree, a CRLF contract exactly as its LF twin', async t => {
+  const repo = fixture(t), rows = [ROW('B01', '🔄')];
+  const lf = withLine(contract('lf'), '**Clear threshold**: 250K'), cr = crlf(withLine(contract('cr'), '**Clear threshold**: 250K'));
+  onBranch(repo, 'lf', 'L-LF', { ...files('lf', rows), '00-READBEFORE.md': lf });
+  onBranch(repo, 'cr', 'L-CR', { ...files('cr', rows), '00-READBEFORE.md': cr });
+  assert.ok(repo.git('cat-file', '-p', 'cr:.agents/changes/L-CR/00-READBEFORE.md').includes(String.fromCharCode(13, 10)), 'the control: the committed contract is CRLF');
+  // L-WT's contract is read from the working tree: once LF, once CRLF.
+  writeLedger(repo, 'L-WT', { ...files('wt', rows), '00-READBEFORE.md': withLine(contract('wt'), '**Clear threshold**: 250K') }); repo.commit('L-WT');
+  repo.git('branch', 'wt');
+  const asLf = await view(repo);
+  repo.write('.agents/changes/L-WT/00-READBEFORE.md', crlf(withLine(contract('wt'), '**Clear threshold**: 250K')));
+  assert.ok(fs.readFileSync(path.join(repo.cwd, '.agents', 'changes', 'L-WT', '00-READBEFORE.md'), 'utf8').includes(String.fromCharCode(13, 10)), 'the control: the working-tree contract is CRLF');
+  const asCrlf = await view(repo);
+  assert.deepEqual(asCrlf, asLf);
+  const byId = Object.fromEntries(asCrlf.view.ledgers.map(l => [l.id, l]));
+  assert.deepEqual(Object.keys(byId), ['L-CR', 'L-LF', 'L-WT']);
+  const own = { tokens: 250000, source: 'contract' }, apart = ({ id, integration, ...rest }) => rest;
+  assert.deepEqual(['L-CR', 'L-LF', 'L-WT'].map(id => [byId[id].clearThreshold, byId[id].error]), [[own, null], [own, null], [own, null]]);
+  assert.deepEqual(apart(byId['L-CR']), apart(byId['L-LF']), 'the CRLF branch copy reads as its LF twin');
+  // The control: L-WT's threshold is the working tree's, not its committed copy's.
+  repo.write('.agents/changes/L-WT/00-READBEFORE.md', crlf(withLine(contract('wt'), '**Clear threshold**: 260K')));
+  assert.deepEqual((await view(repo)).view.ledgers.find(l => l.id === 'L-WT').clearThreshold, { tokens: 260000, source: 'contract' });
 });
 
 test('discovery: a State-differs ledger is read with its warning, an UNKNOWN line is an error entry, a COMPLETE ledger is skipped, partial evidence sets incomplete', async t => {
@@ -342,7 +400,7 @@ test('discovery: a State-differs ledger is read with its warning, an UNKNOWN lin
     assert.match(line('L-DONE'), / → none$/, 'the control: L-DONE routes to none');
     const warning = slash(line('L-AMB').slice(line('L-AMB').lastIndexOf(' → ') + 3));
     return { code: 0, view: { v: 1, repo: slash(repo.cwd), incomplete, ledgers: [
-      { id: 'L-AMB', state: 'ACTIVE', integration: { branch: 'main', sha }, skillDir: slash(SKILL), waves: 1, currentWave: 1, nextCheckpoint: 'C1',
+      { id: 'L-AMB', state: 'ACTIVE', integration: { branch: 'main', sha }, skillDir: slash(SKILL), clearThreshold: DEFAULT, waves: 1, currentWave: 1, nextCheckpoint: 'C1',
         rows: [viewRow(rows[0], { git: { row: '26', verdict: v[25] } })], checkpoints: [{ id: 'C1', afterWave: '1', status: '⬜' }], error: null, warning },
       { id: 'L-BAD', ...BLANK, error: slash(line('L-BAD')) },
     ] } };
@@ -383,9 +441,10 @@ test('a ledger whose contract, tip, pinned skill, tables or rows cannot be read 
   onBranch(repo, 'nob', 'L-NOB', { 'PROGRESS.md': progress(rows) });
   onBranch(repo, 'nogm', 'L-NOGM', { ...ok('nogm'), '00-READBEFORE.md': `# Contract\n\n**Skill**: \`${SKILL}\` · sha256 \`${HEX}\`\n` });
   onBranch(repo, 'nopin', 'L-NOPIN', { ...ok('nopin'), '00-READBEFORE.md': contract('nopin').replace(/^\*\*Skill\*\*.*\n/m, '') });
-  onBranch(repo, 'nolabel', 'L-NOLABEL', { ...ok('nolabel'), '00-READBEFORE.md': contract('nolabel').replace('Integration branch: `nolabel` — the ledger branch.', '') });
+  // Both contracts hold a threshold line: L-NOINT, failing past its contract, carries it; L-NOLABEL, failing at it, carries none.
+  onBranch(repo, 'nolabel', 'L-NOLABEL', { ...ok('nolabel'), '00-READBEFORE.md': withLine(contract('nolabel'), '**Clear threshold**: 250K').replace('Integration branch: `nolabel` — the ledger branch.', '') });
   onBranch(repo, 'twice', 'L-TWICE', { ...ok('twice'), '00-READBEFORE.md': contract('twice').replace('- Shipment source', '- Integration branch: `twice`.\n- Shipment source') });
-  onBranch(repo, 'noint', 'L-NOINT', ok('missing-int'));
+  onBranch(repo, 'noint', 'L-NOINT', { ...ok('missing-int'), '00-READBEFORE.md': withLine(contract('missing-int'), '**Clear threshold**: 250K') });
   onBranch(repo, 'pin', 'L-PIN', files('pin', rows, { skill: missing }));
   onBranch(repo, 'exp', 'L-EXP', files('exp', rows, { skill: exportless }));
   onBranch(repo, 'noplan', 'L-NOPLAN', { '00-READBEFORE.md': contract('noplan'), 'PROGRESS.md': progress(rows) });
@@ -419,20 +478,20 @@ test('a ledger whose contract, tip, pinned skill, tables or rows cannot be read 
   check('L-NOPIN', {}, `UNKNOWN contract ${shown('nopin', 'L-NOPIN')}: Missing skill pin line`);
   check('L-NOLABEL', {}, `UNKNOWN contract ${shown('nolabel', 'L-NOLABEL')}: no Integration branch recorded`);
   check('L-TWICE', {}, `UNKNOWN contract ${shown('twice', 'L-TWICE')}: Repeated Git model label`);
-  check('L-NOINT', { integration: { branch: 'missing-int', sha: null }, skillDir: slash(SKILL) },
+  check('L-NOINT', { integration: { branch: 'missing-int', sha: null }, skillDir: slash(SKILL), clearThreshold: { tokens: 250000, source: 'contract' } },
     e => /^UNKNOWN integration refs\/heads\/missing-int: git rev-parse did not resolve it \(exit \d+\)$/.test(e));
-  check('L-PIN', { integration: tip('pin'), skillDir: slash(missing) }, e => e.startsWith(`UNKNOWN pinned skill ${slash(missing)}: `) && /Cannot find module/.test(e));
-  check('L-EXP', { integration: tip('exp'), skillDir: slash(exportless) }, `UNKNOWN pinned skill ${slash(exportless)}: tools/ledger-parse.mjs exports no table, branchCell`);
-  check('L-NOPLAN', { integration: tip('noplan'), skillDir: slash(SKILL) },
+  check('L-PIN', { integration: tip('pin'), skillDir: slash(missing), clearThreshold: DEFAULT }, e => e.startsWith(`UNKNOWN pinned skill ${slash(missing)}: `) && /Cannot find module/.test(e));
+  check('L-EXP', { integration: tip('exp'), skillDir: slash(exportless), clearThreshold: DEFAULT }, `UNKNOWN pinned skill ${slash(exportless)}: tools/ledger-parse.mjs exports no table, branchCell`);
+  check('L-NOPLAN', { integration: tip('noplan'), skillDir: slash(SKILL), clearThreshold: DEFAULT },
     e => /^UNKNOWN ledger: \.agents\/changes\/L-NOPLAN\/01-plan\.md cannot be read at refs\/heads\/noplan \(exit \d+\)$/.test(e));
-  check('L-PARSE', { integration: tip('parse'), skillDir: slash(SKILL) }, `UNKNOWN pinned skill ${slash(SKILL)}: Malformed table row`);
-  check('L-MIS', { state: 'ACTIVE', integration: tip('mis-b'), skillDir: slash(SKILL) }, 'UNKNOWN contract: its integration branch is other, not mis-b');
-  check('L-STUB', { state: 'USER-BLOCKED', integration: tip('stub'), skillDir: slash(failing) }, 'UNKNOWN rows did not complete: exit 1');
-  check('L-MUTE', { state: 'AT-CHECKPOINT C1', integration: tip('mute'), skillDir: slash(mute) }, 'UNKNOWN rows did not complete: no output');
-  check('L-BYTES', { state: 'ACTIVE', integration: tip('bytes'), skillDir: slash(garbled) }, 'UNKNOWN rows did not complete: output is not UTF-8');
-  check('L-WIN', { integration: tip('win'), skillDir: slash(winDir) }, e => e.startsWith(`UNKNOWN pinned skill ${slash(winDir)}: `) && !e.includes('\\'));
-  check('L-MOVED', { state: 'ACTIVE', integration: tip('moved'), skillDir: slash(moved) }, `UNKNOWN integration refs/heads/moved moved during the read: ${tip('moved').sha.slice(0, 7)} → 0000000`);
-  check('L-NONOTES', { integration: tip('noteless'), skillDir: slash(noteless) }, `UNKNOWN pinned skill ${slash(noteless)}: tools/reconcile.mjs exports no readNotes`);
+  check('L-PARSE', { integration: tip('parse'), skillDir: slash(SKILL), clearThreshold: DEFAULT }, `UNKNOWN pinned skill ${slash(SKILL)}: Malformed table row`);
+  check('L-MIS', { state: 'ACTIVE', integration: tip('mis-b'), skillDir: slash(SKILL), clearThreshold: DEFAULT }, 'UNKNOWN contract: its integration branch is other, not mis-b');
+  check('L-STUB', { state: 'USER-BLOCKED', integration: tip('stub'), skillDir: slash(failing), clearThreshold: DEFAULT }, 'UNKNOWN rows did not complete: exit 1');
+  check('L-MUTE', { state: 'AT-CHECKPOINT C1', integration: tip('mute'), skillDir: slash(mute), clearThreshold: DEFAULT }, 'UNKNOWN rows did not complete: no output');
+  check('L-BYTES', { state: 'ACTIVE', integration: tip('bytes'), skillDir: slash(garbled), clearThreshold: DEFAULT }, 'UNKNOWN rows did not complete: output is not UTF-8');
+  check('L-WIN', { integration: tip('win'), skillDir: slash(winDir), clearThreshold: DEFAULT }, e => e.startsWith(`UNKNOWN pinned skill ${slash(winDir)}: `) && !e.includes('\\'));
+  check('L-MOVED', { state: 'ACTIVE', integration: tip('moved'), skillDir: slash(moved), clearThreshold: DEFAULT }, `UNKNOWN integration refs/heads/moved moved during the read: ${tip('moved').sha.slice(0, 7)} → 0000000`);
+  check('L-NONOTES', { integration: tip('noteless'), skillDir: slash(noteless), clearThreshold: DEFAULT }, `UNKNOWN pinned skill ${slash(noteless)}: tools/reconcile.mjs exports no readNotes`);
 });
 
 test('each read uses its own copy of the skill: tables through the pin\'s parser, State and Notes through the pin\'s reconcile, contracts through --skill-dir\'s parser', async t => {
@@ -457,9 +516,9 @@ test('each read uses its own copy of the skill: tables through the pin\'s parser
   const v = await verdicts(), tip = branch => ({ branch, sha: repo.git('rev-parse', `refs/heads/${branch}`) });
   // L-PR's verdict comes from its copy's `rows`, run through to the real tool: the live control for every copy.
   assert.deepEqual(await view(repo), { code: 0, view: { v: 1, repo: slash(repo.cwd), incomplete: false, ledgers: [
-    { id: 'L-PR', state: 'PINNED', integration: tip('pr'), skillDir: slash(pinReconcile), waves: 1, currentWave: 1, nextCheckpoint: 'C1',
+    { id: 'L-PR', state: 'PINNED', integration: tip('pr'), skillDir: slash(pinReconcile), clearThreshold: DEFAULT, waves: 1, currentWave: 1, nextCheckpoint: 'C1',
       rows: [viewRow(rows[0], { round: 'R9 PINNED', git: { row: '10', verdict: v[9] } })], checkpoints: [{ id: 'C1', afterWave: '1', status: '⬜' }], error: null, warning: null },
-    { id: 'L-PT', ...BLANK, integration: tip('pt'), skillDir: slash(pinTables), error: `UNKNOWN pinned skill ${slash(pinTables)}: pinned table` },
+    { id: 'L-PT', ...BLANK, integration: tip('pt'), skillDir: slash(pinTables), clearThreshold: DEFAULT, error: `UNKNOWN pinned skill ${slash(pinTables)}: pinned table` },
   ] } });
   // The same repository with the copy whose skillPin is marked as --skill-dir: its discovery lists both ledgers,
   // and each contract is read through its parser.
@@ -494,10 +553,10 @@ test('Amendment 1: a checkpoint flip whose other copy is proven older settles at
   assert.equal(line('L-ORI'), 'L-ORI at side, origin/int-ori → AMBIGUOUS (State differs: side=USER-BLOCKED, origin/int-ori=ACTIVE)', 'the control: int-ori is listed only as origin/int-ori');
   const v = await verdicts(), warning = id => line(id).slice(line(id).lastIndexOf(' → ') + 3);
   assert.deepEqual(await view(repo), { code: 0, view: { v: 1, repo: slash(repo.cwd), incomplete: false, ledgers: [
-    { id: 'L-CP', state: 'AT-CHECKPOINT C1', integration: { branch: 'int', sha: repo.git('rev-parse', 'refs/heads/int') }, skillDir: slash(SKILL), waves: 2, currentWave: 2, nextCheckpoint: 'C1',
+    { id: 'L-CP', state: 'AT-CHECKPOINT C1', integration: { branch: 'int', sha: repo.git('rev-parse', 'refs/heads/int') }, skillDir: slash(SKILL), clearThreshold: DEFAULT, waves: 2, currentWave: 2, nextCheckpoint: 'C1',
       rows: [viewRow(closed[0], { git: { row: '14', verdict: v[13] } }), viewRow(closed[1], { git: { row: '26', verdict: v[25] } })],
       checkpoints: [{ id: 'C1', afterWave: '1', status: '⬜' }], error: null, warning: null },
-    { id: 'L-ORI', ...BLANK, integration: { branch: 'int-ori', sha: null }, skillDir: slash(SKILL),
+    { id: 'L-ORI', ...BLANK, integration: { branch: 'int-ori', sha: null }, skillDir: slash(SKILL), clearThreshold: DEFAULT,
       error: `UNKNOWN integration branch int-ori holds no copy of L-ORI: ${line('L-ORI')}`, warning: warning('L-ORI') },
   ] } });
 });

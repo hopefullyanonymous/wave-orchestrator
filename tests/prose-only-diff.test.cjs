@@ -224,6 +224,33 @@ const FLIPPED = [
   ['trailing whitespace after a one-word block comment', 'f(1); /* a */  \n', 'f(1); /* a */ \n'],
   ['a comment opening with a bracketed index edited (the old CLI near-miss)', '// values[key] are cached.\nreturn html;\n', '// values[key] are stale.\nreturn html;\n'],
 ];
+// The cause each CODE case above prints, written here from what each edit changes, by rule or
+// FLIPPED name; the corpus test below binds the names to exactly the CODE cases.
+const CAUSES = {
+  'code changed at :1': ['a // inside a string is string text', 'a /* inside a template literal is template text', 'a // inside a regular expression is pattern text',
+    'a regular expression after a control statement opens there', 'a regular expression after for await ( opens there', 'whitespace in code is code',
+    'one character of code is code', 'a / after a prefix ++ opens a regular expression', 'a block comment between two words keeps them apart',
+    'a word after # is a private name, never a keyword', 'a keyword after a spread opens an expression', 'an escaped backtick stays inside its template literal',
+    'an escaped quote stays inside its string', 'a ++ after an operand keyword is a prefix', "a ++ after a control statement's ) is a prefix",
+    'a / after a prefix -- opens a regular expression', 'a / first in a file opens a regular expression', 'a hashbang is code',
+    'trailing whitespace after code that follows an inline block comment is code', 'a non-ASCII space keeps two words apart',
+    "a regular expression after a control statement's ) opens there whatever the ( held"],
+  'code changed at :2': ['a block comment holding a line break is a line break', 'a line break before ++ makes it a prefix', 'a regular expression on the line after debugger opens there',
+    'a blank line inside a template literal is template text', 'a line separator ends a line comment'],
+  'code changed at :3': ['a regular expression on the line after break opens there', 'a regular expression on the line after continue opens there'],
+  'kept comment changed at :1': ['a comment naming a tool directive is code', 'a comment shaped like a tool directive is code, whatever tool it names',
+    'a comment carrying a rule id in brackets is code', 'a comment shouting a NO-marker is code', 'a comment not shaped like a sentence is code, whatever tool it names',
+    'a one-word comment reworded (the old one-token twins)', 'a comment opening with a URL', 'a comment opening with an index', 'a bare NOTE given a colon',
+    'a comment opening with a path', 'a comment after a divide, opening with a bracket', 'a comment after a < that compares, opening with a letter joined to markup',
+    'a one-word inline block comment reworded', 'trailing whitespace after a one-word block comment', 'a comment opening with a bracketed index edited (the old CLI near-miss)'],
+  // Two edit a kept comment on line 2; in 'a one-word comment line dropped' the deleted kept comment was the base's line 1, and the head's first differing line is its code line.
+  'kept comment changed at :2': ['a comment opening with a marker is code', 'a comment opening with a word and a colon', 'a one-word comment line dropped'],
+  'kept comment changed at :3': ['a comment carrying a JSDoc tag is code'],
+  'line structure kept for a non-prose comment at :1': ['a prose line added under a line-counting directive moves what it covers',
+    'a prose line added under a JSDoc-tagged comment moves what it annotates'],
+};
+const causeOf = Object.fromEntries(Object.entries(CAUSES).flatMap(([cause, names]) => names.map(name => [name, cause])));
+const causeText = c => c && `${c.cause} at :${c.line}`;
 // Every line end the reader knows: LF, CRLF, and the Unicode line separator.
 const crlf = text => text.replace(/\n/g, '\r\n');
 const ls = text => text.replace(/\n/g, LS);
@@ -236,24 +263,68 @@ test('the corpus is the one written above: its size and its rules, pinned', () =
   for (const [verdict, count] of Object.entries(RULE_COUNTS)) assert.equal(RULES.filter(r => r[1] === verdict).length, count, verdict + ' rules');
   assert.equal(PROSE.length, 18, 'the prose-only corpus');
   assert.equal(FLIPPED.length, 12, 'the old prose pins moved to the code side');
+  const named = Object.values(CAUSES).flat();
+  assert.equal(new Set(named).size, named.length, 'every CODE case has one cause');
+  assert.deepEqual(named.sort(), [...RULES.filter(r => r[1] === 'CODE').map(r => r[0]), ...FLIPPED.map(f => f[0])].sort(), 'the causes name exactly the CODE cases');
   // A twin that equals its case would prove nothing: each pair differs, and so does each twin.
   for (const [rule, , [a, b], [c, d]] of RULES) assert.ok(a !== b && c !== d && (a !== c || b !== d), rule);
 });
 
 test('every rule catches its case, and its twin, lacking only the trigger, reads PROSE-ONLY, under every line end', async () => {
-  const { compareSources } = await api;
+  const { compareSources, codeCause } = await api;
   assert.equal(LINE_ENDS.length, 3);
   for (const [rule, verdict, [before, after], [twinBefore, twinAfter]] of RULES) {
     for (const eol of LINE_ENDS) {
       assert.equal(compareSources(eol(before), eol(after)).verdict, verdict, rule);
       assert.equal(compareSources(eol(twinBefore), eol(twinAfter)).verdict, 'PROSE-ONLY', rule + ' (twin)');
+      // A cause labels a CODE verdict and nothing else.
+      assert.equal(causeText(codeCause(eol(before), eol(after))), verdict === 'CODE' ? causeOf[rule] : null, rule + ' (cause)');
+      assert.equal(codeCause(eol(twinBefore), eol(twinAfter)), null, rule + ' (twin cause)');
     }
   }
+  // An UNKNOWN keeps its reason, whole.
+  const [, , [openBefore, openAfter]] = RULES.find(r => r[0] === 'a template literal left open is a parse that cannot finish');
+  assert.deepEqual(compareSources(openBefore, openAfter), { verdict: 'UNKNOWN', reason: 'an unterminated template literal (base)' });
   for (const [name, before, after] of PROSE) {
     for (const eol of LINE_ENDS) assert.deepEqual(compareSources(eol(before), eol(after)), { verdict: 'PROSE-ONLY' }, name);
   }
   for (const [name, before, after] of FLIPPED) {
-    for (const eol of LINE_ENDS) assert.deepEqual(compareSources(eol(before), eol(after)), { verdict: 'CODE' }, name);
+    for (const eol of LINE_ENDS) {
+      assert.deepEqual(compareSources(eol(before), eol(after)), { verdict: 'CODE' }, name);
+      assert.equal(causeText(codeCause(eol(before), eol(after))), causeOf[name], name + ' (cause)');
+    }
+  }
+});
+
+// The three causes inside one file, each decided by a case the other two cannot print, and the
+// line each names. Every line end counts as one break, a lone CR and PS as well.
+const PS = String.fromCharCode(0x2029);
+test('a CODE verdict names its cause: code first, then a kept comment, then the line structure a kept comment keeps; one line per break', async () => {
+  const { codeCause } = await api;
+  const CASES = [
+    ['a code line changed under a multi-line block comment', ['// note a', '/* a', ' b */', 'x = 1;', 'y = 2;'], ['// note a', '/* a', ' b */', 'x = 1;', 'y = 3;'], 'code changed at :5'],
+    // The head has no line where the remainders part, so the base's line is named.
+    ['a code line deleted at the end', ['x = 1;', '// note a', '// note b', 'y = 2;'], ['x = 1;', '// note a'], 'code changed at :4'],
+    ['code and a kept comment changed: the code decides', ['// coverity[overrun]', 'x = 1;'], ['// coverity[overrun_local]', 'x = 2;'], 'code changed at :2'],
+    ['a kept comment changed', ['x = 1;', '// coverity[overrun]', 'y = 2;'], ['x = 1;', '// coverity[overrun_local]', 'y = 2;'], 'kept comment changed at :2'],
+    ['a kept comment deleted at the end', ['x = 1;', '// note a', '// note b', '// coverity[overrun]'], ['x = 1;', '// note a'], 'kept comment changed at :4'],
+    ['a kept comment changed and a prose line added: the kept comment decides', ['// coverity[overrun]', 'x = 1;'], ['// coverity[overrun_local]', '// note a', 'x = 1;'],
+      'kept comment changed at :1'],
+    // The head's first kept comment, which the inserted line moved from the base's :2.
+    ['a prose line inserted above a kept comment', ['x = 1;', '// coverity[overrun]', 'y = 2;'], ['x = 1;', '// note a', '// coverity[overrun]', 'y = 2;'],
+      'line structure kept for a non-prose comment at :3'],
+    // A kept comment spanning lines is named at the line it opens on.
+    ['a prose line inserted under a multi-line JSDoc block', ['/**', ' * @param {number} a', ' */', 'f(a);'], ['/**', ' * @param {number} a', ' */', '// note a', 'f(a);'],
+      'line structure kept for a non-prose comment at :1'],
+    // The head runs past the base's last line, so the head's line is named.
+    ['a code line added at the end', ['x = 1;', '// note a'], ['x = 1;', '// note a', 'y = 2;'], 'code changed at :3'],
+    ['a code line added at the end beside a kept comment', ['// coverity[overrun]', 'x = 1;'], ['// coverity[overrun]', 'x = 1;', 'y = 2;'], 'code changed at :3'],
+    ['a kept comment added at the end', ['x = 1;'], ['x = 1;', '// coverity[overrun]'], 'kept comment changed at :2'],
+  ];
+  for (const [name, before, after, expected] of CASES) {
+    for (const eol of ['\n', '\r\n', '\r', LS, PS]) {
+      assert.equal(causeText(codeCause(before.join(eol) + eol, after.join(eol) + eol)), expected, name + ' ' + JSON.stringify(eol));
+    }
   }
 });
 
@@ -528,7 +599,7 @@ test('every corpus pair reads the same through the published CLI on commits, eac
     repo.write(file, after);
     const next = repo.commit(name);
     const r = cli(repo, previous, next);
-    const expected = verdict === 'PROSE-ONLY' ? 'PROSE-ONLY 1 file(s)' : verdict === 'CODE' ? 'CODE ' + file : 'UNKNOWN ' + file + ': ';
+    const expected = verdict === 'PROSE-ONLY' ? 'PROSE-ONLY 1 file(s)' : verdict === 'CODE' ? 'CODE ' + file + ' (' + causeOf[name] + ')' : 'UNKNOWN ' + file + ': ';
     assert.ok(verdict === 'UNKNOWN' ? r.line.startsWith(expected) : r.line === expected, name + ': ' + r.line);
     assert.equal(r.status, EXIT[verdict], name);
     previous = next;
@@ -553,8 +624,9 @@ test('a comment-only commit of both forms reads PROSE-ONLY and a one-character c
   repo.write('lib/sum.mjs', '// Adds two numbers together.\n/*\n * The left one\n * first.\n */\nexport const sum = (a, b) => a + b;\n'); const c1 = repo.commit('c1');
   repo.write('lib/sum.mjs', '// Adds two numbers together.\n/*\n * The left one\n * first.\n */\nexport const sum = (a, b) => a - b;\n'); const c2 = repo.commit('c2');
   assert.deepEqual(cli(repo, c0, c1), { status: 0, line: 'PROSE-ONLY 1 file(s)' });
-  assert.deepEqual(cli(repo, c1, c2), { status: 1, line: 'CODE lib/sum.mjs' });
-  assert.deepEqual(cli(repo, c0, c2), { status: 1, line: 'CODE lib/sum.mjs' });
+  assert.deepEqual(cli(repo, c1, c2), { status: 1, line: 'CODE lib/sum.mjs (code changed at :6)' });
+  // The head's line, where the base's is :3.
+  assert.deepEqual(cli(repo, c0, c2), { status: 1, line: 'CODE lib/sum.mjs (code changed at :6)' });
 });
 
 // BL-046, its first scenario as C1's I-04 builds it: a directive appended to a code line, or its
@@ -565,22 +637,22 @@ test('an allow, allowlist, skip, skipcq or underscored rule-id directive appende
   const LF = String.fromCharCode(10), text = (...lines) => lines.map(line => line + LF).join('');
   const header = '// The name of the header the client sends its token in.', code = "export const TOKEN_HEADER = 'x-client-token';";
   for (const [name, before, after, verdict] of [
-    ['gitleaks:allow appended (I-04)', text(header, code), text(header, code + ' // gitleaks:allow'), 'CODE'],
-    ['pragma: allowlist secret appended', text(header, code), text(header, code + ' // pragma: allowlist secret'), 'CODE'],
-    ['checkov:skip appended', text(header, code), text(header, code + ' // checkov:skip=CKV_AWS_18: the audit bucket keeps these logs'), 'CODE'],
-    ['a skipcq rule id edited', text(header, code + ' // skipcq: JS-0002'), text(header, code + ' // skipcq: JS-0003'), 'CODE'],
-    ['a bare skipcq appended', text(header, code), text(header, code + ' // skipcq'), 'CODE'],
-    ['a coverity event edited', text('// coverity[tainted_data]', code), text('// coverity[tainted_data_return]', code), 'CODE'],
+    ['gitleaks:allow appended (I-04)', text(header, code), text(header, code + ' // gitleaks:allow'), 'CODE (kept comment changed at :2)'],
+    ['pragma: allowlist secret appended', text(header, code), text(header, code + ' // pragma: allowlist secret'), 'CODE (kept comment changed at :2)'],
+    ['checkov:skip appended', text(header, code), text(header, code + ' // checkov:skip=CKV_AWS_18: the audit bucket keeps these logs'), 'CODE (kept comment changed at :2)'],
+    ['a skipcq rule id edited', text(header, code + ' // skipcq: JS-0002'), text(header, code + ' // skipcq: JS-0003'), 'CODE (kept comment changed at :2)'],
+    ['a bare skipcq appended', text(header, code), text(header, code + ' // skipcq'), 'CODE (kept comment changed at :2)'],
+    ['a coverity event edited', text('// coverity[tainted_data]', code), text('// coverity[tainted_data_return]', code), 'CODE (kept comment changed at :1)'],
     ['allow in prose appended', text(header, code), text(header, code + ' // allow one retry'), 'PROSE-ONLY'],
     ['skip in prose appended', text(header, code), text(header, code + ' // skip the cache'), 'PROSE-ONLY'],
     // BL-046: an index opening the comment makes it doubt, so the old near-miss reads CODE; the
     // same index later in the sentence stays prose.
-    ['a bracketed index opening a comment edited', text('// values[key] are cached.', code), text('// values[key] are stale.', code), 'CODE'],
+    ['a bracketed index opening a comment edited', text('// values[key] are cached.', code), text('// values[key] are stale.', code), 'CODE (kept comment changed at :1)'],
     ['a bracketed index in prose edited', text('// the values[key] are cached.', code), text('// the values[key] are stale.', code), 'PROSE-ONLY'],
   ]) {
     repo.write('lib/token.mjs', before); const c0 = repo.commit(name + ': before');
     repo.write('lib/token.mjs', after); const c1 = repo.commit(name + ': after');
-    assert.deepEqual(cli(repo, c0, c1), verdict === 'CODE' ? { status: 1, line: 'CODE lib/token.mjs' } : { status: 0, line: 'PROSE-ONLY 1 file(s)' }, name);
+    assert.deepEqual(cli(repo, c0, c1), verdict === 'PROSE-ONLY' ? { status: 0, line: 'PROSE-ONLY 1 file(s)' } : { status: 1, line: verdict.replace('CODE', 'CODE lib/token.mjs') }, name);
   }
 });
 
@@ -598,7 +670,7 @@ for (const comment of ['// ggignore', '// sourcery skip: no-loop-in-tests', '// 
     const repo = makeRepo(t);
     repo.write('lib/token.mjs', before); const c0 = repo.commit('base');
     repo.write('lib/token.mjs', text(header, code + ' ' + comment)); const c1 = repo.commit('directive');
-    assert.deepEqual(cli(repo, c0, c1), { status: 1, line: 'CODE lib/token.mjs' });
+    assert.deepEqual(cli(repo, c0, c1), { status: 1, line: 'CODE lib/token.mjs (kept comment changed at :2)' });
     // The control: the same line given a prose comment.
     repo.write('lib/token.mjs', before); const c2 = repo.commit('base again');
     repo.write('lib/token.mjs', text(header, code + ' // the header name is fixed')); const c3 = repo.commit('plain');
@@ -609,13 +681,14 @@ for (const comment of ['// ggignore', '// sourcery skip: no-loop-in-tests', '// 
 // The round-2 reviewer's scenario: semicolon-less code where a regular expression opens the line
 // after break, continue, a label or debugger. Each code edit reads CODE or UNKNOWN through the
 // published CLI, never PROSE-ONLY; the controls are the same file with a `;` and a comment edit.
-test('a regular expression on the line after break, continue, a label or debugger never reads PROSE-ONLY through the published CLI', t => {
+test('a regular expression on the line after break, continue, a label or debugger never reads PROSE-ONLY through the published CLI', async t => {
+  const { compareSources } = await api;
   const repo = makeRepo(t);
   const links = end => 'export function links(lines) {\n  const out = []\n  for (const line of lines) {\n    if (!line) ' + end + '\n    /^https?:\\/\\//i.test (line) && out.push(line)\n  }\n  return out\n}\n';
   const edits = [['out.push', 'out.unshift'], [' && out.push(line)', '']];
   let previous = null;
   const step = (name, text) => { repo.write('lib/links.mjs', text); const from = previous; previous = repo.commit(name); return from && cli(repo, from, previous); };
-  for (const [end, expected] of [['continue', 'CODE lib/links.mjs'], ['break', 'CODE lib/links.mjs'], ['debugger', 'CODE lib/links.mjs'],
+  for (const [end, expected] of [['continue', 'CODE lib/links.mjs (code changed at :5)'], ['break', 'CODE lib/links.mjs (code changed at :5)'], ['debugger', 'CODE lib/links.mjs (code changed at :5)'],
     ['continue outer', 'UNKNOWN lib/links.mjs: a / that may open a regular expression or divide (base)']]) {
     for (const [find, replace] of edits) {
       step(end + ' base', links(end));
@@ -624,8 +697,11 @@ test('a regular expression on the line after break, continue, a label or debugge
     }
   }
   step('control base', links('continue;'));
-  assert.deepEqual(step('control code', links('continue;').replace('out.push', 'out.unshift')), { status: 1, line: 'CODE lib/links.mjs' });
-  assert.deepEqual(step('control comment', links('continue;') + '// note a\n'), { status: 1, line: 'CODE lib/links.mjs' }, 'a comment line added to the tail is a code change too');
+  assert.deepEqual(step('control code', links('continue;').replace('out.push', 'out.unshift')), { status: 1, line: 'CODE lib/links.mjs (code changed at :5)' });
+  // This step's base is the out.unshift commit, so the CODE is out.push restored on line 5: the
+  // tail comment it adds is prose, as the in-process check after it shows.
+  assert.deepEqual(step('control comment', links('continue;') + '// note a\n'), { status: 1, line: 'CODE lib/links.mjs (code changed at :5)' }, 'out.push restored is the code change');
+  assert.equal(compareSources(links('continue;'), links('continue;') + '// note a\n').verdict, 'PROSE-ONLY', 'a comment line added to the tail alone is prose');
   step('control prose base', links('continue') + '// note a\n');
   assert.deepEqual(step('control prose', links('continue') + '// note b\n'), { status: 0, line: 'PROSE-ONLY 1 file(s)' });
 });
@@ -640,6 +716,7 @@ test('an added, deleted, renamed, re-moded, linked or submodule JavaScript path,
   // below stages exactly its own paths: `git add --all` would stage their removal.
   repo.git('add', '--all');
   repo.git('update-index', '--add', '--cacheinfo', '160000,' + repo.base + ',sub.mjs');
+  repo.git('update-index', '--add', '--cacheinfo', '120000,' + blob + ',dead-link.mjs');
   repo.git('commit', '-m', 'c0');
   const c0 = repo.git('rev-parse', 'HEAD');
   const step = (name, change, expected) => {
@@ -648,15 +725,25 @@ test('an added, deleted, renamed, re-moded, linked or submodule JavaScript path,
     assert.deepEqual(cli(repo, from, repo.git('rev-parse', 'HEAD')), expected, name);
   };
   step('twin: an edit in place', () => { repo.write('keep.mjs', edited); repo.git('add', 'keep.mjs'); }, { status: 0, line: 'PROSE-ONLY 1 file(s)' });
-  step('added', () => { repo.write('new.mjs', body); repo.git('add', 'new.mjs'); }, { status: 1, line: 'CODE new.mjs' });
-  step('deleted', () => { repo.git('rm', '--quiet', 'gone.cjs'); }, { status: 1, line: 'CODE gone.cjs' });
-  step('renamed', () => { repo.git('mv', 'old.js', 'renamed.js'); }, { status: 1, line: 'CODE old.js' });
+  step('added', () => { repo.write('new.mjs', body); repo.git('add', 'new.mjs'); }, { status: 1, line: 'CODE new.mjs (code changed: added)' });
+  step('deleted', () => { repo.git('rm', '--quiet', 'gone.cjs'); }, { status: 1, line: 'CODE gone.cjs (code changed: deleted)' });
+  // --no-renames: the rename is a deletion of old.js and an addition of renamed.js, and old.js sorts first.
+  step('renamed', () => { repo.git('mv', 'old.js', 'renamed.js'); }, { status: 1, line: 'CODE old.js (code changed: deleted)' });
   step('made executable, its text reworded too', () => { repo.write('mode.mjs', edited); repo.git('add', 'mode.mjs'); repo.git('update-index', '--chmod=+x', 'mode.mjs'); },
-    { status: 1, line: 'CODE mode.mjs' });
+    { status: 1, line: 'CODE mode.mjs (code changed: mode changed)' });
   step('a byte-order mark added', () => { repo.write('keep.mjs', Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(edited)])); repo.git('add', 'keep.mjs'); },
-    { status: 1, line: 'CODE keep.mjs' });
-  step('turned into a link', () => { repo.git('update-index', '--cacheinfo', '120000,' + blob + ',link.mjs'); }, { status: 1, line: 'CODE link.mjs' });
-  step('a submodule moved', () => { repo.git('update-index', '--cacheinfo', '160000,' + c0 + ',sub.mjs'); }, { status: 1, line: 'CODE sub.mjs' });
+    { status: 1, line: 'CODE keep.mjs (code changed at :1)' });
+  // A mode change too (100644 to 120000), so link outranks mode changed; added outranks link.
+  step('turned into a link', () => { repo.git('update-index', '--cacheinfo', '120000,' + blob + ',link.mjs'); }, { status: 1, line: 'CODE link.mjs (code changed: link)' });
+  step('a link added', () => { repo.git('update-index', '--add', '--cacheinfo', '120000,' + blob + ',new-link.mjs'); }, { status: 1, line: 'CODE new-link.mjs (code changed: added)' });
+  // The rest of the order, a side at a time: deleted outranks link and submodule, added outranks
+  // submodule, and a link on the base side outranks mode changed and submodule.
+  step('a link turned into a regular file', () => { repo.git('update-index', '--cacheinfo', '100644,' + blob + ',link.mjs'); }, { status: 1, line: 'CODE link.mjs (code changed: link)' });
+  step('a link made a submodule', () => { repo.git('update-index', '--cacheinfo', '160000,' + c0 + ',new-link.mjs'); }, { status: 1, line: 'CODE new-link.mjs (code changed: link)' });
+  step('a link deleted', () => { repo.git('update-index', '--force-remove', 'dead-link.mjs'); }, { status: 1, line: 'CODE dead-link.mjs (code changed: deleted)' });
+  step('a submodule added', () => { repo.git('update-index', '--add', '--cacheinfo', '160000,' + c0 + ',new-sub.mjs'); }, { status: 1, line: 'CODE new-sub.mjs (code changed: added)' });
+  step('a submodule moved', () => { repo.git('update-index', '--cacheinfo', '160000,' + c0 + ',sub.mjs'); }, { status: 1, line: 'CODE sub.mjs (code changed: submodule)' });
+  step('a submodule deleted', () => { repo.git('update-index', '--force-remove', 'sub.mjs'); }, { status: 1, line: 'CODE sub.mjs (code changed: deleted)' });
 });
 
 test('precedence: UNKNOWN over CODE over PROSE-ONLY, the first CODE in path order, other paths counted', t => {
@@ -668,7 +755,7 @@ test('precedence: UNKNOWN over CODE over PROSE-ONLY, the first CODE in path orde
   const prose = at({ 'a.mjs': '// note b\nx = 1;\n', 'README.md': 'two\n', 'z.py': 'x = 2\n' });
   assert.deepEqual(cli(repo, c0, prose), { status: 0, line: 'PROSE-ONLY 1 file(s); 2 other path(s) left to the path rule' });
   const code = at({ 'c.mjs': 'x = 2;\n', 'b.mjs': 'x = 2;\n', 'a.mjs': '// note c\nx = 1;\n' });
-  assert.deepEqual(cli(repo, prose, code), { status: 1, line: 'CODE b.mjs' });
+  assert.deepEqual(cli(repo, prose, code), { status: 1, line: 'CODE b.mjs (code changed at :1)' });
   const doubt = at({ 'd.mjs': 'x = `open ${y};\n', 'b.mjs': 'x = 3;\n' });
   const r = cli(repo, code, doubt);
   assert.equal(r.status, 2);
@@ -679,6 +766,50 @@ test('precedence: UNKNOWN over CODE over PROSE-ONLY, the first CODE in path orde
   const docs = at({ 'README.md': 'three\n' });
   assert.deepEqual(cli(repo, fixed, docs), { status: 2, line: 'UNKNOWN no JavaScript file changed; 1 other path(s) left to the path rule' });
   assert.deepEqual(cli(repo, docs, docs), { status: 2, line: 'UNKNOWN no JavaScript file changed' });
+});
+
+// BL-068's repro: its two kept comments (a path first word, a word:word join) keep every line of
+// the file where it stands, so a prose line inserted or deleted reads CODE, named as such; a
+// reword keeping the line count reads PROSE-ONLY, and so does the insert without the kept lines.
+test('BL-068: a prose line inserted or deleted beside a kept comment names the line structure; a reword, or the file without the kept comments, reads PROSE-ONLY', t => {
+  const repo = makeRepo(t);
+  const LF = String.fromCharCode(10), text = lines => lines.map(line => line + LF).join('');
+  const KEPT = ['// shared/sum.js keeps the total in one place for callers.', '// Pure logic only, so it loads under node:test.'];
+  const BODY = ['// Adds two numbers and returns the sum.', 'export function sum(a, b) {', '  return a + b;', '}', 'export const zero = 0;'];
+  const INSERTED = '// The order of the operands does not matter.';
+  for (const [name, before, after, expected] of [
+    ['a prose line inserted', [...KEPT, ...BODY], [...KEPT, BODY[0], INSERTED, ...BODY.slice(1)], 'CODE m.js (line structure kept for a non-prose comment at :1)'],
+    ['a prose line deleted', [...KEPT, ...BODY], [...KEPT, ...BODY.slice(1)], 'CODE m.js (line structure kept for a non-prose comment at :1)'],
+    ['a prose line reworded', [...KEPT, ...BODY], [...KEPT, '// Adds two numbers and gives back the sum.', ...BODY.slice(1)], 'PROSE-ONLY 1 file(s)'],
+    ['a prose line inserted without the kept comments', BODY, [BODY[0], INSERTED, ...BODY.slice(1)], 'PROSE-ONLY 1 file(s)'],
+    // The head's first kept comment: the inserted line moves it from the base's :2 to :3.
+    ['a prose line inserted above the kept comments', [BODY[0], ...KEPT, ...BODY.slice(1)], [INSERTED, BODY[0], ...KEPT, ...BODY.slice(1)],
+      'CODE m.js (line structure kept for a non-prose comment at :3)'],
+    ['the operands swapped', [...KEPT, ...BODY], [...KEPT, ...BODY.slice(0, 2), '  return b + a;', ...BODY.slice(3)], 'CODE m.js (code changed at :5)'],
+  ]) {
+    repo.write('m.js', text(before)); const c0 = repo.commit(name + ': before');
+    repo.write('m.js', text(after)); const c1 = repo.commit(name + ': after');
+    assert.deepEqual(cli(repo, c0, c1), { status: EXIT[expected.split(' ')[0]], line: expected }, name);
+  }
+});
+
+// Across files the line names a file whose code changed whenever one did: a file whose only change
+// is a kept comment sorts before it in one diff and after it in the other.
+test('the CODE line names the first file whose code changed, wherever kept-comment files sort, else the first CODE file', t => {
+  const repo = makeRepo(t);
+  const kept = n => '// coverity[overrun' + n + ']\nx = 1;\n', code = n => '// note a\nx = ' + n + ';\n';
+  repo.write('a.mjs', kept(0)); repo.write('b.mjs', code(0)); repo.write('c.mjs', kept(0));
+  const c0 = repo.commit('c0');
+  const at = changes => { for (const [file, text] of Object.entries(changes)) repo.write(file, text); return repo.commit(Object.keys(changes).join(' ')); };
+  const before = at({ 'a.mjs': kept(1), 'b.mjs': code(1) });
+  assert.deepEqual(cli(repo, c0, before), { status: 1, line: 'CODE b.mjs (code changed at :2)' }, 'a kept-comment file sorting before');
+  const after = at({ 'b.mjs': code(2), 'c.mjs': kept(2) });
+  assert.deepEqual(cli(repo, before, after), { status: 1, line: 'CODE b.mjs (code changed at :2)' }, 'a kept-comment file sorting after');
+  const added = at({ 'a.mjs': kept(3), 'z.mjs': code(0) });
+  assert.deepEqual(cli(repo, after, added), { status: 1, line: 'CODE z.mjs (code changed: added)' }, 'a file-level cause is a code change');
+  // The control: with no code changed, the first CODE file.
+  const only = at({ 'a.mjs': kept(4), 'c.mjs': kept(4) });
+  assert.deepEqual(cli(repo, added, only), { status: 1, line: 'CODE a.mjs (kept comment changed at :1)' }, 'kept comments alone');
 });
 
 test('text git cannot hand over as UTF-8, a blob git cannot read, and a ref or a diff git refuses are UNKNOWN', async t => {
@@ -781,7 +912,7 @@ test('one line whatever a path holds, usage refused, --help documents the flags 
   assert.ifError(tree.error); assert.equal(tree.status, 0, tree.stderr);
   const c1 = repo.git('commit-tree', tree.stdout.trim(), '-p', c0, '-m', 'c1');
   assert.deepEqual(controlNames(repo), [], 'the name never reached the index or the work tree');
-  assert.deepEqual(cli(repo, c0, c1), { status: 1, line: 'CODE line?break.mjs' });
+  assert.deepEqual(cli(repo, c0, c1), { status: 1, line: 'CODE line?break.mjs (code changed: added)' });
   const run = args => spawnSync(process.execPath, [TOOL, ...args], { cwd: repo.cwd, env: repo.env, encoding: 'utf8', windowsHide: true, timeout: 60000 });
   for (const args of [[], ['--repo', repo.cwd], ['--repo', repo.cwd, '--base', c0, '--head', c1, '--extra', 'x'], ['--repo', repo.cwd, '--base', c0, '--base', c1]]) {
     const r = run(args);

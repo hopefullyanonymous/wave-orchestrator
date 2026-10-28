@@ -3,7 +3,8 @@
 // every slot filled from the ledger or a facts file, ending with a fresh nonce the report must
 // echo. Substitution is a single pass over the SKELETON text, so ledger text that quotes a slot
 // token is inserted byte-for-byte and never scanned again. Fail closed: a skeleton slot nothing
-// fills, or any doubt about a ledger shape, writes no file.
+// fills, or any doubt about a ledger shape, writes no file. Its check mode (--report) reads back
+// the report file an implementer-side prompt names and prints one line, never the report's prose.
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -26,11 +27,12 @@ const DO_LINE = 'DO:', RULES_LINE = 'RULES:';
 
 // Each role is one block; reviewer-round2 is the reviewer block with the round-2 block at its
 // [ROUND 2 BLOCK] slot, which role reviewer leaves empty; rework is the implementer block with
-// the rework block in place of its DO paragraph, the rest (REPORT and nonce line) kept.
+// the rework block in place of its DO paragraph, the rest (REPORT and nonce line) kept. A role
+// that resumes an implementer names, as `fresh`, the route its FRESH line gives instead.
 export const ROLES = {
   implementer: { block: 'implementer' },
-  polish: { block: 'polish' },
-  'fix-round': { block: 'fix-round' },
+  polish: { block: 'polish', fresh: 'spawn a fresh implementer with its rendered implementer prompt first, then the polish pointer' },
+  'fix-round': { block: 'fix-round', fresh: 'spawn a fresh implementer with its rendered rework prompt' },
   rework: { block: 'implementer', replaceDo: 'rework' },
   reviewer: { block: 'reviewer', compose: null },
   'reviewer-round2': { block: 'reviewer', compose: 'round-2' },
@@ -66,6 +68,7 @@ export const SLOTS = {
   '[WORKTREE_PATH]': { fact: 'worktreePath' },
   '[SCRATCHPAD_PATH]': { fact: 'scratchpadPath' },
   '[FINDINGS_FILE]': { fact: 'findingsFile' },
+  '[REPORT_FILE]': { fact: 'reportFile' },
   '[PREVIOUS_FINDINGS_FILE]': { fact: 'previousFindingsFile' },
   '[ROUND1_SHA]': { fact: 'round1Sha' },
   '[ROUND]': { fact: 'round' },
@@ -76,9 +79,13 @@ export const SLOTS = {
   [NONCE_SLOT]: { own: 'nonce' },
   [COMPOSE_SLOT]: { own: 'compose' },
 };
-const STRING_FACTS = ['repoPath', 'worktreePath', 'scratchpadPath', 'findingsFile', 'previousFindingsFile', 'failingOnBase', 'testingGuidePath'];
+// A resuming role's fact beside its slots: the resumed implementer's context, the `subagent_tokens`
+// of its last task notification. At or past FRESH_AT tokens the role renders nothing.
+export const TOKENS_FACT = 'subagentTokens', FRESH_AT = 350000;
+const STRING_FACTS = ['repoPath', 'worktreePath', 'scratchpadPath', 'findingsFile', 'reportFile', 'previousFindingsFile', 'failingOnBase', 'testingGuidePath'];
 
 export class Unknown extends Error {}
+export class Fresh extends Error {}
 // C0, DEL, C1 and the line and paragraph separators, tested by code point: no escape to decode.
 const hidden = text => [...text].some(c => { const n = c.codePointAt(0); return n < 32 || (n >= 127 && n <= 159) || n === 0x2028 || n === 0x2029; });
 
@@ -141,6 +148,7 @@ export function roleFacts(blocks, role) {
     const entry = SLOTS[slot];
     for (const key of entry ? [entry.fact, ...(entry.also || [])] : []) if (key && !facts.includes(key)) facts.push(key);
   }
+  if (ROLES[role].fresh) facts.push(TOKENS_FACT);
   return facts;
 }
 
@@ -151,7 +159,7 @@ function validateFacts(facts, allowed, role) {
     const bad = reason => { throw new Unknown(`fact ${key}: ${reason}`); };
     if (STRING_FACTS.includes(key)) { if (typeof value !== 'string' || !value.trim() || hidden(value)) bad('expected a non-empty one-line string'); }
     else if (key === 'round1Sha') { if (typeof value !== 'string' || !/^[0-9a-f]{7,64}$/.test(value)) bad('expected a lowercase hex commit id'); }
-    else if (key === 'round') { if (!Number.isInteger(value) || value < 1) bad('expected a positive integer'); }
+    else if (key === 'round' || key === TOKENS_FACT) { if (!Number.isInteger(value) || value < 1) bad('expected a positive integer'); }
     else if (key === 'gateAgentsRun') { if (typeof value !== 'boolean') bad('expected true or false'); }
     else if (key === 'guardrails') {
       if (value === 'none') continue;
@@ -244,6 +252,11 @@ export function ledgerValues({ contract, plan, batchName, batchText, batch }) {
 export function render({ skeletons, ledger, role, facts, nonce, readGuardrails }) {
   const blocks = promptBlocks(skeletons), skeleton = roleSkeleton(blocks, role);
   validateFacts(facts, roleFacts(blocks, role), role);
+  // A resuming role refuses before any slot is filled: without the context size, or with one at
+  // or past the line, where it names the fresh route instead.
+  const fresh = ROLES[role].fresh, tokens = facts[TOKENS_FACT];
+  if (fresh && tokens === undefined) throw new Unknown(`UNFILLED ${TOKENS_FACT}`);
+  if (fresh && tokens >= FRESH_AT) throw new Fresh(`${TOKENS_FACT} ${tokens} is at or past ${FRESH_AT}: ${fresh}`);
   const values = new Map();
   const resolve = slot => {
     const entry = SLOTS[slot];
@@ -271,6 +284,63 @@ export function render({ skeletons, ledger, role, facts, nonce, readGuardrails }
   return kept.join('\n').replace(SLOT, slot => values.get(slot)) + '\n';
 }
 
+// What a report file must hold, read from the skeletons rather than copied here: the heading roles
+// of every fenced block that names [REPORT_FILE], and from the implementer block its `Line 1, exactly
+// one of:` status words, the statuses its "For … or … use exactly:" line names and the labels of
+// the line after it.
+const REPORT_SLOT = '[REPORT_FILE]', STATUS_PREFIX = 'Line 1, exactly one of: ';
+export function reportRules(skeletons) {
+  const lf = skeletons.replace(/\r\n/g, '\n'), bodies = [];
+  let body = null;
+  for (const line of lf.split('\n')) {
+    if (!line.startsWith('```')) { if (body) body.push(line); }
+    else if (body) { bodies.push(body.join('\n')); body = null; }
+    else body = [];
+  }
+  if (body) throw new Unknown('unbalanced code fence in the skeletons');
+  const roles = [...new Set(bodies.filter(b => b.includes(REPORT_SLOT))
+    .flatMap(b => [...b.matchAll(/`### B\[NN\] R\[ROUND\] ([a-z0-9-]+) findings`/g)].map(m => m[1])))];
+  const implementer = promptBlocks(lf).get(ROLES.implementer.block);
+  if (implementer === undefined) throw new Unknown(`no \`\`\`prompt:${ROLES.implementer.block} block in the skeletons`);
+  const lines = implementer.split('\n'), statusLines = lines.filter(l => l.startsWith(STATUS_PREFIX));
+  const statuses = statusLines.length === 1 ? statusLines[0].slice(STATUS_PREFIX.length).split(' | ') : [];
+  const MISMATCH_LINE = /\bFor ([A-Z_]+) or ([A-Z_]+) use exactly:$/, at = lines.flatMap((l, i) => MISMATCH_LINE.test(l) ? [i] : []);
+  const mismatch = at.length === 1 ? MISMATCH_LINE.exec(lines[at[0]]).slice(1) : [];
+  const labels = at.length === 1 ? (lines[at[0] + 1] || '').trim().split(' / ').map(part => (/^([A-Z][a-z ]*:) /.exec(part) || [])[1]) : [];
+  if (!roles.length || !statuses.length || statuses.some(s => !/^[A-Z_]+$/.test(s)) || !mismatch.length || mismatch.some(s => !statuses.includes(s))
+    || labels.length !== 4 || labels.some(l => !l)) throw new Unknown('the skeletons state no report file shape (heading roles, status words, mismatch lines)');
+  return { roles, statuses, mismatch, labels };
+}
+
+// One report file checked against reportRules, rule by rule in the order the implementer block
+// lays the file out; the first rule broken is named, and no line of the report is ever printed.
+export function checkReport({ skeletons, text, nonce }) {
+  const { roles, statuses, mismatch, labels } = reportRules(skeletons);
+  const lines = text.replace(/\r\n/g, '\n').split('\n'), fail = rule => ({ code: 1, line: `REPORT FAIL ${rule}` });
+  const heading = /^### B\d{2,} R[1-9]\d* ([a-z0-9-]+) findings$/.exec(lines[0]);
+  if (!heading || !roles.includes(heading[1])) return fail(`line 1 is not \`### B<NN> R<k> <role> findings\`, <role> one of ${roles.join(', ')}`);
+  const status = lines[1];
+  if (!statuses.includes(status)) return fail(`line 2 is not one of ${statuses.join(' | ')}`);
+  if (nonce !== null && lines[2] !== `NONCE ${nonce}`) return fail('line 3 is not `NONCE <nonce>` for the nonce given');
+  if (nonce === null && /^NONCE\b/.test(lines[2] ?? '')) return fail('line 3 is a NONCE line, and no --nonce was given');
+  const from = nonce === null ? 2 : 3;
+  if (!(lines[from] ?? '').startsWith('EVIDENCE:')) return fail(`line ${from + 1} does not open \`EVIDENCE:\``);
+  let to = from + 1;
+  while (to < lines.length && lines[to].trim()) to++;
+  const evidence = lines.slice(from, to);
+  if (!evidence.some(l => /^(?:EVIDENCE:\s*)?(?:[-*]\s+)?`?(?:PASS|FAIL|UNKNOWN) \S.*\bexit(?: code)? \d+\b/.test(l))) {
+    return fail('the EVIDENCE block holds no `validate.mjs` line (PASS, FAIL or UNKNOWN) with `exit <code>`');
+  }
+  const counts = evidence.flatMap(l => [...l.matchAll(/\bchecklist (\d+)\/(\d+)\b/g)]);
+  if (counts.length !== 1) return fail(`the EVIDENCE block holds ${counts.length} \`checklist <n>/<m>\` counts, not one`);
+  if (mismatch.includes(status)) {
+    const rest = lines.slice(to).map(l => l.trim());
+    const missing = labels.find(label => !rest.some(l => l.startsWith(label) || l.includes(' / ' + label)));
+    if (missing) return fail(`${status} without its \`${missing}\` line`);
+  }
+  return { code: 0, line: `REPORT ${status} checklist ${counts[0][1]}/${counts[0][2]}` };
+}
+
 function readText(file, what) {
   let bytes;
   try { if (!fs.statSync(file).isFile()) throw new Error(); bytes = fs.readFileSync(file); } catch { throw new Unknown(`cannot read ${what}`); }
@@ -282,20 +352,39 @@ const slashes = p => p.split(path.sep).join('/');
 function help(skeletonsPath) {
   const blocks = promptBlocks(readText(skeletonsPath, skeletonsPath));
   const roles = Object.keys(ROLES).map(role => `  ${role}: ${roleFacts(blocks, role).join(', ')}`);
+  const reporting = Object.keys(ROLES).filter(role => roleFacts(blocks, role).includes(SLOTS[REPORT_SLOT].fact));
   return ['prompt.mjs --ledger <ledger-dir> --role <role> --batch <Bnn> --facts <facts.json> --out <dir> [--skeletons <file>]',
     'Renders one per-batch prompt to <out>/<CHANGE_ID>-B<NN>-<role>-<id>.md and prints ONE line:',
-    '  PROMPT <path> NONCE <nonce>  |  UNKNOWN <reason> (UNKNOWN UNFILLED <slot> when a slot has no value; nothing is written)',
-    'Exit 0 PROMPT; 2 UNKNOWN. The nonce is only in the file, on its last line. --skeletons defaults to',
+    '  PROMPT <path> NONCE <nonce>  |  FRESH <route>  |  UNKNOWN <reason> (UNKNOWN UNFILLED <slot> when a slot has no value,',
+    `  UNKNOWN UNFILLED ${TOKENS_FACT} without that fact; on FRESH and UNKNOWN nothing is written)`,
+    'Exit 0 PROMPT; 1 FRESH; 2 UNKNOWN. The nonce is only in the file, on its last line. --skeletons defaults to',
     'this skill\'s references/subagent-prompts.md. Facts (a JSON object holding exactly the role\'s keys):',
     ...roles,
     'guardrails: "none" or { "file": "<worktree-relative path>", "heading": "<exact heading line>" }; gateAgentsRun: true | false;',
-    'round: a positive integer; round1Sha: a hex commit id; every other fact: a one-line string.'].join('\n');
+    `round, ${TOKENS_FACT}: positive integers; round1Sha: a hex commit id; every other fact: a one-line string.`,
+    `${TOKENS_FACT} is the resumed implementer's subagent_tokens in its last task notification; at or past ${FRESH_AT}`,
+    'the line is FRESH <route>, naming the fresh implementer that takes the role\'s work instead.',
+    'prompt.mjs --report <file> --nonce <nonce>',
+    `Checks the report file written under role ${reporting.join(', ')} (a fix-up report has no nonce line: drop --nonce for it)`,
+    'and prints ONE line, never the report\'s prose: REPORT <status> checklist <n>/<m> (exit 0) | REPORT FAIL <the first rule broken>',
+    '(exit 1) | UNKNOWN <reason> (exit 2). --report comes first.'].join('\n');
+}
+
+// Check mode, dispatched before the render flags: checkReport above on the file named, with the
+// skeletons this skill ships.
+function reportCli(args) {
+  let o;
+  try { o = parseFlags(args, ['report', 'nonce'], ['report']); }
+  catch { return { code: 2, line: 'UNKNOWN usage: --report <file> [--nonce <nonce>]; use --help' }; }
+  try { return checkReport({ skeletons: readText(DEFAULT_SKELETONS, 'the skeletons file'), text: readText(o.report, `report file ${o.report}`), nonce: o.nonce ?? null }); }
+  catch (e) { return { code: 2, line: e instanceof Unknown ? `UNKNOWN ${e.message}` : `UNKNOWN internal error: ${e.message}` }; }
 }
 
 export function promptCli(args) {
   if (args.length === 1 && args[0] === '--help') {
     try { return { code: 0, line: help(DEFAULT_SKELETONS) }; } catch (e) { return { code: 2, line: `UNKNOWN ${e.message}` }; }
   }
+  if (args[0] === '--report') return reportCli(args);
   let o;
   try { o = parseFlags(args, ['ledger', 'role', 'batch', 'facts', 'out', 'skeletons'], ['ledger', 'role', 'batch', 'facts', 'out']); }
   catch { return { code: 2, line: 'UNKNOWN usage: an unknown, missing or duplicate flag; use --help' }; }
@@ -320,7 +409,10 @@ export function promptCli(args) {
     try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, Buffer.from(text, 'utf8'), { flag: 'wx' }); }
     catch { throw new Unknown(`cannot write ${slashes(file)}`); }
     return { code: 0, line: `PROMPT ${slashes(file)} NONCE ${nonce}` };
-  } catch (e) { return { code: 2, line: e instanceof Unknown ? `UNKNOWN ${e.message}` : `UNKNOWN internal error: ${e.message}` }; }
+  } catch (e) {
+    if (e instanceof Fresh) return { code: 1, line: `FRESH ${e.message}` };
+    return { code: 2, line: e instanceof Unknown ? `UNKNOWN ${e.message}` : `UNKNOWN internal error: ${e.message}` };
+  }
 }
 
 if (isMain(import.meta.url)) {

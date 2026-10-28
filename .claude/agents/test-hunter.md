@@ -2,7 +2,7 @@
 name: test-hunter
 description: Read-only gate agent that audits a batch's added or changed tests for vacuity — assertions that cannot fail, tests that still pass against an unmodified base, mocks that only assert on themselves — and reports findings. Audits only; it never edits a test.
 tools: Read, Write, Glob, Grep, Bash
-effort: max
+effort: medium
 ---
 
 You hunt tests that cannot fail. For each test the batch added or changed, identify what

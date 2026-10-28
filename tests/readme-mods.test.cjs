@@ -1,11 +1,12 @@
 'use strict';
 // README.md's clear and continue (§Mods), bound to the files that define it. The tool's name, the arguments the mod
-// runs after its clear and in place of a skipped one, and the countdown are read from
+// runs after its clear and in place of a skipped one, the countdown and the waiting reading are read from
 // orchestrate-mod/hooks/clear.js's exports and held equal to what README.md, orchestrate-mod/hooks/register.js,
 // orchestrate/references/protocol.md and orchestrate/SKILL.md name; README's passages of this change are pinned
 // whole, and the clear's key words held inside them. Each check answers a list of faults, so every live
 // control below feeds it one planted mismatch and reads the faults it reports.
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
@@ -123,9 +124,9 @@ const AFTER_CLEAR = /after[\W_]*clear/gi;
 // Each place the mod's `/orchestrate` arguments are not clear.js's. After its clear, `afterClearArgs`: in README,
 // protocol.md and SKILL.md, a code span naming the after-clear word that is not that form, alone or behind
 // `/orchestrate `, a mention of the word outside such a span, and a document naming no form. In place of a skipped
-// clear, `continueArgs`: in README §Clear and continue and protocol.md's step 8, any other `/orchestrate ` code span
+// clear, `inPlaceArgs`: in README §Clear and continue and protocol.md's step 8, any other `/orchestrate ` code span
 // and a passage not naming it. In register.js, each `/orchestrate` run after the `/clear` inside the function running
-// it takes afterClearArgs, every other one continueArgs, and each kind is run.
+// it takes afterClearArgs, every other one inPlaceArgs, and each kind is run.
 function argsFaults(texts, c) {
   const faults = [], form = c.afterClearArgs('<id>'), word = new RegExp(AFTER_CLEAR.source, 'i');
   for (const file of DOCS) {
@@ -135,7 +136,7 @@ function argsFaults(texts, c) {
     const outside = [...text.matchAll(AFTER_CLEAR)].length - spans.reduce((n, span) => n + [...span.matchAll(AFTER_CLEAR)].length, 0);
     if (outside !== 0) faults.push(file + ': ' + outside + ' after-clear mention(s) outside its code spans');
   }
-  const inPlace = '/orchestrate ' + c.continueArgs('<id>');
+  const inPlace = '/orchestrate ' + c.inPlaceArgs('<id>', '<reason>');
   for (const [where, text] of [[README + ' §Clear and continue', between(lf(texts.get(README)), README_CLEAR)], [PROTOCOL + ' step 8', between(lf(texts.get(PROTOCOL)), STEP_8)]]) {
     const commands = spansOf(text).filter(span => span.startsWith('/orchestrate ') && !word.test(span));
     for (const span of commands) if (span !== inPlace) faults.push(where + ': names `' + span + '`');
@@ -145,7 +146,7 @@ function argsFaults(texts, c) {
   if (at === -1) return [...faults, 'register.js: runs no /clear'];
   const end = source.indexOf('\n}', at), afterClear = m => m.index > at && m.index < end;
   const runs = [...source.matchAll(/command:\s*'orchestrate',\s*args:\s*([^\n]*?)\s*\}\s*\)/g)];
-  for (const [what, builder, kind] of [['after /clear', c.afterClearArgs, afterClear], ['in place', c.continueArgs, m => !afterClear(m)]]) {
+  for (const [what, builder, kind] of [['after /clear', c.afterClearArgs, afterClear], ['in place', c.inPlaceArgs, m => !afterClear(m)]]) {
     const exprs = runs.filter(kind).map(m => m[1]);
     if (exprs.length === 0) faults.push('register.js: runs no /orchestrate ' + what);
     for (const expr of exprs) {
@@ -176,16 +177,18 @@ test('the arguments the mod runs after its clear, and in place of a skipped one,
     ["register.js's run, gone", edited(texts, REGISTER, swap("{ command: 'orchestrate', args: afterClearArgs(c.ledger) }", "{ command: 'help', args: '' }")), c,
       ['register.js: runs no /orchestrate after /clear']],
     ["register.js's /clear, gone", edited(texts, REGISTER, swap("command: 'clear'", "command: 'reset'")), c, ['register.js: runs no /clear']],
-    ['README, the in-place command', edited(texts, README, swap('`/orchestrate continue <id>`;', '`/orchestrate continue`;')), c,
-      ['README.md §Clear and continue: names `/orchestrate continue`', 'README.md §Clear and continue: does not name `/orchestrate continue <id>`']],
-    ['protocol.md, the in-place command', edited(texts, PROTOCOL, swap('`/orchestrate continue <id>` in this conversation', '`/orchestrate continue <id> here` in this conversation')), c,
-      [PROTOCOL + ' step 8: names `/orchestrate continue <id> here`', PROTOCOL + ' step 8: does not name `/orchestrate continue <id>`']],
-    ["clear.js's in-place builder", texts, { ...c, continueArgs: id => `resume ${id}` },
-      ['README.md §Clear and continue: names `/orchestrate continue <id>`', 'README.md §Clear and continue: does not name `/orchestrate resume <id>`',
-        PROTOCOL + ' step 8: names `/orchestrate continue <id>`', PROTOCOL + ' step 8: does not name `/orchestrate resume <id>`']],
-    ["register.js's in-place builder", edited(texts, REGISTER, swap('args: continueArgs(id) }', 'args: afterClearArgs(id) }')), c,
+    ['README, the in-place command', edited(texts, README, swap('`/orchestrate continue <id> in-place <reason>`,', '`/orchestrate continue <id>`,')), c,
+      ['README.md §Clear and continue: names `/orchestrate continue <id>`', 'README.md §Clear and continue: does not name `/orchestrate continue <id> in-place <reason>`']],
+    ['protocol.md, the in-place command', edited(texts, PROTOCOL, swap('`/orchestrate continue <id> in-place <reason>` in this conversation', '`/orchestrate continue <id>` in this conversation')), c,
+      [PROTOCOL + ' step 8: names `/orchestrate continue <id>`', PROTOCOL + ' step 8: does not name `/orchestrate continue <id> in-place <reason>`']],
+    ["clear.js's in-place builder", texts, { ...c, inPlaceArgs: (id, reason) => `continue ${id} ${reason}` },
+      ['README.md §Clear and continue: names `/orchestrate continue <id> in-place <reason>`', 'README.md §Clear and continue: does not name `/orchestrate continue <id> <reason>`',
+        PROTOCOL + ' step 8: names `/orchestrate continue <id> in-place <reason>`', PROTOCOL + ' step 8: does not name `/orchestrate continue <id> <reason>`']],
+    ["register.js's in-place builder", edited(texts, REGISTER, swap('args: inPlaceArgs(id, reason) }', 'args: afterClearArgs(id) }')), c,
       ['register.js: runs /orchestrate afterClearArgs(id) in place']],
-    ["register.js's in-place run, gone", edited(texts, REGISTER, swap("{ command: 'orchestrate', args: continueArgs(id) }", "{ command: 'help', args: '' }")), c,
+    ["register.js's plain continue", edited(texts, REGISTER, swap('args: inPlaceArgs(id, reason) }', 'args: continueArgs(id) }')), c,
+      ['register.js: runs /orchestrate continueArgs(id) in place']],
+    ["register.js's in-place run, gone", edited(texts, REGISTER, swap("{ command: 'orchestrate', args: inPlaceArgs(id, reason) }", "{ command: 'help', args: '' }")), c,
       ['register.js: runs no /orchestrate in place']],
   ];
   settle(controls, argsFaults);
@@ -246,6 +249,52 @@ test("README's two minutes, protocol.md's and the countdown clear.js exports agr
   settle(controls, countdownFaults);
 });
 
+// ===== The waiting reading =============================================================
+// How clear.js's WAITING reads a `waiting` agent, as protocol.md's step 8 quotes it: every `waiting` code span there
+// followed by a parenthesis holds WAITING's text after `waiting: `, step 8 quotes it, and no file of `texts` keeps the
+// reading it replaced at C1 of OS-20261022. The test hands it every file git lists under orchestrate/ and
+// orchestrate-mod/, recursively, and README.md.
+const REPLACED_WAITING = 'handed back; a command of its own still runs';
+const SHIPPED_ROOTS = ['orchestrate', 'orchestrate-mod', README];
+function listed() {
+  const r = spawnSync('git', ['-C', ROOT, 'ls-files', '-z', '--', ...SHIPPED_ROOTS], { encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.ok(!r.error && r.status === 0, 'git ls-files must list the shipped files: ' + (r.error || r.stderr));
+  return new Map(r.stdout.split('\0').filter(Boolean).map(file => [file, read(file)]));
+}
+function waitingFaults(texts, c) {
+  const faults = [], gloss = c.WAITING.replace(/^waiting: /, '');
+  const quoted = [...collapse(between(lf(texts.get(PROTOCOL)), STEP_8)).matchAll(/`waiting` \(([^)]*)\)/g)].map(m => m[1]);
+  if (gloss === c.WAITING) faults.push('clear.js: WAITING does not open with `waiting: `');
+  if (quoted.length === 0) faults.push(PROTOCOL + ' step 8: quotes no waiting reading');
+  for (const q of quoted) if (q !== gloss) faults.push(PROTOCOL + ' step 8: quotes (' + q + '), not (' + gloss + ')');
+  for (const [file, text] of texts) if (collapse(lf(text)).includes(REPLACED_WAITING)) faults.push(file + ': keeps the replaced reading');
+  return faults;
+}
+test("step 8 quotes the waiting reading clear.js exports, and no shipped file nor README keeps the one it replaced", async () => {
+  const c = await clear, texts = listed(), S8 = PROTOCOL + ' step 8: ', gloss = c.WAITING.replace(/^waiting: /, '');
+  const MODELS = 'orchestrate/references/execution-models.md', VIEW = 'orchestrate-mod/hooks/view.js';
+  // The domain is the checkout's listing under the shipped roots: every file checkout() reads, and more beside them.
+  assert.ok([...checkout().keys(), MODELS, VIEW, 'orchestrate-mod/hooks/clear.js'].every(file => texts.has(file))
+    && [...texts.keys()].every(file => SHIPPED_ROOTS.some(root => file === root || file.startsWith(root + '/'))), 'the scan reads the shipped tree as git lists it');
+  assert.deepEqual(waitingFaults(texts, c), []);
+  assert.deepEqual(waitingFaults(crlf(texts), c), [], 'a CRLF checkout reads alike');
+  const controls = [
+    ['step 8, the replaced reading put back', edited(texts, PROTOCOL, swap('(' + gloss + ')', '(' + REPLACED_WAITING + ')')), c,
+      [S8 + 'quotes (' + REPLACED_WAITING + '), not (' + gloss + ')', PROTOCOL + ': keeps the replaced reading']],
+    ['step 8, no reading quoted', edited(texts, PROTOCOL, swap('(' + gloss + ')', '')), c, [S8 + 'quotes no waiting reading']],
+    ["clear.js's reading", texts, { ...c, WAITING: 'waiting: idle' }, [S8 + 'quotes (' + gloss + '), not (idle)']],
+    ["clear.js's reading, no status word", texts, { ...c, WAITING: gloss }, ['clear.js: WAITING does not open with `waiting: `']],
+    ['README, the replaced reading', edited(texts, README, text => text + '\nA waiting agent has handed back; a command of its own still runs.\n'), c,
+      ['README.md: keeps the replaced reading']],
+    // Outside the four files checkout() reads: a reference document and a mod hook's comment.
+    ['execution-models.md, the replaced reading', edited(texts, MODELS, text => text + '\nAn agent shown `waiting` (handed back; a command of its own still runs) keeps a background command of its own.\n'), c,
+      [MODELS + ': keeps the replaced reading']],
+    ["a mod hook's comment, the replaced reading", edited(texts, VIEW, text => text + '\n// A waiting agent has handed back; a command of its own still runs.\n'), c,
+      [VIEW + ': keeps the replaced reading']],
+  ];
+  settle(controls, waitingFaults);
+});
+
 // ===== README's passages ===============================================================
 // [what, from, to, the passage from `from` up to `to`, its whitespace collapsed].
 const PINS = [
@@ -253,16 +302,20 @@ const PINS = [
     "| `/orchestrate continue [<id>]` | Run to the next checkpoint: validate the tip, open the wave, implement its batches concurrently, gate + integrate each as it lands, repeat — then pre-verify what an agent can and stop with one combined smoke page. Naming a ledger's `<id>` picks that ledger when more than one is active |"],
   ["§Mods' opening", '`orchestrate-mod/` is an optional Claude Code mod', '\n\n### Install',
     "`orchestrate-mod/` is an optional Claude Code mod beside the skill: a `/ledger` pane, a band line above the prompt, and a per-request cost log of every session it loads in, one JSONL file per session (a long session continues in `<session>.1.jsonl`, `<session>.2.jsonl`, …) under `~/.claude/orchestrate-costs/`."
-    + " No orchestrate step depends on it: step 8 of the skill's session algorithm calls the mod's `schedule_clear` when a session has it, and keeps its 10-minute timer otherwise (§Clear and continue)."],
+    + " No orchestrate step depends on it: step 8 of the skill's session algorithm calls the mod's `schedule_clear` at every point where it may pause for context when a session has it, and keeps its 10-minute timer for a context at or past the ledger's clear threshold when the mod is absent or declines (§Clear and continue)."],
   ['§Clear and continue', ...README_CLEAR,
     "### Clear and continue The mod registers the tool `schedule_clear`, which the model calls by its full name `mcp__orchestrate-mod__schedule_clear`."
-    + " At the points that step 8 of the pinned `references/protocol.md` §Session algorithm names, the conductor commits a PROGRESS session-log row naming the LOG heading of the work since the row before, then calls the tool in place of its 10-minute timer."
-    + " - The mod declines when the band line does not show that ledger (the session is untagged, or tagged with another), the ledger's pinned protocol does not name the tool, the integration tip has moved, the ledger's directory holds uncommitted files, an agent is in flight, or a clear is already scheduled. The conductor then runs its timer as before."
+    + " At every point that step 8 of the pinned `references/protocol.md` §Session algorithm names, whatever the context, the conductor commits a PROGRESS session-log row naming the LOG heading of the work since the row before, then calls the tool in place of its 10-minute timer."
+    + " Where a wave closes on a checkpoint, it calls before the checkpoint's close-out, so a clear leaves the whole close-out to the fresh conversation."
+    + " - The mod answers `not needed` when the conductor's context is under the ledger's clear threshold, the contract's `**Clear threshold**` line (300K for a contract without one), and the conductor carries on with no line and no timer."
+    + " - The mod declines when the band line does not show that ledger (the session is untagged, or tagged with another), the ledger's clear threshold line cannot be read, the ledger's pinned protocol does not name the tool, the integration tip has moved, the ledger's directory holds uncommitted files, an agent is in flight, or a clear is already scheduled, naming each agent that stops it."
+    + " When it names an agent as waiting (it returned while a command of its own still runs) whose report is in, and the ledger needs nothing from that command, the conductor stops that agent by its agent id with TaskStop (the command's id would wake the agent for one more turn), then calls the tool once more."
+    + " After a decline that stands, or with no mod, the conductor reads its own context size and runs its timer only at or past the ledger's clear threshold, or when the size or the threshold cannot be read."
     + " - Otherwise the conductor posts the line the mod answers with and ends its turn. A two-minute countdown then runs in the band line: `clearing in M:SS · type anything to keep this conversation`."
     + " Any message keeps the conversation; a local command such as `/ledger` starts no turn, so it does not. A turn that is interrupted, or ends in a refusal or an error, drops the clear as well."
     + " - At zero the mod runs `/clear`, then `/orchestrate continue <id> after-clear`. The earlier conversation vanishes from view and the fresh one boots from the ledger; its first answer names the LOG heading that the ledger's newest PROGRESS session-log row names, the run's record of the work before the clear."
-    + " - Background work still running when the turn ends, or a scheduled task (a cron), skips the clear, since its notice would wake the fresh conversation; so does an app that reports neither, and an agent found running at zero."
-    + " A skipped clear continues the run in this conversation with `/orchestrate continue <id>`; should the app refuse that command, or the one that follows a clear, the band line names it for you to type."
+    + " - Background work still running when the turn ends, or a scheduled task (a cron), skips the clear, since its notice would wake the fresh conversation; so does an app that cannot report whether either is present, and an agent found running at zero."
+    + " A skipped clear continues the run in this conversation with `/orchestrate continue <id> in-place <reason>`, which carries on without booting again while the integration tip is the one the conductor passed; should the app refuse that command, or the one that follows a clear, the band line names a command for you to type."
     + " - `/ledger` lists each clear, with its time and the context it cleared, and a run total across the conversations the clears link."
     + " - To turn the clear off, remove the mod as Install above describes; the 10-minute timer is the skill's own and needs no mod."],
 ];
@@ -292,13 +345,27 @@ function pinFaults(readme) {
     ...TREE_ROWS.flatMap(row => at.has('tree row ' + rowName(row)) ? [] : ['tree row ' + rowName(row) + ': not found once'])];
 }
 // The clear's key words, however spelled or wrapped, sit in README only inside the pinned passages and rows, so no
-// sentence elsewhere restates or reverses them.
-const KEY_WORDS = [['the tool', SHORT_NAME], ['the after-clear word', AFTER_CLEAR], ['the countdown', /count[\W_]*down/gi], ['the clear command', /(?<![\w/.-])\/clear\b/gi]];
+// sentence elsewhere restates or reverses them: among them the retry's TaskStop and the `not needed` answer, README's
+// side of their rows in tests/tool-wiring.test.cjs BOUND_WORDS, and a close-out, whose order against the clear
+// §Clear and continue states (BL-100).
+const KEY_WORDS = [['the tool', SHORT_NAME], ['the after-clear word', AFTER_CLEAR], ['the countdown', /count[\W_]*down/gi], ['the clear command', /(?<![\w/.-])\/clear\b/gi],
+  ['the TaskStop retry', /\btask[\W_]*stop/gi], ['the not needed answer', /\bnot[\W_]*needed\b/gi], ['the close-out', /\bclos(?:e|ed|es|ing)[\W_]*outs?\b|\bcloseouts?\b/gi]];
+// A key word's homes outside the pinned passages, each found once as written: the recovery question of §How it works,
+// which names a close-out and no order.
+const KEY_HOMES = { 'the close-out': ['merged but not yet validated? close-out half\nfinished?'] };
 function strayFaults(readme) {
-  const text = lf(readme), inside = homes(text);
-  return KEY_WORDS.flatMap(([what, pattern]) => [...text.matchAll(pattern)]
-    .filter(m => !inside.some(([, start, end]) => m.index >= start && m.index + m[0].length <= end))
-    .map(m => what + ': ' + collapse(text.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30)).trim()));
+  const text = lf(readme), inside = homes(text), faults = [];
+  for (const [what, pattern] of KEY_WORDS) {
+    const own = (KEY_HOMES[what] || []).flatMap(home => {
+      const start = text.indexOf(home);
+      if (start !== -1 && text.indexOf(home, start + 1) === -1) return [[what, start, start + home.length]];
+      faults.push(what + ': its home is not found once — ' + collapse(home));
+      return [];
+    });
+    faults.push(...[...text.matchAll(pattern)].filter(m => ![...inside, ...own].some(([, start, end]) => m.index >= start && m.index + m[0].length <= end))
+      .map(m => what + ': ' + collapse(text.slice(Math.max(0, m.index - 30), m.index + m[0].length + 30)).trim()));
+  }
+  return faults;
 }
 test("README's passages of the clear and continue are pinned whole, and its key words appear nowhere else", () => {
   const readme = read(README);
@@ -316,8 +383,16 @@ test("README's passages of the clear and continue are pinned whole, and its key 
   // Live: each key word, however spelled or wrapped, planted outside the passages is reported; inside one it is not.
   const outside = text => swap('## Usage\n', '## Usage\n\n' + text + '\n')(readme);
   const planted = [['the tool', ['schedule_clear', 'scheduleClear', 'Schedule\n  clear']], ['the after-clear word', ['after-clear', 'after_clear', 'After\nclear']],
-    ['the countdown', ['countdown', 'count-down', 'Count down']], ['the clear command', ['/clear', '`/clear`']]]
+    ['the countdown', ['countdown', 'count-down', 'Count down']], ['the clear command', ['/clear', '`/clear`']],
+    ['the TaskStop retry', ['TaskStop', 'Task Stop', 'task_stop']], ['the not needed answer', ['not needed', '`not needed`', 'Not\nneeded', 'not-needed', 'not_needed']],
+    ['the close-out', ['close-out', 'Close out', 'closed\nout', 'closeout']]]
     .flatMap(([what, spellings]) => spellings.map(spelling => [JSON.stringify(spelling), outside('Then use ' + spelling + ' here.'), [what]]));
   settle(planted, text => strayFaults(text).map(f => f.split(':')[0]));
+  // Live: the close-out ordered against the clear outside the passages, and the recovery question's words gone, are
+  // each reported.
+  settle([['the close-out put before the clear', outside("The conductor finishes a checkpoint's close-out before the mod clears the conversation."),
+    ["the close-out: uctor finishes a checkpoint's close-out before the mod clears the con"]],
+  ["the recovery question's home gone", swap('close-out half\nfinished?', 'wrap-up half\nfinished?')(readme),
+    ['the close-out: its home is not found once — merged but not yet validated? close-out half finished?']]], strayFaults);
   assert.deepEqual(strayFaults(swap('for you to type.', 'for you to type; the countdown is `/clear`\'s.')(readme)), [], 'inside a passage a key word is at home');
 });

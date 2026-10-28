@@ -161,7 +161,7 @@ const FRONTMATTER_CASES = [
   { line: 'name: qa-runner', field: { key: 'name', value: 'qa-runner' } },
   { line: 'tools: Read, Glob, Grep, Bash',
     field: { key: 'tools', value: 'Read, Glob, Grep, Bash' } },
-  // The gate pair's effort line, exactly as its two definitions carry it, and the census's.
+  // The reviewer's effort line, exactly as its definition carries it, and the test hunter's and the census's.
   { line: 'effort: max', field: { key: 'effort', value: 'max' } },
   { line: 'effort: medium', field: { key: 'effort', value: 'medium' } },
   { line: 'description: "Runs the steps: quickly"',
@@ -694,11 +694,12 @@ test('no definition pins a model or reaches past the browser MCP server', () => 
   }
 });
 
-// Effort by role: the reviewer, which also runs the plan pre-flight, and the test hunter run at max
+// Effort by role: the reviewer, which also runs the plan pre-flight, runs at max
 // whatever the session's effort (the user's decision, 2026-09-27); the census runs at medium (the
-// user's standing choice since 2026-10-07, confirmed 2026-10-13); the implementer and the QA runner
-// declare none, so they run at the session's. Judged on what definition() parses.
-const EFFORT = { implementer: null, reviewer: 'max', 'test-hunter': 'max', 'qa-runner': null, census: 'medium' };
+// user's standing choice since 2026-10-07, confirmed 2026-10-13), and so does the test hunter (the
+// user's decision, 2026-10-25); the implementer and the QA runner declare none, so they run at the
+// session's. Judged on what definition() parses.
+const EFFORT = { implementer: null, reviewer: 'max', 'test-hunter': 'medium', 'qa-runner': null, census: 'medium' };
 // What a parsed frontmatter says about effort that the role's verdict forbids: any key naming
 // effort but the one `effort` a role with a level declares, and that key's value if it is not
 // exactly that level.
@@ -707,7 +708,7 @@ const effortFaults = (fields, expected) => {
   if (expected !== null && fields.get('effort') !== expected) faults.push('effort is ' + JSON.stringify(fields.get('effort')) + ', not ' + expected);
   return faults;
 };
-test('the gate pair declares effort: max, the census effort: medium, and the implementer and the QA runner declare no effort', () => {
+test('the reviewer declares effort: max, the test hunter and the census effort: medium, and the implementer and the QA runner declare no effort', () => {
   assert.deepEqual(Object.keys(EFFORT).sort(), Object.keys(TOOLS).sort(), 'every known definition has its effort verdict');
   for (const [name, expected] of Object.entries(EFFORT)) {
     const { file, fields } = definition(name);

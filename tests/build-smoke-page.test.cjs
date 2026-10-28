@@ -945,3 +945,203 @@ test('LF/CRLF-only reissue refuses stale bytes then enforces new paths, all revi
   assert.equal(r.status, 1); assert.match(r.stderr, /missing.*issue-001/);
   assert.deepEqual(fs.readFileSync(f.out), second);
 });
+
+// ===== --help, and the sidecar smoke-page.md §Sidecar shape publishes ==========================
+test('--help prints the usage the header comment shows, names §Sidecar shape, prints no absolute path and exits 0', () => {
+  const r = spawnSync(process.execPath, [BUILDER, '--help'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stderr, '');
+  assert.match(r.stdout, /references\/smoke-page\.md §Sidecar shape/);
+  const forms = r.stdout.split(/\r?\n/).map(l => /^(?:usage: | {7})(build-smoke-page\.mjs .+)$/.exec(l)?.[1]).filter(Boolean);
+  const header = text => [...text.matchAll(/^\/\/ {3}node (build-smoke-page\.mjs .+)$/gm)].map(m => m[1]);
+  const source = fs.readFileSync(BUILDER, 'utf8').replace(/\r\n/g, '\n'), anchor = ' [--reset-verdicts]\n//   node';
+  assert.equal(forms.length, 2, 'the usage and the help form');
+  assert.deepEqual(header(source), forms, 'the header comment shows the usage --help prints');
+  assert.equal(source.split(anchor).length, 2, 'the control anchor occurs once');
+  assert.notDeepEqual(header(source.split(anchor).join('\n//   node')), forms, 'live control: a header that drifts from --help is reported');
+  // No absolute path, so the help reads alike through a linked skill directory or file.
+  const absolute = text => text.split(/\s+/).map(w => w.replace(/^[("'`[]+|[)"'`.,;:\]]+$/g, '')).filter(w => path.isAbsolute(w) || /^[A-Za-z]:[\\/]/.test(w));
+  assert.deepEqual(absolute(r.stdout), []);
+  assert.deepEqual(absolute(r.stdout + ' (/opt/skill/references/smoke-page-template.html) C:\\skill\\x.html'),
+    ['/opt/skill/references/smoke-page-template.html', 'C:\\skill\\x.html'], 'live control: a resolved path in either spelling is reported');
+  // The usage refusal keeps its own exit code.
+  assert.equal(spawnSync(process.execPath, [BUILDER, 'only-one.json'], { encoding: 'utf8' }).status, 2);
+});
+
+const SMOKE_DOC = path.join(__dirname, '../orchestrate/references/smoke-page.md');
+// The subsection's prose and its one fenced json block, the block's bytes as the document holds them.
+function sidecarSection(text) {
+  const found = [...text.matchAll(/^### Sidecar shape\r?$/gm)];
+  assert.equal(found.length, 1, 'smoke-page.md holds one Sidecar shape subsection');
+  const rest = text.slice(found[0].index + found[0][0].length), next = rest.search(/^#{1,3} /m), body = next < 0 ? rest : rest.slice(0, next);
+  const blocks = [...body.matchAll(/^```json\r?\n([\s\S]*?)^```\r?$/gm)];
+  assert.equal(blocks.length, 1, 'the subsection publishes one json block');
+  return { prose: body.slice(0, blocks[0].index), raw: blocks[0][1] };
+}
+// Every key path of a sidecar, an array's members spelled `*`.
+function keyPaths(value, at) {
+  if (Array.isArray(value)) return value.flatMap(item => keyPaths(item, at + '.*'));
+  if (!value || typeof value !== 'object') return [];
+  return Object.entries(value).flatMap(([key, item]) => { const here = at ? at + '.' + key : key; return [here, ...keyPaths(item, here)]; });
+}
+// A copy without one key path, each `*` its first member.
+function without(data, keyPath) {
+  const copy = structuredClone(data), parts = keyPath.split('.').map(p => p === '*' ? 0 : p), last = parts.pop();
+  const parent = parts.reduce((node, part) => node[part], copy);
+  assert.ok(Object.hasOwn(parent, last), 'the example holds ' + keyPath);
+  delete parent[last];
+  return copy;
+}
+// What the builder refuses a sidecar without, each with the refusal that names it.
+const REFUSED_WITHOUT = {
+  change: /^sidecar is missing: change$/, checkpoint: /^sidecar is missing: checkpoint$/, batches: /^sidecar is missing: batches$/,
+  branch: /^sidecar is missing: branch$/, buildSha: /^sidecar is missing: buildSha$/, ckptKey: /^sidecar is missing: ckptKey$/,
+  gate: /^sidecar is missing: gate$/, sections: /^sidecar is missing: sections$/,
+  'gate.commands': /^the step-0 gate has no containment check/, 'gate.checks': /^the step-0 gate has no checks$/,
+  'sections.*.n': /^section number undefined must be a positive integer$/, 'sections.*.steps': /^section 1 has no steps$/,
+  'sections.*.steps.*.n': /^step number undefined must be a positive integer$/,
+  'sections.*.steps.*.do': /^step 1 needs both `do` and `pass`$/, 'sections.*.steps.*.pass': /^step 1 needs both `do` and `pass`$/,
+};
+// What the example shows that a sidecar may leave out.
+const OPTIONAL = ['version', 'version.was', 'suite', 'knownFailures', 'facts', 'pageTitle', 'eyebrow', 'headline', 'standfirst', 'copyHeader',
+  'gate.intro', 'sections.*.touchesData', 'sections.*.lede', 'sections.*.need', 'sections.*.steps.*.revision', 'sections.*.steps.*.aside'];
+// What the builder checks of none: a section's title, which its heading shows, and what an optional key holds.
+const SHOWN = ['sections.*.title', 'version.now', 'facts.*.dt', 'facts.*.dd'];
+
+test('smoke-page.md §Sidecar shape: the example builds, each key it names required is refused when absent and each optional one is not', () => {
+  const { prose, raw } = sidecarSection(fs.readFileSync(SMOKE_DOC, 'utf8')), example = JSON.parse(raw);
+  assert.doesNotThrow(() => builder.buildSmokePage(example, template), 'the documented example builds');
+  // The domain is the example itself: every key it shows is classified, and every classified key is shown.
+  assert.deepEqual([...new Set(keyPaths(example))].sort(), [...Object.keys(REFUSED_WITHOUT), ...OPTIONAL, ...SHOWN].sort());
+  const faults = [];
+  for (const [key, refusal] of Object.entries(REFUSED_WITHOUT)) {
+    try { builder.buildSmokePage(without(example, key), template); faults.push(key + ': built without it'); }
+    catch (e) { if (!refusal.test(e.message)) faults.push(key + ': refused for another reason — ' + e.message); }
+  }
+  for (const key of OPTIONAL) {
+    try { builder.buildSmokePage(without(example, key), template); } catch (e) { faults.push(key + ': refused without it — ' + e.message); }
+  }
+  assert.deepEqual(faults, []);
+  // The prose names each required key before "The rest is optional:" and each optional one after it, never both.
+  const [before, after] = prose.split('The rest is optional:'), named = text => new Set([...text.matchAll(/`([A-Za-z]+)`/g)].map(m => m[1]));
+  assert.ok(after !== undefined, 'the prose holds the optional list');
+  const required = named(before), optional = named(after), last = key => key.split('.').pop();
+  assert.deepEqual([...Object.keys(REFUSED_WITHOUT), 'sections.*.title'].map(last).filter(k => !required.has(k) || optional.has(k)), [], 'each required key is named as required');
+  assert.deepEqual(OPTIONAL.map(last).filter(k => !optional.has(k) || required.has(k)), [], 'each optional key is named as optional');
+});
+
+test('smoke-page.md §Sidecar shape: the CLI builds the published bytes in either line ending, and refuses them without checkpoint', t => {
+  const doc = fs.readFileSync(SMOKE_DOC, 'utf8').replace(/\r\n/g, '\n'), dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sidecar-shape-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const run = (name, raw) => {
+    const json = path.join(dir, name + '.json'), out = path.join(dir, name + '.html');
+    fs.writeFileSync(json, raw);
+    const r = spawnSync(process.execPath, [BUILDER, json, out], { encoding: 'utf8' });
+    return { status: r.status, stderr: r.stderr, html: r.status === 0 ? fs.readFileSync(out, 'utf8') : null };
+  };
+  const crlf = sidecarSection(doc.replace(/\n/g, '\r\n')).raw, lf = sidecarSection(doc).raw;
+  assert.ok(crlf.includes('\r\n') && !lf.includes('\r'), 'each twin keeps its own line endings');
+  const pages = [run('lf', lf), run('crlf', crlf)];
+  assert.deepEqual(pages.map(p => [p.status, p.stderr]), [[0, ''], [0, '']]);
+  assert.equal(pages[1].html, pages[0].html, 'both line endings build one page');
+  assert.equal(pages[0].html, builder.buildSmokePage(JSON.parse(lf), template), 'the CLI builds what the module builds');
+  // Live control on the published bytes: the line holding a required key taken out is refused, naming it.
+  const line = '  "checkpoint": 1,\n';
+  assert.equal(lf.split(line).length, 2, 'the example holds the checkpoint line once');
+  const refused = run('without-checkpoint', lf.split(line).join(''));
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /sidecar is missing: checkpoint/);
+});
+
+// Each first-checkpoint pointer, word for word, and the passage holding it, pinned whole so that a sentence added beside
+// the pointer is caught: the delivery-base paragraph entire, and the by-hand fallback from "Without Node" to its
+// paragraph's end.
+const FIRST_CHECKPOINT = [
+  { name: 'delivery base', whole: true, pointer: "The first checkpoint, with no committed page in the ledger, takes its sidecar's form from §Sidecar shape below, never from an archived ledger.",
+    passage: "Use the newest committed `smoke-*.html` as the delivery base, or this template when starting a page. The first checkpoint, with no committed page in the ledger,"
+      + " takes its sidecar's form from §Sidecar shape below, never from an archived ledger. Fill and commit `smoke-<Cn>.html`, then use the current runtime's HTML preview,"
+      + " file hand-over, or publisher. Reuse an existing hosted URL when that runtime can update it; otherwise hand over the current committed HTML or use §Fallback."
+      + " Record the CURRENT URL, ledger-relative HTML path, or `plain text` in PROGRESS's `**Smoke page**:` line. If delivery moves, retain the previous hosted URL in"
+      + ' LOG for future reuse. A link to an older hosted checkpoint is not a current hand-over.' },
+  { name: 'by-hand fallback', whole: false, pointer: "At the first checkpoint no page is committed in the ledger yet: patch this template, taking its content's form from §Sidecar shape, never from an archived ledger.",
+    passage: "Without Node, or with the sidecar lost, copy the newest committed `smoke-*.html`, patch the slots by hand, and run `grep -o '{{[A-Z_]\\{1,\\}}}'` over the"
+      + " result — zero hits; the page never depends on the tool that filled it. At the first checkpoint no page is committed in the ledger yet: patch this template,"
+      + " taking its content's form from §Sidecar shape, never from an archived ledger." },
+];
+// A pointer missing, or its passage not as pinned, and any other sentence of the document that names an archive.
+function pointerFaults(text) {
+  const paragraphs = text.replace(/\r\n/g, '\n').split(/\n{2,}/).map(p => p.replace(/\s+/g, ' ').trim()), faults = [];
+  for (const { name, whole, pointer, passage } of FIRST_CHECKPOINT) {
+    const homes = paragraphs.filter(p => p.includes(pointer));
+    if (homes.length !== 1) faults.push(`${name}: ${homes.length} paragraph(s) hold the pointer`);
+    else if (whole ? homes[0] !== passage : !homes[0].endsWith(' ' + passage)) faults.push(`${name}: the passage is not as pinned`);
+  }
+  const pointers = FIRST_CHECKPOINT.map(entry => entry.pointer);
+  return [...faults, ...paragraphs.flatMap(p => p.split(/(?<=\.)\s+/)).filter(s => /archiv/i.test(s) && !pointers.includes(s)).map(s => 'another sentence names an archive: ' + s)];
+}
+test('smoke-page.md sends a first checkpoint to §Sidecar shape, never to an archived ledger, from the delivery base and the by-hand fallback', () => {
+  const doc = fs.readFileSync(SMOKE_DOC, 'utf8').replace(/\r\n/g, '\n');
+  assert.deepEqual(FIRST_CHECKPOINT.filter(entry => !entry.passage.includes(entry.pointer)).map(entry => entry.name), [], 'each passage holds its pointer');
+  assert.deepEqual(pointerFaults(doc), []);
+  assert.deepEqual(pointerFaults(doc.split('\n').join('\r\n')), [], 'the CRLF twin reads alike');
+  // Live controls: each pointer taken out, a sentence added beside it naming no archive, and an archived ledger named in
+  // another sentence are each reported.
+  const faults = [], beside = ' Or copy the sidecar of the newest completed ledger for its form.';
+  for (const { name, pointer } of FIRST_CHECKPOINT) {
+    const at = new RegExp(pointer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').split(' ').join('\\s+'), 'g'), hits = doc.match(at) ?? [];
+    if (hits.length !== 1) { faults.push(`${name}: the pointer occurs ${hits.length} times as written`); continue; }
+    if (!pointerFaults(doc.replace(at, () => '')).some(f => f.startsWith(name + ': '))) faults.push(`${name}: the pointer taken out is not reported`);
+    if (!pointerFaults(doc.replace(at, m => m + beside)).some(f => f === `${name}: the passage is not as pinned`)) faults.push(`${name}: a sentence added beside the pointer is not reported`);
+  }
+  const planted = pointerFaults(doc + "\nCopy an archived ledger's `smoke-c1.json` for the form.\n");
+  if (!planted.some(f => f.endsWith("Copy an archived ledger's `smoke-c1.json` for the form."))) faults.push('a planted archive sentence is not reported: ' + JSON.stringify(planted));
+  assert.deepEqual(faults, []);
+});
+
+// ===== BL-096: the checkpoint field is the n of C<n> ============================================
+// Three ledgers in a row wrote "checkpoint": "C1", and two issued pages read "Checkpoint CC1".
+const CHECKPOINT_REFUSAL = /^checkpoint must be a positive integer, the n of C<n> \("checkpoint": 1 for C1\), got /;
+test('[BL-096] checkpoint is a positive integer: "C1", "1" and every other form are refused naming the field, a previous sidecar included', () => {
+  const faults = [];
+  for (const checkpoint of ['C1', '1', 'c1', 0, -1, 1.5, true, null, [1], { n: 1 }]) {
+    try { build({ checkpoint }); faults.push(JSON.stringify(checkpoint) + ': built'); }
+    catch (e) { if (!CHECKPOINT_REFUSAL.test(e.message) || !e.message.endsWith('got ' + JSON.stringify(checkpoint))) faults.push(JSON.stringify(checkpoint) + ': ' + e.message); }
+  }
+  assert.deepEqual(faults, []);
+  // The boundary's other side: 1 and 2 build, their eyebrow and copy header reading C1 and C2.
+  for (const n of [1, 2]) {
+    const slots = builder.renderSlots(sidecar({ checkpoint: n, eyebrow: undefined, copyHeader: undefined }));
+    assert.ok(slots.EYEBROW.startsWith(`Checkpoint C${n} · `) && slots.COPY_HEADER.startsWith(`C${n} smoke run`), slots.EYEBROW + ' / ' + slots.COPY_HEADER);
+  }
+  // A re-issue's previous sidecar is held to the same form, so the two checkpoints compare as numbers.
+  assert.throws(() => reissue(sidecar(), sidecar({ checkpoint: '1' })), e => CHECKPOINT_REFUSAL.test(e.message));
+  assert.doesNotThrow(() => reissue(sidecar(), sidecar()), 'the control: a numbered previous sidecar re-issues');
+});
+
+test('[BL-096] smoke-page.md shows the field: the eyebrow row and the example carry "checkpoint": 1, and the example\'s "C1" copy is refused', t => {
+  const doc = fs.readFileSync(SMOKE_DOC, 'utf8').replace(/\r\n/g, '\n');
+  const rows = doc.split('\n').filter(l => l.startsWith('| `{{EYEBROW}}` |'));
+  assert.equal(rows.length, 1, 'one eyebrow row in the slot table');
+  assert.ok(rows[0].includes('`"checkpoint": 1` builds `Checkpoint C1`'), 'the row shows the field beside its rendering: ' + rows[0]);
+  const { raw } = sidecarSection(doc), example = JSON.parse(raw);
+  assert.equal(example.checkpoint, 1);
+  // Rendered from the field alone: the example without its own eyebrow and copy header.
+  const slots = builder.renderSlots(without(without(example, 'eyebrow'), 'copyHeader'));
+  assert.equal(slots.EYEBROW, 'Checkpoint C1 · batches B01–B02');
+  assert.ok(slots.COPY_HEADER.startsWith('C1 smoke run — '), slots.COPY_HEADER);
+  // As the checkpoint's smoke step runs it: the published example with "C1", through the CLI.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'checkpoint-form-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const line = '  "checkpoint": 1,\n', json = path.join(dir, 'smoke-c1.json'), out = path.join(dir, 'smoke-c1.html');
+  assert.equal(raw.split(line).length, 2, 'the example holds the checkpoint line once');
+  const faults = [];
+  for (const [form, status] of [['"C1"', 1], ['"1"', 1], ['1', 0]]) {
+    fs.writeFileSync(json, raw.split(line).join(`  "checkpoint": ${form},\n`));
+    fs.rmSync(out, { force: true });
+    const r = spawnSync(process.execPath, [BUILDER, json, out], { encoding: 'utf8' });
+    const named = status === 1 ? r.stderr.includes('checkpoint must be a positive integer, the n of C<n> ("checkpoint": 1 for C1), got ' + form) : r.stderr === '';
+    if (r.status !== status || !named) faults.push(form + ': exit ' + r.status + ' ' + r.stderr);
+    if (status === 0 && !fs.readFileSync(out, 'utf8').includes('Checkpoint C1 · batches B01–B02')) faults.push(form + ': the page does not read Checkpoint C1');
+  }
+  assert.deepEqual(faults, []);
+});

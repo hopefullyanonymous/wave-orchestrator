@@ -298,7 +298,8 @@ test('a complete answers file writes a ledger that passes parse, selfcheck and p
   assert.deepEqual(status, ['BACKLOG.md', ...expected.map(n => LEDGER + '/' + n)].sort(), 'the ledger and the backlog, nothing else');
   // Round trip: the implementer prompt renders for every batch.
   const facts = path.join(ctx.fx.dir, 'facts.json'), out = path.join(ctx.fx.dir, 'prompts');
-  fs.writeFileSync(facts, JSON.stringify({ guardrails: 'none', repoPath: ctx.fx.repo, scratchpadPath: ctx.fx.dir, worktreePath: ctx.fx.repo }));
+  fs.writeFileSync(facts, JSON.stringify({ guardrails: 'none', repoPath: ctx.fx.repo, scratchpadPath: ctx.fx.dir, worktreePath: ctx.fx.repo,
+    reportFile: path.join(ctx.fx.dir, 'reports', 'implementer.md'), round: 1 }));
   for (const b of BATCHES) {
     const p = promptCli(['--ledger', dir, '--role', 'implementer', '--batch', 'B' + b.num, '--facts', facts, '--out', out]);
     assert.equal(p.code, 0, p.line);
@@ -306,6 +307,7 @@ test('a complete answers file writes a ledger that passes parse, selfcheck and p
     const prompt = fs.readFileSync(file, 'utf8');
     assert.ok(prompt.includes(readRepo(ctx.fx, LEDGER + '/02-batches-' + b.num + '-' + b.slug + '.md').trim()), 'the prompt carries the batch file');
     assert.ok(prompt.includes(b.branch));
+    assert.ok(prompt.includes('"' + path.join(ctx.fx.dir, 'reports', 'implementer.md') + '"') && prompt.includes('`### B' + b.num + ' R1 implementer findings`'), 'the prompt names its report file and heading');
   }
 });
 

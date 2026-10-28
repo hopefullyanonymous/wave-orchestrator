@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { pathToFileURL } = require('node:url');
+const { isDeepStrictEqual } = require('node:util');
 const ROOT = path.resolve(__dirname, '..');
 const read = p => fs.readFileSync(path.join(ROOT, p), 'utf8').replace(/\r\n/g, '\n');
 const TOOL = path.join(ROOT, 'orchestrate/tools/prompt.mjs');
@@ -29,10 +30,10 @@ const GUARDRAILS_DEFAULT = 'none recorded; apply general correctness scrutiny to
 const DUTY_DEFAULT = 'Also, for every new or re-pointed test, name the production mutation that would still pass it.';
 // Every role's facts as --help must list them (as sets: --help prints them in slot order).
 const ROLE_FACTS = {
-  implementer: ['guardrails', 'repoPath', 'scratchpadPath', 'worktreePath'],
-  polish: ['findingsFile'],
-  'fix-round': ['findingsFile', 'round', 'scratchpadPath'],
-  rework: ['findingsFile', 'guardrails', 'repoPath', 'round', 'scratchpadPath', 'worktreePath'],
+  implementer: ['guardrails', 'repoPath', 'reportFile', 'round', 'scratchpadPath', 'worktreePath'],
+  polish: ['findingsFile', 'reportFile', 'round', 'subagentTokens'],
+  'fix-round': ['findingsFile', 'reportFile', 'round', 'scratchpadPath', 'subagentTokens'],
+  rework: ['findingsFile', 'guardrails', 'repoPath', 'reportFile', 'round', 'scratchpadPath', 'worktreePath'],
   reviewer: ['failingOnBase', 'findingsFile', 'gateAgentsRun', 'guardrails', 'repoPath', 'round', 'scratchpadPath', 'worktreePath'],
   'reviewer-round2': ['failingOnBase', 'findingsFile', 'gateAgentsRun', 'guardrails', 'previousFindingsFile', 'repoPath', 'round', 'round1Sha', 'scratchpadPath', 'worktreePath'],
   'test-hunter': ['findingsFile', 'repoPath', 'round', 'scratchpadPath', 'testingGuidePath', 'worktreePath'],
@@ -122,8 +123,12 @@ function fixture(t, { eol = '\n', crlf = false, type = 'feature' } = {}) {
   const facts = {
     repoPath: 'C:/repo path', worktreePath: slash(worktree), scratchpadPath: slash(path.join(temp, 'scratch')),
     findingsFile: slash(path.join(temp, 'scratch', 'gates', 'f.md')), previousFindingsFile: slash(path.join(temp, 'scratch', 'gates', 'p.md')),
+    reportFile: slash(path.join(temp, 'scratch', 'reports', 'r.md')),
     round1Sha: 'abc1234', round: 2, failingOnBase: 'n/a (feature batch)', gateAgentsRun: false, testingGuidePath: 'none',
     guardrails: { file: 'CLAUDE.md', heading: '## Bug-class guardrails' },
+    // The resumed implementer's context one token under the fresh-implementer line, so every
+    // polish and fix-round render below is the tight case of resuming.
+    subagentTokens: 349999,
   };
   // The value every slot must render to, keyed by every slot the renderer knows.
   const conventions = contractBody(contract, '## Repo conventions (binding)');
@@ -138,7 +143,7 @@ function fixture(t, { eol = '\n', crlf = false, type = 'feature' } = {}) {
     '[HARD PROHIBITIONS BLOCK FROM THE READBEFORE]': EOL(contractBody(contract, '## Hard prohibitions')),
     '[VALIDATION COMMANDS]': EOL(contractBody(contract, '## Validation commands')),
     '[REPO_PATH]': facts.repoPath, '[WORKTREE_PATH]': facts.worktreePath, '[SCRATCHPAD_PATH]': facts.scratchpadPath,
-    '[FINDINGS_FILE]': facts.findingsFile, '[PREVIOUS_FINDINGS_FILE]': facts.previousFindingsFile, '[ROUND1_SHA]': facts.round1Sha,
+    '[FINDINGS_FILE]': facts.findingsFile, '[PREVIOUS_FINDINGS_FILE]': facts.previousFindingsFile, '[REPORT_FILE]': facts.reportFile, '[ROUND1_SHA]': facts.round1Sha,
     '[ROUND]': '2', '[FAILING_ON_BASE_RESULT]': facts.failingOnBase, '[TESTING_GUIDE_PATH]': facts.testingGuidePath,
     '[NO GATE AGENT DUTY]': DUTY_DEFAULT, '[GUARDRAILS SECTION TEXT]': EOL(guardrailsBody(md)), '[ROUND 2 BLOCK]': '',
   };
@@ -222,7 +227,7 @@ test('every role renders exactly the oracle: each slot its own value, each role 
   const fx = fixture(t), { SLOTS, BLOCKS, ROLES: roles } = await api();
   // The oracle's table covers the renderer's registry exactly: every slot has a pinned value.
   assert.deepEqual(Object.keys(fx.expected).concat('[NONCE]').sort(), Object.keys(SLOTS).sort());
-  assert.equal(Object.keys(SLOTS).length, 28, 'the registry size is pinned; a new slot needs an oracle value');
+  assert.equal(Object.keys(SLOTS).length, 29, 'the registry size is pinned; a new slot needs an oracle value');
   // Each role is bound to its own block, and the blocks are exactly those the roles use.
   assert.deepEqual(Object.fromEntries(Object.entries(roles).map(([role, spec]) => [role, spec.block])), ROLE_BLOCK);
   assert.deepEqual([...new Set(Object.values(roles).flatMap(s => [s.block, s.compose, s.replaceDo].filter(Boolean)))].sort(), BLOCKS.slice().sort());
@@ -357,6 +362,8 @@ test('a missing fact is UNKNOWN UNFILLED with nothing written, for every fact of
   for (const role of ROLES) for (const key of ROLE_FACTS[role]) {
     const facts = pick(fx.facts, ROLE_FACTS[role]); delete facts[key];
     const out = promptCli(['--ledger', fx.ledger, '--role', role, '--batch', 'B01', '--facts', writeFacts(fx, role, facts), '--out', fx.out]);
+    // The one fact no slot carries is named by its key.
+    if (key === 'subagentTokens') { assert.deepEqual(out, { code: 2, line: 'UNKNOWN UNFILLED subagentTokens' }, role + ' without ' + key); cases++; continue; }
     const m = /^UNKNOWN UNFILLED (\[[A-Z][A-Z0-9_ -]*\])$/.exec(out.line);
     assert.ok(m, role + ' without ' + key + ': ' + out.line); assert.equal(out.code, 2);
     const entry = SLOTS[m[1]];
@@ -406,10 +413,10 @@ test('unknown, foreign and ill-typed facts, and bad invocations, are UNKNOWN wit
 test('every string fact, every hidden-character class and both commit-id bounds are checked', async t => {
   const fx = fixture(t), { promptCli } = await api();
   const cli = (role, facts) => promptCli(['--ledger', fx.ledger, '--role', role, '--batch', 'B01', '--facts', writeFacts(fx, role, facts), '--out', fx.out]);
-  // The string facts are every fact but the four typed ones, derived from the pinned role table.
-  const TYPED = ['gateAgentsRun', 'guardrails', 'round', 'round1Sha'];
+  // The string facts are every fact but the five typed ones, derived from the pinned role table.
+  const TYPED = ['gateAgentsRun', 'guardrails', 'round', 'round1Sha', 'subagentTokens'];
   const strings = [...new Set(Object.values(ROLE_FACTS).flat())].filter(key => !TYPED.includes(key)).sort();
-  assert.deepEqual(strings, ['failingOnBase', 'findingsFile', 'previousFindingsFile', 'repoPath', 'scratchpadPath', 'testingGuidePath', 'worktreePath']);
+  assert.deepEqual(strings, ['failingOnBase', 'findingsFile', 'previousFindingsFile', 'repoPath', 'reportFile', 'scratchpadPath', 'testingGuidePath', 'worktreePath']);
   const roleOf = key => ROLES.find(role => ROLE_FACTS[role].includes(key));
   const ONE_LINE = key => ({ code: 2, line: 'UNKNOWN fact ' + key + ': expected a non-empty one-line string' });
   for (const key of strings) {
@@ -423,13 +430,13 @@ test('every string fact, every hidden-character class and both commit-id bounds 
   // space, is the C1 range's upper neighbour: outside the renderer's hidden classes).
   const named = code => 'gates/a' + String.fromCharCode(code) + 'b.md';
   for (const code of [0x00, 0x09, 0x1f, 0x7f, 0x85, 0x9f, 0x2028, 0x2029]) {
-    assert.deepEqual(cli('polish', { findingsFile: named(code) }), ONE_LINE('findingsFile'), 'U+' + code.toString(16) + ' is hidden');
+    assert.deepEqual(cli('polish', { ...pick(fx.facts, ROLE_FACTS.polish), findingsFile: named(code) }), ONE_LINE('findingsFile'), 'U+' + code.toString(16) + ' is hidden');
   }
   const heading = cli('reviewer', { ...pick(fx.facts, ROLE_FACTS.reviewer), guardrails: { file: 'CLAUDE.md', heading: '## Bug-class' + String.fromCharCode(0x2028) + 'guardrails' } });
   assert.deepEqual(heading, { code: 2, line: 'UNKNOWN ' + GUARDRAILS_SHAPE }, 'a hidden character in the guardrails heading');
   assert.deepEqual(listing(fx.out), [], 'no refusal wrote a file');
   for (const code of [0x20, 0x7e, 0xa0, 0x2027]) {
-    const out = cli('polish', { findingsFile: named(code) });
+    const out = cli('polish', { ...pick(fx.facts, ROLE_FACTS.polish), findingsFile: named(code) });
     assert.equal(out.code, 0, 'U+' + code.toString(16) + ' lies outside the hidden classes and is accepted: ' + out.line);
   }
   // round1Sha: seven to sixty-four lowercase hex digits, each bound pinned from both sides.
@@ -447,6 +454,86 @@ test('two renders draw two nonces and two files', t => {
   assert.ok(a && b);
   assert.notEqual(a[2], b[2]); assert.notEqual(a[1], b[1]);
   assert.equal(listing(fx.out).length, 2);
+});
+
+// ===== The fresh-implementer line ======================================================
+// A role that resumes an implementer takes that implementer's context, the `subagent_tokens` of
+// its last task notification, as fact subagentTokens. The line is 350000 tokens, written here, not
+// read from the renderer: below it the role renders; at it and past it the renderer writes nothing,
+// exits 1 and prints one FRESH line naming the route §Spawning rules gives that role's crash respawn.
+const FRESH_LINE = 350000;
+const FRESH_ROUTE = {
+  polish: 'spawn a fresh implementer with its rendered implementer prompt first, then the polish pointer',
+  'fix-round': 'spawn a fresh implementer with its rendered rework prompt',
+};
+const freshLine = (role, tokens) => 'FRESH subagentTokens ' + tokens + ' is at or past 350000: ' + FRESH_ROUTE[role] + '\n';
+test('polish and fix-round render below 350000 tokens, and at it or past it write nothing and print one FRESH line naming the fresh route', async t => {
+  const fx = fixture(t), { FRESH_AT, TOKENS_FACT, ROLES: roles } = await api();
+  assert.deepEqual([FRESH_AT, TOKENS_FACT], [FRESH_LINE, 'subagentTokens']);
+  // The resuming roles are exactly those taking the fact, in the renderer's table and in --help's.
+  assert.deepEqual(Object.keys(roles).filter(role => roles[role].fresh), Object.keys(FRESH_ROUTE));
+  assert.deepEqual(ROLES.filter(role => ROLE_FACTS[role].includes('subagentTokens')), Object.keys(FRESH_ROUTE));
+  // Each route is the crash respawn §Spawning rules states for an implementer owed that pass.
+  const rules = collapse(read(SKELETONS)).replace(/`/g, '');
+  for (const [role, owed] of [['fix-round', 'an implementer owed a fix round '], ['polish', 'one owed a polish pass ']]) {
+    assert.ok(rules.includes(owed + FRESH_ROUTE[role].replace('spawn a fresh implementer ', '')), role + ': the route is the crash respawn\'s');
+  }
+  const got = {}, want = {};
+  for (const role of Object.keys(FRESH_ROUTE)) {
+    const facts = tokens => ({ ...pick(fx.facts, ROLE_FACTS[role]), subagentTokens: tokens });
+    // Below the line: a small context and the last token under it render the oracle.
+    for (const tokens of [1, FRESH_LINE - 1]) renderedMatches(fx, role, facts(tokens), fx.expected);
+    const before = listing(fx.out);
+    // The line itself (inclusive), one past it, B08's 404,572 and B06's 813K: FRESH, exit 1.
+    for (const tokens of [FRESH_LINE, FRESH_LINE + 1, 404572, 813000]) {
+      const r = render(fx, role, facts(tokens));
+      got[role + ' ' + tokens] = { status: r.status, stdout: r.stdout };
+      want[role + ' ' + tokens] = { status: 1, stdout: freshLine(role, tokens) };
+    }
+    assert.deepEqual(listing(fx.out), before, role + ': no FRESH line wrote a file');
+  }
+  assert.deepEqual(got, want);
+});
+
+test('subagentTokens: missing is UNKNOWN UNFILLED, no positive integer is UNKNOWN, and no other role takes it — nothing written', t => {
+  const fx = fixture(t), got = [], want = [];
+  for (const role of Object.keys(FRESH_ROUTE)) {
+    const { subagentTokens, ...rest } = pick(fx.facts, ROLE_FACTS[role]);
+    assert.equal(subagentTokens, FRESH_LINE - 1);
+    got.push([role, 'missing', render(fx, role, rest).stdout]); want.push([role, 'missing', 'UNKNOWN UNFILLED subagentTokens\n']);
+    // A value that is no positive integer is refused, never read as zero or as past the line.
+    for (const value of [0, -1, -404572, 0.5, 349999.5, 404572.5, '404572', '349999', null, true, [404572], { tokens: 404572 }]) {
+      const r = render(fx, role, { ...rest, subagentTokens: value });
+      got.push([role, value, r.stdout, r.status]); want.push([role, value, 'UNKNOWN fact subagentTokens: expected a positive integer\n', 2]);
+    }
+  }
+  // Every other role refuses the fact, so a fresh implementer's prompt is never given one.
+  for (const role of ROLES.filter(role => !Object.hasOwn(FRESH_ROUTE, role))) {
+    got.push([role, 'foreign', render(fx, role, { ...pick(fx.facts, ROLE_FACTS[role]), subagentTokens: 404572 }).stdout]);
+    want.push([role, 'foreign', 'UNKNOWN fact subagentTokens is not one role ' + role + ' uses (see --help)\n']);
+  }
+  assert.deepEqual(got, want);
+  assert.deepEqual(listing(fx.out), [], 'no refusal wrote a file');
+});
+
+test('--help states the FRESH line, its exit code and the subagentTokens fact, and each exit code is the one the tool returns', t => {
+  const fx = fixture(t), help = run(['--help']).stdout.split('\n');
+  const at = help.indexOf('Renders one per-batch prompt to <out>/<CHANGE_ID>-B<NN>-<role>-<id>.md and prints ONE line:');
+  assert.deepEqual(help.slice(at + 1, at + 4), [
+    '  PROMPT <path> NONCE <nonce>  |  FRESH <route>  |  UNKNOWN <reason> (UNKNOWN UNFILLED <slot> when a slot has no value,',
+    '  UNKNOWN UNFILLED subagentTokens without that fact; on FRESH and UNKNOWN nothing is written)',
+    'Exit 0 PROMPT; 1 FRESH; 2 UNKNOWN. The nonce is only in the file, on its last line. --skeletons defaults to']);
+  const facts = help.indexOf('round, subagentTokens: positive integers; round1Sha: a hex commit id; every other fact: a one-line string.');
+  assert.notEqual(facts, -1, 'the typed facts line');
+  assert.deepEqual(help.slice(facts + 1, facts + 3), [
+    "subagentTokens is the resumed implementer's subagent_tokens in its last task notification; at or past 350000",
+    "the line is FRESH <route>, naming the fresh implementer that takes the role's work instead."]);
+  const stated = Object.fromEntries([...help[at + 3].matchAll(/(\d) (PROMPT|FRESH|UNKNOWN)\b/g)].map(m => [m[2], Number(m[1])]));
+  const role = 'fix-round', facts1 = pick(fx.facts, ROLE_FACTS[role]);
+  const observed = { PROMPT: render(fx, role, facts1).status, FRESH: render(fx, role, { ...facts1, subagentTokens: FRESH_LINE }).status,
+    UNKNOWN: render(fx, role, { ...facts1, subagentTokens: 0 }).status };
+  assert.deepEqual(stated, observed, 'the exit codes --help states are the ones the tool returns');
+  assert.deepEqual(observed, { PROMPT: 0, FRESH: 1, UNKNOWN: 2 });
 });
 
 // ===== Registry ↔ prose, both directions ================================================
@@ -496,9 +583,8 @@ test('every skeleton refusal is reached by a planted copy, with its own message 
     ['implementer', plant('- Project guardrails: [GUARDRAILS SECTION TEXT]', '- Project guardrails: [GUARDRAILS SECTION TEXT or "none"]'),
       'irregular slot in the implementer skeleton: [GUARDRAILS SECTION TEXT or "none"]'],
     // The ONE nonce line moved above the report, not a second one added: only the last-line rule refuses it.
-    ['implementer', plant('  (NEEDS_FENCE names the path(s), the checklist item, and why the fence must grow.)\n' + NONCE_LINE + '\n```\n\nMain-checkout',
-      '  (NEEDS_FENCE names the path(s), the checklist item, and why the fence must grow.)\n```\n\nMain-checkout')
-      .replace('REPORT (fixed shape — the orchestrator acts on nothing else):\nLine 1', 'REPORT (fixed shape — the orchestrator acts on nothing else):\n' + NONCE_LINE + '\nLine 1'),
+    ['implementer', plant('line 4 the path [REPORT_FILE].\n' + NONCE_LINE + '\n```\n\nMain-checkout', 'line 4 the path [REPORT_FILE].\n```\n\nMain-checkout')
+      .replace('REPORT (fixed shape — the orchestrator acts on nothing else):\n', () => 'REPORT (fixed shape — the orchestrator acts on nothing else):\n' + NONCE_LINE + '\n'),
     'the implementer skeleton must carry [NONCE] once, on its last line'],
     ['polish', skeletons + '\n```prompt:polish\nA second polish block.\n```\n', 'skeleton block polish occurs twice'],
     ['polish', skeletons + '\n```prompt:stray\nnever closed\n', 'unbalanced code fence in the skeletons'],
@@ -616,15 +702,64 @@ function materializeBase(t) {
   return dir;
 }
 // The one line B03 of OS-20261007 added to every skeleton, so to every render: how often a render
-// holds it, anywhere and as a line of its own, and the render with that one line taken out.
+// holds it, anywhere and as a line of its own, and the render with that one line taken out, and
+// every line that is BACKGROUND, the implementer-side line counted on its own in the test below.
 const NEVER_OPEN = "Never open another agent's prompt or facts file.";
+const BACKGROUND = 'Before you report, end every background command you started (`run_in_background`, or a command moved to the background at its timeout): '
+  + 'wait for it to finish or kill it, since one still running when you hand back leaves you `waiting` (Claude Code shows `completed`), '
+  + "blocks the orchestrator's context clear, and resumes you when it ends.";
 function neverOpen(text) {
   const lines = text.split('\n'), at = lines.flatMap((line, i) => line === NEVER_OPEN ? [i] : []);
   return { count: text.split(NEVER_OPEN).length - 1, own: at.length,
-    rest: at.length === 1 ? [...lines.slice(0, at[0]), ...lines.slice(at[0] + 1)].join('\n') : null };
+    rest: at.length === 1 ? lines.filter((line, i) => i !== at[0] && line !== BACKGROUND).join('\n') : null };
 }
-test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', renders byte-identically to that renderer and its skeletons, the never-open line aside', { skip: 'needs history and ledger records that are not in this copy' }, async t => {
-  const fx = fixture(t), base = materializeBase(t), skeletons = read(SKELETONS);
+// A role rendered in-process by the renderer module given, from the fixture's ledger, facts and
+// guardrails file, with one fixed nonce, so two renderers' outputs compare byte for byte.
+function rendererFor(fx) {
+  const file = name => fs.readFileSync(path.join(fx.ledger, name), 'utf8');
+  const texts = { contract: file('00-READBEFORE.md'), plan: file('01-plan.md'), batchName: '02-batches-01-render-me.md', batchText: file('02-batches-01-render-me.md'), batch: 'B01' };
+  const nonce = '0123456789ab', readGuardrails = name => fs.readFileSync(path.join(fx.worktree, name), 'utf8');
+  // Each renderer takes the facts its own skeletons ask for, so a skeleton without a slot is not handed that slot's fact.
+  return (mod, text, role) => mod.render({ skeletons: text, ledger: mod.ledgerValues(texts), role,
+    facts: pick(fx.facts, mod.roleFacts(mod.promptBlocks(text), role)), nonce, readGuardrails });
+}
+// B01 of OS-20261024 changed the skeletons on purpose: the implementer, polish and fix-round blocks
+// name their report file and its heading, and the reviewer block its optional SWEEP list. Each
+// entry is [the text now, the text at PROMPT_BASE]; undone in the current skeletons, every base
+// role renders as it did at the base, so these edits, and only they, are exempt. They pin the new
+// text whole: an edit to it moves this list on purpose.
+const REPORT_FILE_EDITS = [
+  ['REPORT (fixed shape — the orchestrator acts on nothing else):\n'
+    + 'Write your full report with the Write tool to "[REPORT_FILE]". Its first line is exactly\n'
+    + '`### B[NN] R[ROUND] implementer findings`; then line 1 below; then the same `NONCE` line as\n'
+    + 'line 2 of your final message (when this prompt does not end with that line, neither the\n'
+    + 'file nor your final message has one, and your final message is three lines); then the\n'
+    + 'EVIDENCE block below, one line per validation run (its `validate.mjs` line, then\n'
+    + '`exit <code>`), ended by a blank line.\n',
+  'REPORT (fixed shape — the orchestrator acts on nothing else):\n'],
+  ['the commit SHA(s); `checklist <n>/<m>` (<n> items ticked of <m>).\n', 'the commit SHA(s); checklist ticked n/m.\n'],
+  ['  (NEEDS_FENCE names the path(s), the checklist item, and why the fence must grow.)\n'
+    + 'FINAL MESSAGE (four lines, nothing else): line 1 the status line; line 3\n'
+    + '`checklist <n>/<m>`; line 4 the path [REPORT_FILE].\n',
+  '  (NEEDS_FENCE names the path(s), the checklist item, and why the fence must grow.)\n'],
+  ['Same REPORT shape.\nIts file this time is "[REPORT_FILE]", its first line exactly `### B[NN] R[ROUND] polish findings`.\n', 'Same REPORT shape.\n'],
+  ['Same REPORT shape.\nIts file this time is "[REPORT_FILE]", its first line exactly `### B[NN] R[ROUND] fix-round findings`.\n', 'Same REPORT shape.\n'],
+  ['of maybes.\n'
+    + "SWEEP: an optional list after the findings, one entry per prose-only fix outside the\n"
+    + "batch's own work: `file:line`, the current text and the replacement text, whose fact you\n"
+    + "verified; it is no finding class, line 3's counts never include it, and it never blocks.\n"
+    + 'A fix is prose-only when every path it changes is Markdown, or JavaScript that\n'
+    + '`prose-only-diff.mjs` reads as `PROSE-ONLY`. Prose that is a contract and files agents read\n'
+    + "as instructions (`CLAUDE.md`, `.claude/**`, a skill's own Markdown) are never listed there;\n"
+    + 'the classes above still apply to them.\n',
+  'of maybes.\n'],
+];
+const undoEdits = (text, edits) => edits.reduce((t, [now, then]) => {
+  assert.equal(t.split(now).length - 1, 1, 'an exempt edit must occur exactly once: ' + JSON.stringify(now.slice(0, 80)));
+  return t.replace(now, () => then);
+}, text);
+test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', renders byte-identically to that renderer and its skeletons, the never-open and background-command lines aside', { skip: 'needs history and ledger records that are not in this copy' }, async t => {
+  const fx = fixture(t), base = materializeBase(t), skeletons = read(SKELETONS), undone = undoEdits(skeletons, REPORT_FILE_EDITS);
   const now = await api(), then = await import(pathToFileURL(path.join(base, 'orchestrate', 'tools', 'prompt.mjs')).href);
   const baseSkeletons = fs.readFileSync(path.join(base, ...SKELETONS.split('/')), 'utf8');
   // The base is the pre-change pair, and every role it rendered still renders.
@@ -632,21 +767,22 @@ test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', r
   const roles = Object.keys(then.ROLES);
   assert.ok(roles.includes('implementer') && roles.every(role => Object.hasOwn(now.ROLES, role)), 'the base roles, the implementer among them, all still exist');
   // The same ledger, facts and nonce for both.
-  const file = name => fs.readFileSync(path.join(fx.ledger, name), 'utf8');
-  const texts = { contract: file('00-READBEFORE.md'), plan: file('01-plan.md'), batchName: '02-batches-01-render-me.md', batchText: file('02-batches-01-render-me.md'), batch: 'B01' };
-  const nonce = '0123456789ab', readGuardrails = name => fs.readFileSync(path.join(fx.worktree, name), 'utf8');
-  const renderWith = (mod, text, role) => mod.render({ skeletons: text, ledger: mod.ledgerValues(texts), role, facts: pick(fx.facts, ROLE_FACTS[role]), nonce, readGuardrails });
+  const renderWith = rendererFor(fx);
   // Every role the renderer has now, rework among them, holds the never-open line once, on a line
-  // of its own; each base role, that one line taken out, renders as it did at the base.
+  // of its own; each base role, that line and any background-command line taken out and the exempt
+  // edits undone, renders as it did at the base.
   assert.ok(Object.hasOwn(now.ROLES, 'rework'), 'the role the base lacked is among those checked');
   for (const role of Object.keys(now.ROLES)) {
-    const { count, own, rest } = neverOpen(renderWith(now, skeletons, role));
+    const { count, own } = neverOpen(renderWith(now, skeletons, role));
     assert.deepEqual({ count, own }, { count: 1, own: 1 }, role + ': the never-open line, once, on a line of its own');
-    if (roles.includes(role)) assert.equal(rest, renderWith(then, baseSkeletons, role), role + ': the render changed since ' + PROMPT_BASE + ' beyond the never-open line');
+    if (roles.includes(role)) assert.equal(neverOpen(renderWith(now, undone, role)).rest, renderWith(then, baseSkeletons, role), role + ': the render changed since ' + PROMPT_BASE + ' beyond the never-open line and the exempt edits');
   }
+  // The exemption is needed by every base role it names, and by no other: without it those renders differ from the base.
+  const differs = roles.filter(role => neverOpen(renderWith(now, skeletons, role)).rest !== renderWith(then, baseSkeletons, role));
+  assert.deepEqual(differs, ['implementer', 'polish', 'fix-round', 'reviewer', 'reviewer-round2'], 'the base roles the exempt edits reach');
   // Live control: one word of the implementer's DO paragraph changed is a different render.
-  const changed = skeletons.replace('DO: implement each checklist item;', () => 'DO: implement every checklist item;');
-  assert.notEqual(changed, skeletons, 'the control anchor must exist');
+  const changed = undone.replace('DO: implement each checklist item;', () => 'DO: implement every checklist item;');
+  assert.notEqual(changed, undone, 'the control anchor must exist');
   const changedRender = neverOpen(renderWith(now, changed, 'implementer'));
   assert.equal(changedRender.own, 1, 'the control keeps the never-open line, so only the DO word differs');
   assert.notEqual(changedRender.rest, renderWith(then, baseSkeletons, 'implementer'), 'a changed DO paragraph must show');
@@ -661,4 +797,320 @@ test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', r
     const { count, own } = neverOpen(renderWith(now, skeletons.replace(from, () => to), role));
     assert.deepEqual({ count, own }, want, role + ': the planted skeleton must change the count');
   }
+});
+
+// ===== The background-command line: implementer-side prompts only =====================
+// B05 of OS-20261022 put BACKGROUND in the implementer, polish and fix-round blocks and in the
+// fix-up skeleton. Counted in every role's render, in the fix-up block and in the whole file: one
+// copy in each of the four homes and four in the file leave no other skeleton, nor prose, a copy.
+// Each role's count, written here and checked against the renderer's roles; rework's copy is the
+// implementer block's (expectedRender above).
+const BACKGROUND_ROLES = { implementer: 1, polish: 1, 'fix-round': 1, rework: 1, reviewer: 0, 'reviewer-round2': 0, 'test-hunter': 0 };
+const occurrences = text => ({ count: text.split(BACKGROUND).length - 1, own: text.split('\n').filter(line => line === BACKGROUND).length });
+// The fix-up skeleton is pasted by hand, not rendered, so it is no `prompt:` block: it is found
+// here as the bare fenced block whose first line opens "You are fixing". Null on unbalanced fences.
+function fixupBodies(text) {
+  const blocks = [];
+  let open = null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('```')) { if (open) { blocks.push(open); open = null; } else open = { bare: line === '```', lines: [] }; }
+    else if (open) open.lines.push(line);
+  }
+  return open ? null : blocks.filter(b => b.bare && (b.lines[0] || '').startsWith('You are fixing ')).map(b => b.lines.join('\n'));
+}
+// The fix-up block, its BACKGROUND line set aside, is pinned whole against the block as the ledger
+// base FIXUP_BASE committed it, read out of git as materializeBase reads PROMPT_BASE: no role renders
+// the fix-up block, so no render comparison reaches a sentence added to it. An edit to the block moves
+// FIXUP_BASE on purpose, or is applied to the base block as FIXUP_EDITS below.
+const FIXUP_BASE = '81f7c00';
+// B01 of OS-20261024: the fix-up report names its file, heading and three-line final message.
+// [the text at FIXUP_BASE, the text now], applied to the base block, which then must be the live one.
+const FIXUP_EDITS = [["what the user's checkpoint re-run should now check).",
+  "what the user's checkpoint re-run should now check).\n"
+  + 'Write it with the Write tool to "[REPORT_FILE]", and give neither it nor your final message\n'
+  + 'the nonce line. Its first line is exactly `### B[NN] R[ROUND] fix-up findings`; its second\n'
+  + 'exactly one of: DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED; its third `EVIDENCE:`,\n'
+  + 'then one line per validation run (its `validate.mjs` line, then `exit <code>`), the commit\n'
+  + 'SHA(s) and `checklist <n>/<m>`, ended by a blank line; then the ≤40 lines. For NEEDS_FENCE\n'
+  + 'or BLOCKED add exactly:\n'
+  + '  Expected: … / Found: … / Why it matters: … / How to proceed: …\n'
+  + 'FINAL MESSAGE (three lines, nothing else): the status line; `checklist <n>/<m>`; the path\n'
+  + '[REPORT_FILE].']];
+const withoutBackground = body => body.split('\n').filter(line => line !== BACKGROUND).join('\n');
+function fixupAtBase() {
+  const r = spawnSync('git', ['-C', ROOT, 'cat-file', 'blob', FIXUP_BASE + ':' + SKELETONS], { encoding: 'utf8', windowsHide: true, maxBuffer: 1 << 26 });
+  assert.ifError(r.error); assert.equal(r.status, 0, FIXUP_BASE + ': git cat-file blob — ' + r.stderr);
+  const bodies = fixupBodies(r.stdout.replace(/\r\n/g, '\n'));
+  assert.ok(bodies && bodies.length === 1 && !bodies[0].includes(BACKGROUND), FIXUP_BASE + ' holds one fix-up block, without the background-command line');
+  return FIXUP_EDITS.reduce((body, [then, now]) => {
+    assert.equal(body.split(then).length - 1, 1, FIXUP_BASE + ': an edited passage must occur once in the base block: ' + then);
+    return body.replace(then, () => now);
+  }, bodies[0]);
+}
+function backgroundCounts(renderWith, skeletons, baseBlock) {
+  const bodies = fixupBodies(skeletons);
+  return {
+    renders: Object.fromEntries(Object.keys(BACKGROUND_ROLES).map(role => [role, occurrences(renderWith(skeletons, role))])),
+    fixup: bodies === null ? 'unbalanced fences' : bodies.length === 1 ? occurrences(bodies[0]) : bodies.length + ' bare blocks open "You are fixing"',
+    fixupBlock: bodies && bodies.length === 1 && withoutBackground(bodies[0]) === baseBlock ? 'as at ' + FIXUP_BASE : 'changed',
+    file: occurrences(skeletons),
+  };
+}
+test('the background-command line: once, on a line of its own, in every implementer-side render and the fix-up block, and in no other render or skeleton; the fix-up block otherwise as at ' + FIXUP_BASE, { skip: 'needs history and ledger records that are not in this copy' }, async t => {
+  const fx = fixture(t), skeletons = read(SKELETONS), now = await api(), render = rendererFor(fx), baseBlock = fixupAtBase();
+  assert.deepEqual(Object.keys(BACKGROUND_ROLES).sort(), Object.keys(now.ROLES).sort(), 'every role the renderer has is counted, and only those');
+  const counts = text => backgroundCounts((s, role) => render(now, s, role), text, baseBlock);
+  const once = { count: 1, own: 1 }, none = { count: 0, own: 0 }, n = k => ({ count: k, own: k });
+  const want = (renders, rest) => ({ renders: { ...Object.fromEntries(Object.entries(BACKGROUND_ROLES).map(([role, k]) => [role, n(k)])), ...renders },
+    fixup: once, fixupBlock: 'as at ' + FIXUP_BASE, file: n(4), ...rest });
+  assert.deepEqual(counts(skeletons), want());
+  // Live controls, collected and asserted once: the line taken out of each home in turn, planted in
+  // the reviewer block and in the QA runner skeleton, the fix-up copy joined to the line above it, and
+  // a contradicting sentence added to the fix-up block beside its copy. Each states the whole result it
+  // must produce.
+  const controls = [
+    ['implementer removed', '(<n> items ticked of <m>).\n' + BACKGROUND + '\n', '(<n> items ticked of <m>).\n', want({ implementer: none, rework: none }, { file: n(3) })],
+    ['polish removed', 'do not make the change.\n' + NEVER_OPEN + '\n' + BACKGROUND + '\n', 'do not make the change.\n' + NEVER_OPEN + '\n', want({ polish: none }, { file: n(3) })],
+    ['fix-round removed', 'before it exits.\n' + NEVER_OPEN + '\n' + BACKGROUND + '\n', 'before it exits.\n' + NEVER_OPEN + '\n', want({ 'fix-round': none }, { file: n(3) })],
+    ['fix-up removed', 'repair — [symptom]".\n' + BACKGROUND + '\n', 'repair — [symptom]".\n', want({}, { fixup: none, file: n(3) })],
+    ['planted in the reviewer', '(checked out on [BATCH_BRANCH]).\n' + NEVER_OPEN + '\n', '(checked out on [BATCH_BRANCH]).\n' + NEVER_OPEN + '\n' + BACKGROUND + '\n',
+      want({ reviewer: once, 'reviewer-round2': once }, { file: n(5) })],
+    ['planted in the QA runner', 'THE RELEVANT HARD PROHIBITIONS FROM THE READBEFORE].\n', 'THE RELEVANT HARD PROHIBITIONS FROM THE READBEFORE].\n' + BACKGROUND + '\n', want({}, { file: n(5) })],
+    ['fix-up joined to the line above', 'repair — [symptom]".\n' + BACKGROUND + '\n', 'repair — [symptom]". ' + BACKGROUND + '\n',
+      want({}, { fixup: { count: 1, own: 0 }, fixupBlock: 'changed', file: { count: 4, own: 3 } })],
+    ['a sentence added to the fix-up block', 'repair — [symptom]".\n' + BACKGROUND + '\n',
+      'repair — [symptom]".\n' + BACKGROUND + '\nIf a background command is still running, report anyway and leave it running.\n', want({}, { fixupBlock: 'changed' })],
+  ];
+  const missed = [];
+  for (const [name, from, to, expected] of controls) {
+    if (skeletons.split(from).length !== 2) { missed.push({ control: name, counts: 'the anchor must occur once' }); continue; }
+    const got = counts(skeletons.replace(from, () => to));
+    if (!isDeepStrictEqual(got, expected)) missed.push({ control: name, counts: got });
+  }
+  assert.deepEqual(missed, [], 'every control must move the counts exactly as it states');
+});
+
+// ===== The report file: named by the implementer-side prompts, checked by --report ========
+// B01 of OS-20261024: the implementer, polish, fix-round and rework prompts name a report file and
+// its heading; `prompt.mjs --report <file> --nonce <nonce>` checks that file and prints one line.
+// The heading role each role's prompt names, written here.
+const REPORT_HEADING = { implementer: 'implementer', polish: 'polish', 'fix-round': 'fix-round', rework: 'implementer' };
+test('every implementer-side render names its report file and its heading, and no gate render does', async t => {
+  const fx = fixture(t), { ROLES: roles } = await api();
+  assert.deepEqual(Object.keys(roles).filter(role => ROLE_FACTS[role].includes('reportFile')), Object.keys(REPORT_HEADING), 'the roles taking reportFile');
+  const seen = {};
+  for (const role of ROLES) {
+    const { text } = renderedMatches(fx, role, pick(fx.facts, ROLE_FACTS[role]), fx.expected);
+    const headings = [...text.matchAll(/`### B01 R2 ([a-z0-9-]+) findings`/g)].map(m => m[1]);
+    seen[role] = { file: text.includes('"' + fx.facts.reportFile + '"'), headings };
+  }
+  assert.deepEqual(seen, Object.fromEntries(ROLES.map(role => [role, Object.hasOwn(REPORT_HEADING, role)
+    ? { file: true, headings: [REPORT_HEADING[role]] } : { file: false, headings: [{ reviewer: 'reviewer', 'reviewer-round2': 'reviewer', 'test-hunter': 'test-hunter' }[role]] }])));
+});
+
+const REPORT_NONCE = '0123456789ab', PROSE = 'PROSE-MARKER what changed and why, checklist 9/9 in passing.';
+const EVIDENCE = ['EVIDENCE:', 'PASS tests 905/907, 2 skipped (42s) exit 0', 'commit abc1234', 'checklist 3/4'];
+const MISMATCH = 'Expected: a / Found: b / Why it matters: c / How to proceed: d';
+function reportText({ heading = '### B01 R1 implementer findings', status = 'DONE', nonce = 'NONCE ' + REPORT_NONCE, evidence = EVIDENCE, prose = [PROSE] } = {}) {
+  return [heading, status, ...(nonce === null ? [] : [nonce]), ...evidence, '', ...prose].join('\n') + '\n';
+}
+const FAIL = rule => ({ code: 1, line: 'REPORT FAIL ' + rule });
+const OK = (status, count = '3/4') => ({ code: 0, line: 'REPORT ' + status + ' checklist ' + count });
+test('--report: every rule has a passing case and a failing case decided by that rule alone, and no line prints the report', async () => {
+  const { checkReport, reportRules } = await api(), skeletons = read(SKELETONS);
+  // The domain comes from the skeletons: every heading role a report-file block names, and the implementer's status line.
+  assert.deepEqual(reportRules(skeletons), { roles: ['implementer', 'polish', 'fix-round', 'fix-up'], statuses: ['DONE', 'DONE_WITH_CONCERNS', 'NEEDS_FENCE', 'BLOCKED'],
+    mismatch: ['NEEDS_FENCE', 'BLOCKED'], labels: ['Expected:', 'Found:', 'Why it matters:', 'How to proceed:'] });
+  const check = (text, nonce = REPORT_NONCE) => checkReport({ skeletons, text, nonce });
+  const without = (lines, drop) => lines.filter(l => l !== drop);
+  const HEADING = 'line 1 is not `### B<NN> R<k> <role> findings`, <role> one of implementer, polish, fix-round, fix-up';
+  const EV = 'the EVIDENCE block holds no `validate.mjs` line (PASS, FAIL or UNKNOWN) with `exit <code>`';
+  const SPACED = reportText().replace('\nchecklist 3/4\n\n', () => '\nchecklist 3/4\n  \n');
+  assert.ok(SPACED.includes('\nchecklist 3/4\n  \nPROSE-MARKER'), 'the whitespace-only control line is planted');
+  const cases = [
+    ['well formed', reportText(), REPORT_NONCE, OK('DONE')],
+    ['CRLF', reportText().replace(/\n/g, '\r\n'), REPORT_NONCE, OK('DONE')],
+    ...['polish', 'fix-round', 'fix-up'].map(role => ['heading ' + role, reportText({ heading: '### B12 R3 ' + role + ' findings' }), REPORT_NONCE, OK('DONE')]),
+    ['heading of a gate role', reportText({ heading: '### B01 R1 reviewer findings' }), REPORT_NONCE, FAIL(HEADING)],
+    ['heading with a one-digit batch', reportText({ heading: '### B1 R1 implementer findings' }), REPORT_NONCE, FAIL(HEADING)],
+    ['heading of round 0', reportText({ heading: '### B01 R0 implementer findings' }), REPORT_NONCE, FAIL(HEADING)],
+    // The heading is the whole line, as the LOG.md recovery's exact match needs it: nothing before it, nothing after it.
+    ['heading with a trailing space', reportText({ heading: '### B01 R1 implementer findings ' }), REPORT_NONCE, FAIL(HEADING)],
+    ['heading with a trailing word', reportText({ heading: '### B01 R1 implementer findings (resumed)' }), REPORT_NONCE, FAIL(HEADING)],
+    ['heading with a leading space', reportText({ heading: ' ### B01 R1 implementer findings' }), REPORT_NONCE, FAIL(HEADING)],
+    // Batch and round numbers of more than two and one digits, as the renderer's own B<NN> takes them.
+    ['heading with a three-digit batch', reportText({ heading: '### B100 R1 implementer findings' }), REPORT_NONCE, OK('DONE')],
+    ['heading with a two-digit round', reportText({ heading: '### B01 R10 implementer findings' }), REPORT_NONCE, OK('DONE')],
+    ['DONE_WITH_CONCERNS', reportText({ status: 'DONE_WITH_CONCERNS' }), REPORT_NONCE, OK('DONE_WITH_CONCERNS')],
+    ['unknown status', reportText({ status: 'FINISHED' }), REPORT_NONCE, FAIL('line 2 is not one of DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED')],
+    ['status with a trailing word', reportText({ status: 'DONE early' }), REPORT_NONCE, FAIL('line 2 is not one of DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED')],
+    ['no NONCE line', reportText({ nonce: null }), REPORT_NONCE, FAIL('line 3 is not `NONCE <nonce>` for the nonce given')],
+    ['the wrong nonce', reportText({ nonce: 'NONCE ba9876543210' }), REPORT_NONCE, FAIL('line 3 is not `NONCE <nonce>` for the nonce given')],
+    // The right nonce inside other text is not the line: line 3 is exactly `NONCE <nonce>`.
+    ['the skeleton nonce line copied whole', reportText({ nonce: 'Line 2, directly under line 1: NONCE ' + REPORT_NONCE }), REPORT_NONCE, FAIL('line 3 is not `NONCE <nonce>` for the nonce given')],
+    ['the nonce line with a trailing word', reportText({ nonce: 'NONCE ' + REPORT_NONCE + ' extra' }), REPORT_NONCE, FAIL('line 3 is not `NONCE <nonce>` for the nonce given')],
+    // The nonce line's place is line 3: the live nonce further down does not rescue a stale one there.
+    ['a stale nonce on line 3, the live one below', reportText({ nonce: 'NONCE ba9876543210', prose: [PROSE, 'NONCE ' + REPORT_NONCE] }), REPORT_NONCE,
+      FAIL('line 3 is not `NONCE <nonce>` for the nonce given')],
+    ['fix-up without a nonce', reportText({ heading: '### B01 R1 fix-up findings', nonce: null }), null, OK('DONE')],
+    ['a NONCE line, no --nonce', reportText(), null, FAIL('line 3 is a NONCE line, and no --nonce was given')],
+    ['no EVIDENCE line', reportText({ evidence: EVIDENCE.slice(1) }), REPORT_NONCE, FAIL('line 4 does not open `EVIDENCE:`')],
+    ['no EVIDENCE line, no nonce', reportText({ heading: '### B01 R1 fix-up findings', nonce: null, evidence: EVIDENCE.slice(1) }), null, FAIL('line 3 does not open `EVIDENCE:`')],
+    ['an EVIDENCE opener in bold', reportText({ evidence: ['**EVIDENCE:**', ...EVIDENCE.slice(1)] }), REPORT_NONCE, FAIL('line 4 does not open `EVIDENCE:`')],
+    ['a report ending at its NONCE line', ['### B01 R1 implementer findings', 'DONE', 'NONCE ' + REPORT_NONCE].join('\n'), REPORT_NONCE, FAIL('line 4 does not open `EVIDENCE:`')],
+    ['the validate line on the EVIDENCE line', reportText({ evidence: ['EVIDENCE: ' + EVIDENCE[1], ...EVIDENCE.slice(2)] }), REPORT_NONCE, OK('DONE')],
+    // Each accepted form of a validate.mjs line is the block's ONLY such line, so no other form rescues it.
+    ...[['a FAIL line', 'FAIL tests 2 of 9 failed: a — log: x exit 1'], ['an UNKNOWN line', 'UNKNOWN cannot read spec s.json (ENOENT) exit 2'],
+      ['a line in backticks', '`PASS tests 3/3 (1s)` exit 0'], ['an exit code', 'PASS tests 3/3 (1s) exit code 0'],
+      ['a dash item', '- PASS tests 3/3 (1s) exit 0'], ['a star item', '* PASS tests 3/3 (1s) exit 0']]
+      .map(([name, line]) => [name, reportText({ evidence: EVIDENCE.map(l => l === EVIDENCE[1] ? line : l) }), REPORT_NONCE, OK('DONE')]),
+    ['no validate line', reportText({ evidence: without(EVIDENCE, EVIDENCE[1]) }), REPORT_NONCE, FAIL(EV)],
+    ['a validate line without its exit code', reportText({ evidence: EVIDENCE.map(l => l === EVIDENCE[1] ? 'PASS tests 905/907, 2 skipped (42s)' : l) }), REPORT_NONCE, FAIL(EV)],
+    // A line that holds an exit code is a validate.mjs line only when PASS, FAIL or UNKNOWN opens it.
+    ['an exit code with no result word', reportText({ evidence: EVIDENCE.map(l => l === EVIDENCE[1] ? 'node --test tests exit 0' : l) }), REPORT_NONCE, FAIL(EV)],
+    ['a result word not opening the line', reportText({ evidence: EVIDENCE.map(l => l === EVIDENCE[1] ? 'run 1: PASS tests 3/3 (1s) exit 0' : l) }), REPORT_NONCE, FAIL(EV)],
+    ['the validate line past the blank line', reportText({ evidence: without(EVIDENCE, EVIDENCE[1]), prose: [EVIDENCE[1], PROSE] }), REPORT_NONCE, FAIL(EV)],
+    ['no checklist', reportText({ evidence: without(EVIDENCE, 'checklist 3/4') }), REPORT_NONCE, FAIL('the EVIDENCE block holds 0 `checklist <n>/<m>` counts, not one')],
+    ['two checklists', reportText({ evidence: [...EVIDENCE, 'checklist 4/4'] }), REPORT_NONCE, FAIL('the EVIDENCE block holds 2 `checklist <n>/<m>` counts, not one')],
+    // A whitespace-only line ends the block too, so the prose's own `checklist 9/9` stays out of it.
+    ['a whitespace-only line ending the block', SPACED, REPORT_NONCE, OK('DONE')],
+    ['the checklist past the blank line', reportText({ evidence: without(EVIDENCE, 'checklist 3/4'), prose: ['checklist 3/4', PROSE] }), REPORT_NONCE,
+      FAIL('the EVIDENCE block holds 0 `checklist <n>/<m>` counts, not one')],
+    ...['NEEDS_FENCE', 'BLOCKED'].flatMap(status => [
+      [status + ', one line', reportText({ status, prose: [PROSE, MISMATCH] }), REPORT_NONCE, OK(status)],
+      [status + ', four lines', reportText({ status, prose: [PROSE, ...MISMATCH.split(' / ').map(l => '  ' + l)] }), REPORT_NONCE, OK(status)],
+      ...['Expected:', 'Found:', 'Why it matters:', 'How to proceed:'].map(label => [status + ' without ' + label,
+        reportText({ status, prose: [PROSE, MISMATCH.split(' / ').filter(p => !p.startsWith(label)).join(' / ')] }), REPORT_NONCE, FAIL(status + ' without its `' + label + '` line')]),
+      // A label inside a sentence is no mismatch line: it counts only opening a line or after " / ".
+      [status + ' naming Expected: mid-sentence', reportText({ status, prose: [PROSE + ' The Expected: line follows.', MISMATCH.split(' / ').slice(1).join(' / ')] }), REPORT_NONCE,
+        FAIL(status + ' without its `Expected:` line')],
+    ]),
+    // Mismatch labels count only after the EVIDENCE block.
+    ['NEEDS_FENCE with its labels inside the EVIDENCE block', reportText({ status: 'NEEDS_FENCE', evidence: [...EVIDENCE, MISMATCH] }), REPORT_NONCE,
+      FAIL('NEEDS_FENCE without its `Expected:` line')],
+    ['DONE needs no mismatch lines', reportText({ status: 'DONE' }), REPORT_NONCE, OK('DONE')],
+  ];
+  const wrong = [];
+  for (const [name, text, nonce, expected] of cases) {
+    const got = check(text, nonce);
+    if (!isDeepStrictEqual(got, expected)) wrong.push({ name, got });
+    if (got.line.includes('PROSE-MARKER') || got.line.includes('\n')) wrong.push({ name, prints: got.line });
+  }
+  assert.deepEqual(wrong, [], 'every case reads as it states');
+});
+
+test('--report reads its rules from the skeletons it is given, and refuses skeletons that state none', async () => {
+  const { checkReport } = await api(), skeletons = read(SKELETONS);
+  const plant = (from, to) => { assert.equal(skeletons.split(from).length - 1, 1, 'the anchor must occur once: ' + from); return skeletons.replace(from, () => to); };
+  const check = (text, planted) => { try { return checkReport({ skeletons: planted, text, nonce: REPORT_NONCE }); } catch (e) { return { unknown: e.message }; } };
+  const STATUS = 'Line 1, exactly one of: DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED\nEVIDENCE:';
+  const FIXUP = 'Its first line is exactly `### B[NN] R[ROUND] fix-up findings`';
+  const MISMATCH_AT = '(notes only). For NEEDS_FENCE or BLOCKED use exactly:';
+  const LABELS = '  Expected: … / Found: … / Why it matters: … / How to proceed: …\n  (NEEDS_FENCE names';
+  const NO_SHAPE = { unknown: 'the skeletons state no report file shape (heading roles, status words, mismatch lines)' };
+  const bare = status => reportText({ status });
+  const labelled = (status, labels) => reportText({ status, prose: [PROSE, labels.map(l => l + ' x').join(' / ')] });
+  const OLD_LABELS = ['Expected:', 'Found:', 'Why it matters:', 'How to proceed:'], NEW_LABELS = ['Expected:', 'Found:', 'Why it matters:', 'Next step:'];
+  const toDwc = plant('or BLOCKED use exactly:', 'or DONE_WITH_CONCERNS use exactly:'), nextStep = plant(LABELS, LABELS.replace('How to proceed:', 'Next step:'));
+  const got = {
+    // Each value read from the skeleton, CHANGED there, changes the verdict.
+    plantedStatus: check(reportText({ status: 'PARTIAL' }), plant(STATUS, STATUS.replace('BLOCKED', 'BLOCKED | PARTIAL'))),
+    lostStatus: check(reportText({ status: 'DONE_WITH_CONCERNS' }), plant(STATUS, STATUS.replace(' | DONE_WITH_CONCERNS', ''))),
+    lostFixup: check(reportText({ heading: '### B01 R1 fix-up findings' }), plant(FIXUP, 'Its first line is exactly the heading')),
+    mismatchNowDwc: check(bare('DONE_WITH_CONCERNS'), toDwc),
+    mismatchNoLongerBlocked: check(bare('BLOCKED'), toDwc),
+    labelNowNextStep: check(labelled('NEEDS_FENCE', OLD_LABELS), nextStep),
+    labelNextStepHeld: check(labelled('NEEDS_FENCE', NEW_LABELS), nextStep),
+    // Each refusal, met by a skeleton only it refuses.
+    mismatchNotAStatus: check(reportText(), plant(STATUS, STATUS.replace(' | BLOCKED', ''))),
+    noStatusLine: check(reportText(), plant(STATUS, STATUS.replace('Line 1, exactly one of: ', 'Line 1, one of: '))),
+    // The planted line comes first and is well formed, so only the one-line rule refuses it.
+    secondStatusLine: check(reportText(), plant(STATUS, 'Line 1, exactly one of: DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED | PARTIAL\n' + STATUS)),
+    statusWordShape: check(reportText(), plant(STATUS, STATUS.replace('DONE_WITH_CONCERNS', 'Done_with_concerns'))),
+    noMismatchLine: check(reportText(), plant(MISMATCH_AT, '(notes only). For a mismatch use exactly:')),
+    secondMismatchLine: check(reportText(), plant(MISMATCH_AT, MISMATCH_AT + '\n  Expected: … / Found: … / Why it matters: … / How to proceed: …\nFor NEEDS_FENCE or BLOCKED use exactly:')),
+    labelWithoutColon: check(reportText(), plant(LABELS, LABELS.replace('Expected:', 'Expected'))),
+    threeLabels: check(reportText(), plant(LABELS, LABELS.replace(' / How to proceed: …', ''))),
+    fiveLabels: check(reportText(), plant(LABELS, LABELS.replace(' / How to proceed: …', ' / How to proceed: … / Next step: …'))),
+    noImplementerBlock: check(reportText(), plant('```prompt:implementer\n', '```prompt:implementers\n')),
+    noReportFile: check(reportText(), skeletons.split('[REPORT_FILE]').join('the report file')),
+  };
+  assert.deepEqual(got, {
+    plantedStatus: OK('PARTIAL'), lostStatus: FAIL('line 2 is not one of DONE | NEEDS_FENCE | BLOCKED'),
+    lostFixup: FAIL('line 1 is not `### B<NN> R<k> <role> findings`, <role> one of implementer, polish, fix-round'),
+    mismatchNowDwc: FAIL('DONE_WITH_CONCERNS without its `Expected:` line'), mismatchNoLongerBlocked: OK('BLOCKED'),
+    labelNowNextStep: FAIL('NEEDS_FENCE without its `Next step:` line'), labelNextStepHeld: OK('NEEDS_FENCE'),
+    mismatchNotAStatus: NO_SHAPE, noStatusLine: NO_SHAPE, secondStatusLine: NO_SHAPE, statusWordShape: NO_SHAPE,
+    noMismatchLine: NO_SHAPE, secondMismatchLine: NO_SHAPE, labelWithoutColon: NO_SHAPE, threeLabels: NO_SHAPE, fiveLabels: NO_SHAPE,
+    noImplementerBlock: { unknown: 'no ```prompt:implementer block in the skeletons' }, noReportFile: NO_SHAPE,
+  });
+});
+
+// The fix-up skeleton is pasted, so its agent never sees the implementer block: the block itself
+// spells out every line --report checks, in the words reportRules reads from the implementer block.
+test('the fix-up block states the report file --report checks, and a report built from its own words passes', async () => {
+  const { checkReport, reportRules } = await api(), skeletons = read(SKELETONS), rules = reportRules(skeletons);
+  const bodies = fixupBodies(skeletons);
+  assert.ok(bodies && bodies.length === 1, 'one fix-up block');
+  const body = bodies[0], flat = collapse(body);
+  const heading = /Its first line is exactly `(### B\[NN\] R\[ROUND\] fix-up findings)`;/.exec(flat);
+  const statuses = /its second exactly one of: ([A-Z_ |]+); its third `(EVIDENCE:)`,/.exec(flat);
+  const labels = body.split('\n').filter(l => l.startsWith('  Expected: '));
+  assert.ok(heading && statuses && labels.length === 1, 'the block states its heading, its status words, its EVIDENCE opener and its mismatch line');
+  assert.deepEqual(statuses[1].split(' | '), rules.statuses, 'the fix-up block\'s status words are those --report reads');
+  assert.ok(flat.includes('(its `validate.mjs` line, then `exit <code>`), the commit SHA(s) and `checklist <n>/<m>`, ended by a blank line'), 'the evidence lines and their end');
+  assert.doesNotMatch(body, /NONCE/, 'the pasted block spells no nonce');
+  const filled = heading[1].replace('[NN]', '03').replace('[ROUND]', '1');
+  const write = (status, prose) => [filled, status, statuses[2], 'PASS tests 3/3 (1s) exit 0', 'commit abc1234', 'checklist 2/2', '', ...prose].join('\n') + '\n';
+  const got = rules.statuses.map(status => [status, checkReport({ skeletons, text: write(status, rules.mismatch.includes(status) ? [labels[0].trim()] : ['root cause']), nonce: null })]);
+  assert.deepEqual(got, rules.statuses.map(status => [status, OK(status, '2/2')]));
+});
+
+test('--report run as --help prints it: a rendered implementer prompt\'s report passes, a changed nonce fails, a bad invocation is UNKNOWN', async t => {
+  const fx = fixture(t), help = run(['--help']).stdout.split('\n');
+  assert.equal(help[0].startsWith('prompt.mjs --ledger '), true, 'the render synopsis stays the first line');
+  const usage = help.filter(l => l.startsWith('prompt.mjs --report '));
+  assert.deepEqual(usage, ['prompt.mjs --report <file> --nonce <nonce>'], '--help prints the check form once');
+  // The check form's lines, whole: the roles named are those taking a report file, and each exit code is the one observed below.
+  const checkHelp = help.slice(help.indexOf(usage[0]));
+  assert.deepEqual(checkHelp, [usage[0],
+    'Checks the report file written under role ' + Object.keys(REPORT_HEADING).join(', ') + ' (a fix-up report has no nonce line: drop --nonce for it)',
+    "and prints ONE line, never the report's prose: REPORT <status> checklist <n>/<m> (exit 0) | REPORT FAIL <the first rule broken>",
+    '(exit 1) | UNKNOWN <reason> (exit 2). --report comes first.', ''], 'the check form\'s --help lines');
+  const legend = collapse(checkHelp.join(' '));
+  const exitOf = what => Number((new RegExp(what + ' [^|]*\\(exit (\\d)\\)').exec(legend) || [])[1]);
+  // A real render: the prompt names the file and heading the report must carry, and the nonce the CLI printed.
+  const facts = { ...pick(fx.facts, ROLE_FACTS.implementer), round: 1 };
+  const { text, nonce } = renderedMatches(fx, 'implementer', facts, { ...fx.expected, '[ROUND]': '1' });
+  const heading = /^`(### B01 R1 implementer findings)`;/m.exec(text);
+  assert.ok(heading && text.includes('to "' + fx.facts.reportFile + '"'), 'the prompt names the heading and the report file');
+  fs.mkdirSync(path.dirname(fx.facts.reportFile), { recursive: true });
+  const published = (file, n) => usage[0].split(' ').slice(1).map(w => w === '<file>' ? file : w === '<nonce>' ? n : w);
+  const write = body => { fs.writeFileSync(fx.facts.reportFile, body); return fx.facts.reportFile; };
+  const outcome = args => { const r = run(args); return { status: r.status, stdout: r.stdout }; };
+  const got = {
+    good: outcome(published(write(reportText({ heading: heading[1], nonce: 'NONCE ' + nonce })), nonce)),
+    changedNonce: outcome(published(write(reportText({ heading: heading[1], nonce: 'NONCE ' + nonce.replace(/^./, c => c === '0' ? '1' : '0') })), nonce)),
+    fixup: outcome(published(write(reportText({ heading: '### B01 R1 fix-up findings', nonce: null })), nonce).slice(0, 2)),
+    missing: outcome(published(path.join(fx.temp, 'no such report.md'), nonce)),
+    directory: outcome(published(fx.temp, nonce)),
+    notUtf8: outcome(published(write(Buffer.from([0x23, 0xff, 0x0a])), nonce)),
+    noValue: outcome(['--report']),
+    unknownFlag: outcome(['--report', fx.facts.reportFile, '--bogus', 'x']),
+    twice: outcome(['--report', fx.facts.reportFile, '--nonce', nonce, '--nonce', nonce]),
+    nonceFirst: outcome(['--nonce', nonce, '--report', fx.facts.reportFile]),
+  };
+  const usageLine = 'UNKNOWN usage: --report <file> [--nonce <nonce>]; use --help\n';
+  assert.deepEqual([got.good.status, got.changedNonce.status, got.missing.status], [exitOf('REPORT <status>'), exitOf('REPORT FAIL'), exitOf('UNKNOWN')],
+    'the exit codes --help states are the ones the tool returns');
+  assert.deepEqual(got, {
+    good: { status: 0, stdout: 'REPORT DONE checklist 3/4\n' },
+    changedNonce: { status: 1, stdout: 'REPORT FAIL line 3 is not `NONCE <nonce>` for the nonce given\n' },
+    fixup: { status: 0, stdout: 'REPORT DONE checklist 3/4\n' },
+    missing: { status: 2, stdout: 'UNKNOWN cannot read report file ' + path.join(fx.temp, 'no such report.md') + '\n' },
+    directory: { status: 2, stdout: 'UNKNOWN cannot read report file ' + fx.temp + '\n' },
+    notUtf8: { status: 2, stdout: 'UNKNOWN not UTF-8: report file ' + fx.facts.reportFile + '\n' },
+    noValue: { status: 2, stdout: usageLine }, unknownFlag: { status: 2, stdout: usageLine }, twice: { status: 2, stdout: usageLine },
+    nonceFirst: { status: 2, stdout: 'UNKNOWN usage: an unknown, missing or duplicate flag; use --help\n' },
+  });
 });

@@ -10,7 +10,8 @@
 // `clearBand`, the band's countdown or notice; `clears`, each clear's `{ at, tzOffset, tokens }`; and `runTotal`,
 // the run's `{ usd, unpriced, conversations }` over the conversations its clears link.
 
-// The conductor's safe point in tokens: orchestrate/references/protocol.md, `about 300K`.
+// The conductor's safe point in tokens where the ledger view gives no clear threshold, held equal to
+// orchestrate-mod/tools/ledger-view.mjs `DEFAULT_CLEAR_THRESHOLD`.
 export const SAFE_POINT = 300000;
 export const INCOMPLETE = 'discovery incomplete — some ledgers may be missing';
 
@@ -227,8 +228,15 @@ function agentLines(agents, at) {
   return cols.map((c, n) => `${n === 0 ? 'running' : '       '}  ${c.map((cell, i) => (i < 2 ? padEnd(cell, widths[i]) : padStart(cell, widths[i]))).join('  ')}`.trimEnd());
 }
 
-function conductorLine(conductor) {
-  const safe = `safe point at ${tokensK(SAFE_POINT)}`;
+// The safe point the pane names: the shown ledger's clear threshold, else SAFE_POINT when the view cannot be read,
+// shows no ledger, or carries no threshold (null, or one with an error).
+function safePointOf(view) {
+  const t = typeof view.error === 'string' || !isObject(view.ledger) ? null : view.ledger.clearThreshold;
+  return isObject(t) && isCount(t.tokens) ? t.tokens : SAFE_POINT;
+}
+
+function conductorLine(conductor, safePoint) {
+  const safe = `safe point at ${tokensK(safePoint)}`;
   if (conductor === null || !isCount(conductor.tokens)) return `conductor context unknown · ${safe}`;
   const percent = isNumber(conductor.percent) ? `${conductor.percent}%` : '?';
   return `conductor  ${tokensK(conductor.tokens)} of ${windowText(conductor.window)} (${percent}) · ${safe}`;
@@ -269,7 +277,7 @@ export function paneLines(data, width) {
   }
   line('');
   for (const text of agentLines(data.agents, data.at)) line(text);
-  line(conductorLine(data.conductor));
+  line(conductorLine(data.conductor, safePointOf(view)));
   line(costLine(data));
   if (Array.isArray(data.clears) && data.clears.length > 0) {
     line(`clears ${data.clears.map(c => `${clock(c.at, c.tzOffset).slice(0, 5)} at ${tokensK(c.tokens)}`).join(' · ')}`);

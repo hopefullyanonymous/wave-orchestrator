@@ -20,8 +20,8 @@ import {
   mainAttribution, newTotals, partName, recordLine, utf8Length, validId,
 } from './cost.js';
 import {
-  COUNTDOWN_MS, NO_STOP, STOP_WAIT_MS, TOOL_DESCRIPTION, TOOL_INPUT_SCHEMA, TOOL_NAME, afterClearArgs, afterClearNotice,
-  agentsReason, continueArgs, countdownText, decide, linkClear, runTotal, scheduledLine, skipNotice, stopReason,
+  COUNTDOWN_MS, NO_STOP, STOP_WAIT_MS, TOOL_DESCRIPTION, TOOL_INPUT_SCHEMA, TOOL_NAME, afterClearArgs, afterClearNotice, inPlaceArgs,
+  agentsReason, countdownText, decide, linkClear, notNeededLine, runTotal, scheduledLine, skipNotice, stopReason,
 } from './clear.js';
 import { PRICES } from './prices.js';
 import { bandLine, conductorOf, paneLines, readCosts, readView, runningAgents, textReport } from './view.js';
@@ -97,10 +97,14 @@ export function register(on) {
     paneOpen = true;
     if (data === null) await refresh($, false);
     const { Box, Text, Button } = $.ui.resolve(e);
-    const lines = paneLines(drawn(data), e.props.bodyColumns).map(line => h(Text, line.dim ? { wrap: 'truncate-end', dimColor: true } : { wrap: 'truncate-end' }, line.text === '' ? ' ' : line.text));
+    // The terminal fills a docked pane with the theme's sidebar colour but leaves plain text the terminal's own, which
+    // a light theme in a dark terminal draws alike (an inline pane has no fill): there plain text and the buttons'
+    // labels take the theme's text colour, as a dim line already takes its dim colour.
+    const ink = e.surface === 'terminal' && e.props.placement === 'dock' ? { wrap: 'truncate-end', color: 'text' } : null;
+    const lines = paneLines(drawn(data), e.props.bodyColumns).map(line => h(Text, line.dim ? { wrap: 'truncate-end', dimColor: true } : ink ?? { wrap: 'truncate-end' }, line.text === '' ? ' ' : line.text));
+    const button = (label, hotkey, onPress) => h(Button, { key: label, label, hotkey, plain: true, onPress }, ...(ink ? [h(Text, ink, label)] : []));
     return h(Box, { flexDirection: 'column' }, ...lines, h(Box, { flexDirection: 'row', gap: 3 },
-      h(Button, { key: 'refresh', label: 'refresh', hotkey: 'r', plain: true, onPress: () => refreshPressed($) }),
-      h(Button, { key: 'close', label: 'close', hotkey: 'x', plain: true, onPress: () => closePane($) })));
+      button('refresh', 'r', () => refreshPressed($)), button('close', 'x', () => closePane($))));
   });
   // The band keeps what the hooks beneath draw there and adds the line under it, while the session's ledger tag
   // names a ledger and no survey holds the band. It draws only data read under that tag: a read joined in flight
@@ -256,7 +260,8 @@ function drawn(data) {
 }
 
 // Answers a schedule_clear call: `declined: <reason>` for the first reason orchestrate-mod/hooks/clear.js `decide`
-// finds, each fact gathered only once the reasons before it pass; else the schedule, and `scheduled: <line>`.
+// finds, each fact gathered only once the reasons before it pass; `not needed: <text>` for a context under the
+// ledger's clear threshold; else the schedule, and `scheduled: <line>` with the context the threshold was held to.
 async function scheduleClear($, e) {
   const facts = { agentId: e.agentId, ledger: e.ledger, ledgerValid: validId(e.ledger), sha: e.sha, busy: schedule !== null || countdown !== null };
   let verdict = decide(facts);
@@ -265,10 +270,9 @@ async function scheduleClear($, e) {
     verdict = decide(facts);
   }
   if (verdict.declined !== undefined) return { result: `declined: ${verdict.declined}` };
-  let tokens = null;
-  try { tokens = conductorOf((await $.session.usage()).context).tokens; } catch { tokens = null; }
+  if (verdict.notNeeded !== undefined) return { result: `not needed: ${notNeededLine(verdict.notNeeded)}` };
   schedule = { ledger: e.ledger, sha: e.sha, complete: false, stop: null, wait: null };
-  return { result: `scheduled: ${scheduledLine(tokens, e.ledger)}` };
+  return { result: `scheduled: ${scheduledLine(facts.context, e.ledger)}` };
 }
 
 // One fact `decide` asked for; a read, a run or a list that fails is the fact's `{ error }`, never its absence.
@@ -280,6 +284,8 @@ async function gather($, need, facts) {
     return { tag: costs.tag, view: data.view, root: data.root };
   }
   try {
+    // The conductor's context in tokens, null when the reading has none.
+    if (need.need === 'context') return conductorOf((await $.session.usage()).context).tokens;
     if (need.need === 'protocol') return { text: await $.fs.read(joinPath(facts.read.view.ledger.skillDir, 'references', 'protocol.md')) };
     if (need.need === 'worktrees') {
       return await $.process.run(['git', '--no-optional-locks', 'worktree', 'list', '--porcelain'], { cwd: facts.read.root, timeoutMs: GIT_TIMEOUT_MS });
@@ -331,7 +337,7 @@ function turnOver($) {
 }
 
 // Skips the clear and continues the run here: the notice, kept through that continue's turn, then
-// `/orchestrate continue <id>` from a timer, since a hook the turn waits on cannot run a command.
+// `/orchestrate continue <id> in-place <reason>` from a timer, since a hook the turn waits on cannot run a command.
 function skip($, id, reason) {
   notice = skipNotice(reason, id, true);
   ownTurn = true;
@@ -340,7 +346,7 @@ function skip($, id, reason) {
 }
 
 async function continueHere($, id, reason) {
-  try { await $.command.run({ command: 'orchestrate', args: continueArgs(id) }); } catch {
+  try { await $.command.run({ command: 'orchestrate', args: inPlaceArgs(id, reason) }); } catch {
     notice = skipNotice(reason, id, false);
     ownTurn = false;
     await redraw($);

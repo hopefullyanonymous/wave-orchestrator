@@ -11,14 +11,17 @@ export const TOOL_FULL_NAME = 'mcp__orchestrate-mod__schedule_clear';
 export const TOOL_DESCRIPTION = 'orchestrate-mod: schedules an automatic clear of this conversation followed by /orchestrate'
   + ' continue <ledger> after-clear. Call it only where your ledger\'s pinned protocol.md (§Session algorithm step 8)'
   + ' names this tool, with the ledger id and the integration branch\'s full tip SHA. The answer begins `scheduled`'
-  + ' (post the line it gives, then end your turn) or `declined` (take the timer path).';
+  + ' (post the line it gives, then end your turn), `not needed` (carry on: no clear and no timer) or `declined` (take'
+  + ' the timer path, after any retry your ledger\'s step 8 names).';
 export const TOOL_INPUT_SCHEMA = { type: 'object', properties: { ledger: { type: 'string' }, sha: { type: 'string' } }, required: ['ledger', 'sha'] };
 // From the end of the conductor's turn to the clear: two minutes, any message before then keeping the conversation.
 export const COUNTDOWN_MS = 120000;
 // How long after the turn completes its unblocked Stop may still arrive before background work counts as unknown.
 export const STOP_WAIT_MS = 5000;
-// The `/orchestrate` arguments the fresh conversation runs, and the ones a skipped clear runs in place.
+// The `/orchestrate` arguments the fresh conversation runs, the ones a skipped clear runs in place with its reason,
+// and the ones the band offers to type when that command was refused.
 export const afterClearArgs = id => `continue ${id} after-clear`;
+export const inPlaceArgs = (id, reason) => `continue ${id} in-place ${reason}`;
 export const continueArgs = id => `continue ${id}`;
 
 // ===== Deciding a call ===================================================================
@@ -50,27 +53,59 @@ export function worktreeHolding(stdout, branch) {
   return held.length === 1 ? { path: held[0] } : { none: true };
 }
 
+// What a shown engine field may not carry: C0, DEL, C1 and the two Unicode separators, each drawn as a space.
+const UNSHOWN = new RegExp('[\\x00-\\x1f\\x7f-\\x9f' + String.fromCharCode(0x2028, 0x2029) + ']', 'g');
+export const SHOWN_MAX = 80;
+// An agent's, a task's or a cron's field as a reason shows it: on one line and at most SHOWN_MAX characters, a longer
+// one cut there with a closing `…`, so a model-written description cannot fake a line; `?` when it is no string.
+export function shown(value) {
+  if (typeof value !== 'string') return '?';
+  const chars = [...value.replace(UNSHOWN, ' ')];
+  return chars.length > SHOWN_MAX ? chars.slice(0, SHOWN_MAX).join('') + '…' : chars.join('');
+}
+
 // The statuses after which an agent no longer runs; every other one, `pending` and any the engine adds, is in flight.
 export const SETTLED = ['completed', 'failed', 'killed'];
-// Why `$.agent.list()`'s answer stops a clear: an agent in flight, or an answer that is no list (a rejected call
-// is `{ error }`); null when every agent has settled.
+// How a `waiting` status reads: the sub-agent returned its report while a background command of its own still runs.
+export const WAITING = 'waiting: returned its report; a command of its own still runs';
+const agentEntry = a => {
+  const o = a !== null && typeof a === 'object' ? a : {};
+  return `${shown(o.id)} (${shown(o.type)}, "${shown(o.description)}", ${o.status === 'waiting' ? WAITING : shown(o.status)})`;
+};
+// Why `$.agent.list()`'s answer stops a clear: the agents in flight, each named under `an agent is in flight` for
+// one and `agents are in flight` for several, or an answer that is no list (a rejected call is `{ error }`); null
+// when every agent has settled.
 export function agentsReason(list) {
   if (!Array.isArray(list)) return 'the agent list cannot be read';
-  return list.every(a => a !== null && typeof a === 'object' && SETTLED.includes(a.status)) ? null : 'an agent is in flight';
+  const busy = list.filter(a => !(a !== null && typeof a === 'object' && SETTLED.includes(a.status)));
+  if (busy.length === 0) return null;
+  return `${busy.length === 1 ? 'an agent is' : 'agents are'} in flight: ${busy.map(agentEntry).join('; ')}`;
+}
+
+// The ledger's clear threshold from its view entry's `clearThreshold` (orchestrate-mod/tools/ledger-view.mjs
+// `clearThreshold`): `{ tokens, source }`, or `{ error }` when the entry carries none, an error, or no form read here.
+function thresholdOf(t) {
+  if (t === null || typeof t !== 'object') return { error: 'the ledger view carries none' };
+  if (typeof t.error === 'string') return { error: t.error };
+  const valid = Number.isSafeInteger(t.tokens) && t.tokens >= 0 && t.tokens % 1000 === 0 && ['contract', 'default'].includes(t.source);
+  return valid ? { tokens: t.tokens, source: t.source } : { error: 'the ledger view carries it in no form this mod reads' };
 }
 
 // The verdict on a `schedule_clear` call over the facts gathered so far, by the first reason that applies, in this
 // order: (a) a sub-agent called it; (b) the ledger is no ledger id, or the SHA no full one; (c) a clear is already
 // scheduled or counting down; (d) the session is not tagged with the ledger, or the view holds no entry for it, or
-// one with an error; (e) its integration tip is not the SHA; (f) its pinned protocol.md cannot be read or does not
-// name the tool; (g) a git run fails, or the worktree holding the integration branch has uncommitted files in the
-// ledger's directory; (h) an agent is in flight or the agent list cannot be read. Answers `{ declined: reason }`,
-// `{ need: name }` when the next reason reads a fact not gathered yet (`{ need: 'status', cwd }` names the
-// worktree to run in), else `{ scheduled: true }`. The facts:
+// one with an error; (e) its integration tip is not the SHA; (f) its clear threshold cannot be read; (g) its pinned
+// protocol.md cannot be read or does not name the tool; (h) a git run fails, or the worktree holding the
+// integration branch has uncommitted files in the ledger's directory; (i) an agent is in flight or the agent list
+// cannot be read. Answers `{ declined: reason }`, `{ need: name }` when the next reason reads a fact not gathered
+// yet (`{ need: 'status', cwd }` names the worktree to run in), `{ notNeeded: { tokens, threshold, source } }`
+// when the context is known and under the threshold, else `{ scheduled: true }`; a context unknown is never under
+// it. The facts:
 //   agentId, ledger, sha: the call's own; ledgerValid: orchestrate-mod/hooks/cost.js `validId`'s answer;
 //   busy: a clear is scheduled or counting down; read: { tag, view, root }, the session's tag and register.js
-//   `load`'s view and root; protocol: { text } or { error }; worktrees, status: a git run, `$.process.run`'s answer
-//   or { error }; agents: `$.agent.list()`'s answer or { error }.
+//   `load`'s view and root; context: the conductor's context in tokens, null or { error } when unknown;
+//   protocol: { text } or { error }; worktrees, status: a git run, `$.process.run`'s answer or { error }; agents:
+//   `$.agent.list()`'s answer or { error }.
 export function decide(f) {
   const no = declined => ({ declined });
   if (f.agentId !== undefined) return no('only the main conversation can schedule a clear');
@@ -85,6 +120,13 @@ export function decide(f) {
   if (typeof view.ledger.error === 'string') return no(`the ledger view of ${id} carries an error: ${view.ledger.error}`);
   const integration = view.ledger.integration;
   if (!integration || integration.sha !== f.sha) return no(`the integration tip is ${integration?.sha ?? '?'}, not ${f.sha}`);
+  const threshold = thresholdOf(view.ledger.clearThreshold);
+  if (threshold.error !== undefined) return no(`the ledger's Clear threshold line cannot be read: ${threshold.error}`);
+  if (f.context === undefined) return { need: 'context' };
+  const size = f.context;
+  if (typeof size === 'number' && size >= 0 && size < threshold.tokens) {
+    return { notNeeded: { tokens: size, threshold: threshold.tokens, source: threshold.source } };
+  }
   if (f.protocol === undefined) return { need: 'protocol' };
   if (typeof f.protocol.text !== 'string') return no(`the pinned protocol.md cannot be read: ${f.protocol.error}`);
   if (!f.protocol.text.includes(TOOL_FULL_NAME)) return no(`the pinned protocol.md does not name ${TOOL_FULL_NAME}`);
@@ -110,15 +152,30 @@ export function scheduledLine(tokens, id) {
   const context = Number.isFinite(tokens) && tokens >= 0 ? `${Math.round(tokens / 1000)}K` : '?K';
   return `Context ${context}: clearing this conversation in about two minutes and continuing ${id} in a fresh one; any message before then keeps this conversation.`;
 }
+// What follows `not needed: ` for `decide`'s `notNeeded`: the context floored to thousands, so 299,999 reads 299K.
+export function notNeededLine({ tokens, threshold, source }) {
+  const whose = source === 'default' ? 'the default' : "the ledger's";
+  return `context ${Math.floor(tokens / 1000)}K is under ${whose} ${threshold / 1000}K clear threshold`;
+}
 
 // ===== The turn's end, the countdown and the run =========================================
 
-// Why a main-loop Stop's in-flight fields stop a clear: work running, a cron that would wake the fresh
-// conversation, or either field absent or no array (unknown); null when both are arrays with no entry.
+// A task by its command, else (a sub-agent's entry has none) its description; a cron by its schedule.
+const taskEntry = t => {
+  const o = t !== null && typeof t === 'object' ? t : {};
+  return `${shown(o.id)} (${shown(o.type)}, ${shown(typeof o.command === 'string' ? o.command : o.description)})`;
+};
+const cronEntry = c => {
+  const o = c !== null && typeof c === 'object' ? c : {};
+  return `${shown(o.id)} (${shown(o.schedule)})`;
+};
+// Why a main-loop Stop's in-flight fields stop a clear: work running, each task named, a cron that would wake the
+// fresh conversation, each cron named, or either field absent or no array (unknown); null when both are arrays
+// with no entry.
 export function stopReason(e) {
   const tasks = e.background_tasks, crons = e.session_crons;
-  if (Array.isArray(tasks) && tasks.length > 0) return 'background work is running';
-  if (Array.isArray(crons) && crons.length > 0) return 'a scheduled task would wake this conversation';
+  if (Array.isArray(tasks) && tasks.length > 0) return `background work is running: ${tasks.map(taskEntry).join('; ')}`;
+  if (Array.isArray(crons) && crons.length > 0) return `a scheduled task would wake this conversation: ${crons.map(cronEntry).join('; ')}`;
   if (!Array.isArray(tasks) || !Array.isArray(crons)) return 'background work is unknown';
   return null;
 }

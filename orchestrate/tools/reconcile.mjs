@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Prints one line per ledger (`discovery`), or the protocol.md §Recovery row each PROGRESS row
-// matches (`rows`). Read-only: every git probe is a query through orchestrate/tools/git-evidence.mjs.
+// Prints one line per ledger (`discovery`), the protocol.md §Recovery row each PROGRESS row
+// matches (`rows`), or what a boot needs from one ledger in a few dozen lines (`digest`).
+// Read-only: every git probe is a query through orchestrate/tools/git-evidence.mjs.
 // The table is read from this skill copy at run time and checked against the 26 rules below, so
 // its Verdict words are protocol.md's and a table edit stops this tool until the rules follow it.
 import fs from 'node:fs';
@@ -39,6 +40,15 @@ const HELP = [
   '  `<Bnn> <status> UNKNOWN <fact>: <why>` where a fact that match needs cannot be read, then a PRUNE line naming',
   '  worktrees of integrated batches. It runs no validation: a Verdict that turns on validations prints as the table',
   '  words it. Shipment is resolved only when a 🧪 row is reconciled; otherwise the header reads shipment=not-needed.',
+  'reconcile.mjs digest --repo <repo> --ledger <id> --integration <full-ref>',
+  '  Reads the same ledger at the integration tip and prints what a boot needs in place of the request, plan and',
+  '  PROGRESS: `DIGEST <id> State=<value> tip=<sha>`; `WORKTREE <path>`, the worktree holding the integration branch in',
+  '  `git worktree list --porcelain`, or `WORKTREE none`, either only from a complete listing, else `WORKTREE UNKNOWN',
+  '  <why>` (a prunable record is never offered); `WAVE <w> open` (it holds a 🔄 row), else `WAVE <w> next` (a ⬜ row) or',
+  '  `WAVE none`, then `MEMBER <Bnn> <status> <branch> <batch file>` per row of that wave; `NEXT <Cn> after wave <w>',
+  '  covers <Bnn,…>` for the first checkpoint not ✅; the line `rows` prints for each row it reconciles, followed by',
+  '  each Notes marker in its recorded form, indented; and `SESSION <the newest Session log row, verbatim>`. It exits',
+  '  2 only for a fact it prints as UNKNOWN, never for a Status cell, Notes marker or row that holds the word.',
   "Read-only; every filesystem path prints in the platform's native spelling. Exit 0: every line known; 2: any UNKNOWN,",
   '  AMBIGUOUS or INCOMPLETE line, or an invalid invocation.',
 ].join('\n');
@@ -356,6 +366,61 @@ const spelled = p => path.normalize(p);
 // A copy's place on a discovery line: a ref by its short name, a checkout's ledger by its path.
 const placeOf = l => l.kind === 'ref' ? shortRef(l.ref) : spelled(l.path);
 
+// The ledger at the integration tip `ctx.tip`, as `rows` and `digest` read it: its contract's Git model (returned),
+// PROGRESS's text and its Batches and Checkpoints tables, and each row's batch files (`batchMatches`, every file its
+// id names; `batchFiles`, the one when there is one). Throws Unknown at the first fact it cannot read.
+function readLedger(ctx, ledger) {
+  const { repo } = ctx;
+  const dir = `.agents/changes/${ledger}`, read = file => {
+    const text = readBlob(repo, ctx.tip, `${dir}/${file}`, [], ctx.options);
+    if (text === null) throw new Unknown('ledger', `${dir}/${file} cannot be read at the integration tip`);
+    return text;
+  };
+  const model = gitModel(read('00-READBEFORE.md'));
+  let named;
+  try { named = model.integration; } catch { named = null; }
+  if (!named || named.replace(/^refs\/heads\//, '') !== shortRef(ctx.integration)) throw new Unknown('contract', `its integration branch is ${named ?? 'not recorded'}, not ${shortRef(ctx.integration)}`);
+  const progress = read('PROGRESS.md');
+  try {
+    ctx.rows = table(progress, ['#', 'Branch', 'Wave', 'Status', 'Notes']);
+    ctx.checkpointRows = table(progress, ['Checkpoint', 'After wave', 'Status']);
+    ctx.checkpoints = ctx.checkpointRows.map(c => ({ wave: waveOf(c['After wave']), status: [...c.Status.trim()][0] ?? '' }));
+  } catch (e) { throw e instanceof Unknown ? e : new Unknown('PROGRESS', e.message); }
+  const listing = git(repo, ['ls-tree', '-z', '--name-only', ctx.tip, '--', `${dir}/`], ctx.options);
+  if (!listing.ok) throw new Unknown('ledger', 'git could not list the ledger directory');
+  ctx.batchFiles = new Map(); ctx.batchMatches = new Map();
+  const names = listing.text.split('\0').filter(Boolean).map(p => p.slice(dir.length + 1));
+  for (const row of ctx.rows) {
+    const digits = /^B?(\d+)$/.exec(row['#'])?.[1], files = digits ? names.filter(n => n.startsWith(`02-batches-${digits}-`) && n.endsWith('.md')) : [];
+    ctx.batchMatches.set(row['#'], files.map(f => `${dir}/${f}`));
+    if (files.length === 1) ctx.batchFiles.set(row['#'], `${dir}/${files[0]}`);
+  }
+  return model;
+}
+// The worktrees a row's dirt and prune list are read from, as orchestrate/tools/git-evidence.mjs `worktrees` lists them.
+function useTrees(ctx, trees) {
+  ctx.worktrees = trees.evidence.worktrees;
+  ctx.worktreesUnknown = ctx.worktrees.length ? null : 'git could not list the worktrees';
+}
+// The rows `rows` reconciles (every PROGRESS row not ✅, 👤 or ⛔ (dropped)), each with its printed line and whether
+// that line is known, so an exit code need not read the line's text; and the worktrees to prune.
+function rowResults(ctx, model, verdicts) {
+  const reconciled = ctx.rows.map(row => ({ row, kind: statusKind(row.Status) })).filter(r => !SKIPPED.includes(r.kind));
+  ctx.shipment = reconciled.some(r => r.kind === 'checkpoint') ? shipmentOf(ctx, model) : null;
+  const results = [], prune = [];
+  for (const { row, kind } of reconciled) {
+    const label = `${row['#']} ${collapse(row.Status)}`;
+    if (kind === null) { results.push({ row, known: false, line: `${label} UNKNOWN status: the Status cell is in no legend form` }); continue; }
+    const { facts, integratedWorktrees } = rowFacts(ctx, row, kind), match = matchRow(facts);
+    prune.push(...integratedWorktrees);
+    if (match.fact) results.push({ row, known: false, line: `${label} UNKNOWN ${match.fact}: ${match.why}` });
+    else if (match.pair) results.push({ row, known: true, line: `${label} row ${match.row} or ${match.pair}: tip green → ${verdicts[match.row - 1]} | tip red → ${verdicts[match.pair - 1]}` });
+    else results.push({ row, known: true, line: `${label} row ${match.row}: ${verdicts[match.row - 1]}` });
+  }
+  return { results, prune };
+}
+const USAGE_REFS = 'UNKNOWN usage: a simple ledger id and a full refs/heads/ integration ref are required';
+
 // `env` (optional) is the environment every git probe runs under, as orchestrate/tools/git-evidence.mjs `git` takes it.
 // `listWorktrees` is a test seam for orchestrate/tools/git-evidence.mjs `worktrees`, so a test can reach the
 // unlistable-worktrees refusal; the CLI never sets it, and an empty listing can only make dirt UNKNOWN.
@@ -363,55 +428,114 @@ export function reconcileRows({ repo, ledger, integration, protocolText, env, li
   const out = lines => ({ code: lines.some(l => / UNKNOWN |^UNKNOWN /.test(l)) ? 2 : 0, lines: lines.map(oneLine) });
   let verdicts;
   try { verdicts = loadTable(protocolText); } catch (e) { if (e instanceof Unknown) return { code: 2, lines: [TABLE_DRIFT] }; throw e; }
-  if (!validId(ledger) || !validFullRef(integration) || !integration.startsWith('refs/heads/')) return { code: 2, lines: ['UNKNOWN usage: a simple ledger id and a full refs/heads/ integration ref are required'] };
+  if (!validId(ledger) || !validFullRef(integration) || !integration.startsWith('refs/heads/')) return { code: 2, lines: [USAGE_REFS] };
   const ctx = { repo, integration, firstParent: null, options: env ? { env } : {} };
   try {
     ctx.tip = resolve(repo, integration, ctx.options);
     if (ctx.tip === null) throw new Unknown('integration', `${integration} does not exist`);
-    const dir = `.agents/changes/${ledger}`, read = file => {
-      const text = readBlob(repo, ctx.tip, `${dir}/${file}`, [], ctx.options);
-      if (text === null) throw new Unknown('ledger', `${dir}/${file} cannot be read at the integration tip`);
-      return text;
-    };
-    const model = gitModel(read('00-READBEFORE.md'));
-    let named;
-    try { named = model.integration; } catch { named = null; }
-    if (!named || named.replace(/^refs\/heads\//, '') !== shortRef(integration)) throw new Unknown('contract', `its integration branch is ${named ?? 'not recorded'}, not ${shortRef(integration)}`);
-    const progress = read('PROGRESS.md');
-    try {
-      ctx.rows = table(progress, ['#', 'Branch', 'Wave', 'Status', 'Notes']);
-      ctx.checkpoints = table(progress, ['Checkpoint', 'After wave', 'Status']).map(c => ({ wave: waveOf(c['After wave']), status: [...c.Status.trim()][0] ?? '' }));
-    } catch (e) { throw e instanceof Unknown ? e : new Unknown('PROGRESS', e.message); }
-    const listing = git(repo, ['ls-tree', '-z', '--name-only', ctx.tip, '--', `${dir}/`], ctx.options);
-    if (!listing.ok) throw new Unknown('ledger', 'git could not list the ledger directory');
-    ctx.batchFiles = new Map();
-    const names = listing.text.split('\0').filter(Boolean).map(p => p.slice(dir.length + 1));
-    for (const row of ctx.rows) {
-      const digits = /^B?(\d+)$/.exec(row['#'])?.[1], files = digits ? names.filter(n => n.startsWith(`02-batches-${digits}-`) && n.endsWith('.md')) : [];
-      if (files.length === 1) ctx.batchFiles.set(row['#'], `${dir}/${files[0]}`);
-    }
-    const trees = listWorktrees({ repo, ...ctx.options });
-    ctx.worktrees = trees.evidence.worktrees;
-    ctx.worktreesUnknown = ctx.worktrees.length ? null : 'git could not list the worktrees';
+    const model = readLedger(ctx, ledger);
+    useTrees(ctx, listWorktrees({ repo, ...ctx.options }));
     const common = git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'], ctx.options);
     const commonDir = common.ok ? common.text.trim() : null;
     // The main checkout: the worktree holding the common .git directory, never a worktree to prune.
     const mainDir = commonDir && path.basename(commonDir) === '.git' ? real(path.dirname(commonDir)) : null;
     ctx.mainCheckout = mainDir ? ctx.worktrees.find(w => !w.bare && real(w.path) === mainDir)?.path ?? null : null;
-    const reconciled = ctx.rows.map(row => ({ row, kind: statusKind(row.Status) })).filter(r => !SKIPPED.includes(r.kind));
-    ctx.shipment = reconciled.some(r => r.kind === 'checkpoint') ? shipmentOf(ctx, model) : null;
-    const lines = [`RECONCILE ${ledger} @${ctx.tip.slice(0, 7)} shipment=${ctx.shipment ?? 'not-needed'}`], prune = [];
-    for (const { row, kind } of reconciled) {
-      const label = `${row['#']} ${collapse(row.Status)}`;
-      if (kind === null) { lines.push(`${label} UNKNOWN status: the Status cell is in no legend form`); continue; }
-      const { facts, integratedWorktrees } = rowFacts(ctx, row, kind), match = matchRow(facts);
-      prune.push(...integratedWorktrees);
-      if (match.fact) lines.push(`${label} UNKNOWN ${match.fact}: ${match.why}`);
-      else if (match.pair) lines.push(`${label} row ${match.row} or ${match.pair}: tip green → ${verdicts[match.row - 1]} | tip red → ${verdicts[match.pair - 1]}`);
-      else lines.push(`${label} row ${match.row}: ${verdicts[match.row - 1]}`);
-    }
+    const { results, prune } = rowResults(ctx, model, verdicts);
+    const lines = [`RECONCILE ${ledger} @${ctx.tip.slice(0, 7)} shipment=${ctx.shipment ?? 'not-needed'}`, ...results.map(r => r.line)];
     if (prune.length) lines.push(`PRUNE ${[...new Set(prune)].join(', ')}`);
     return out(lines);
+  } catch (e) {
+    if (e instanceof Unknown) return { code: 2, lines: [oneLine(`UNKNOWN ${e.fact}: ${e.why}`)] };
+    return { code: 2, lines: [oneLine(`UNKNOWN ${e.message}`)] };
+  }
+}
+
+// ===== digest: what a boot needs from one ledger, in a few dozen lines ======================
+// The worktree holding the integration branch, from orchestrate/tools/git-evidence.mjs `worktrees`: a path or `none`
+// only from a complete listing, since a partial one may lack a record holding it; a prunable record is never offered,
+// its directory gone or unreachable.
+function holderLine(trees, integration) {
+  if (trees.completeness !== 'complete') {
+    const codes = [...new Set((trees.diagnostics ?? []).map(d => d.code))].join(', ') || 'no diagnostic';
+    return { known: false, line: `WORKTREE UNKNOWN the worktree listing is ${trees.completeness ?? 'not graded'}: ${codes}` };
+  }
+  const holding = trees.evidence.worktrees.filter(w => !w.bare && w.branch === integration), live = holding.filter(w => w.prunable === null);
+  if (live.length > 1) return { known: false, line: `WORKTREE UNKNOWN ${live.length} worktrees hold ${shortRef(integration)}: ${live.map(w => spelled(w.path)).join(', ')}` };
+  if (live.length === 1) return { known: true, line: `WORKTREE ${spelled(live[0].path)}` };
+  return { known: true, line: `WORKTREE none${holding.length ? ` (prunable: ${holding.map(w => spelled(w.path)).join(', ')})` : ''}` };
+}
+// The open wave, the lowest Wave cell of a 🔄 row, else the next, the lowest of a ⬜ row, read from the Batches table;
+// then one MEMBER line per row of it with its batch file from `readLedger`'s `batchMatches`, or UNKNOWN for none or several.
+function waveLines(ctx) {
+  let rows;
+  try { rows = ctx.rows.map(row => ({ row, wave: waveOf(row.Wave), kind: statusKind(row.Status) })); } catch (e) {
+    if (!(e instanceof Unknown)) throw e;
+    return [{ known: false, line: `WAVE UNKNOWN ${e.fact}: ${e.why}` }];
+  }
+  if (rows.some(r => r.kind === null)) return [{ known: false, line: 'WAVE UNKNOWN status: a Status cell is in no legend form' }];
+  const lowest = kind => Math.min(...rows.filter(r => r.kind === kind).map(r => r.wave));
+  const open = lowest('progress'), wave = Number.isFinite(open) ? open : lowest('notStarted');
+  if (!Number.isFinite(wave)) return [{ known: true, line: 'WAVE none (no 🔄 or ⬜ row)' }];
+  return [{ known: true, line: `WAVE ${wave} ${wave === open ? 'open' : 'next'}` }, ...rows.filter(r => r.wave === wave).map(({ row }) => {
+    const files = ctx.batchMatches.get(row['#']), file = files.length === 1 ? files[0] : `UNKNOWN batch file: ${files.length} match at the integration tip`;
+    return { known: files.length === 1, line: `MEMBER ${row['#']} ${collapse(row.Status)} ${collapse(row.Branch)} ${file}` };
+  })];
+}
+// The first checkpoint whose Status is not ✅, read from the Checkpoints table: its id, After wave and Covers cells.
+function nextLine(ctx) {
+  const at = ctx.checkpoints.findIndex(c => c.status !== '✅');
+  if (at < 0) return { known: true, line: 'NEXT none' };
+  const row = ctx.checkpointRows[at], covers = row.Covers === undefined ? null : row.Covers.split(',').map(s => s.trim()).filter(Boolean).join(',') || '—';
+  return { known: covers !== null, line: `NEXT ${collapse(row.Checkpoint)} after wave ${ctx.checkpoints[at].wave} covers ${covers ?? 'UNKNOWN: no Covers column'}` };
+}
+// Every Notes marker in its recorded form, in the order written: the strict reading of each `FAMILIES` pair, never
+// `readNotes`' summary of them.
+const markersOf = text => Object.values(FAMILIES).flatMap(([, strict]) => [...text.replace(/\s+/g, ' ').matchAll(strict)])
+  .sort((a, b) => a.index - b.index).map(m => m[0]);
+// The newest row of PROGRESS's Session log, the last of its table, printed as written: the LOG.md heading it names is
+// free text, so the row is never parsed.
+function sessionLine(progress) {
+  if (progress === null) return { known: false, line: 'SESSION UNKNOWN PROGRESS.md cannot be read at the integration tip' };
+  const lines = progress.split(/\r?\n/), heads = lines.flatMap((l, i) => /^## Session log\s*$/.test(l) ? [i] : []);
+  if (heads.length !== 1) return { known: false, line: `SESSION UNKNOWN PROGRESS.md holds ${heads.length} Session log headings, not one` };
+  const end = lines.findIndex((l, i) => i > heads[0] && /^#{1,2} /.test(l));
+  const rows = lines.slice(heads[0] + 1, end < 0 ? lines.length : end).filter(l => l.startsWith('|'));
+  if (rows.length < 2 || !/^\|[\s:|-]+\|$/.test(rows[1])) return { known: false, line: 'SESSION UNKNOWN the Session log holds no table' };
+  return { known: true, line: rows.length > 2 ? `SESSION ${rows[rows.length - 1]}` : 'SESSION none' };
+}
+// `env` and `listWorktrees` as `reconcileRows` takes them. The exit code is the digest's own: 2 when a line it marks
+// unknown is printed, never a pattern over the printed text, since a cell or a row it prints may hold the word.
+export function reconcileDigest({ repo, ledger, integration, protocolText, env, listWorktrees = worktrees }) {
+  let verdicts;
+  try { verdicts = loadTable(protocolText); } catch (e) { if (e instanceof Unknown) return { code: 2, lines: [TABLE_DRIFT] }; throw e; }
+  if (!validId(ledger) || !validFullRef(integration) || !integration.startsWith('refs/heads/')) return { code: 2, lines: [USAGE_REFS] };
+  const ctx = { repo, integration, firstParent: null, options: env ? { env } : {} }, printed = [];
+  const say = ({ known, line }) => printed.push({ known, line });
+  try {
+    ctx.tip = resolve(repo, integration, ctx.options);
+    if (ctx.tip === null) throw new Unknown('integration', `${integration} does not exist`);
+    const progress = readBlob(repo, ctx.tip, `.agents/changes/${ledger}/PROGRESS.md`, [], ctx.options), state = stateOf(progress);
+    const accepted = MODES.some(([re]) => re.test(state));
+    const why = progress === null ? 'PROGRESS.md cannot be read at the integration tip' : state === 'repeated' ? 'the State line is repeated' : `State ${state} is in no accepted form`;
+    say({ known: accepted, line: `DIGEST ${ledger} State=${accepted ? state : 'UNKNOWN'} tip=${ctx.tip.slice(0, 7)}${accepted ? '' : ` (${why})`}` });
+    const trees = listWorktrees({ repo, ...ctx.options });
+    say(holderLine(trees, integration));
+    try {
+      const model = readLedger(ctx, ledger);
+      useTrees(ctx, trees);
+      const { results } = rowResults(ctx, model, verdicts);
+      waveLines(ctx).forEach(say);
+      say(nextLine(ctx));
+      for (const { row, known, line } of results) {
+        say({ known, line });
+        for (const marker of markersOf(row.Notes)) say({ known: true, line: `  ${marker}` });
+      }
+    } catch (e) {
+      if (!(e instanceof Unknown)) throw e;
+      say({ known: false, line: `UNKNOWN ${e.fact}: ${e.why}` });
+    }
+    say(sessionLine(progress));
+    return { code: printed.every(p => p.known) ? 0 : 2, lines: printed.map(p => oneLine(p.line)) };
   } catch (e) {
     if (e instanceof Unknown) return { code: 2, lines: [oneLine(`UNKNOWN ${e.fact}: ${e.why}`)] };
     return { code: 2, lines: [oneLine(`UNKNOWN ${e.message}`)] };
@@ -574,13 +698,13 @@ export function reconcileCli(args, protocolFile = PROTOCOL) {
   let options;
   try {
     if (operation === 'discovery') options = parseFlags(rest, ['repo'], ['repo']);
-    else if (operation === 'rows') options = parseFlags(rest, ['repo', 'ledger', 'integration'], ['repo', 'ledger', 'integration']);
+    else if (operation === 'rows' || operation === 'digest') options = parseFlags(rest, ['repo', 'ledger', 'integration'], ['repo', 'ledger', 'integration']);
     else throw new Error();
   } catch { return { code: 2, lines: ['UNKNOWN usage: unknown operation, or an unknown, missing or duplicate flag; use --help'] }; }
   if (operation === 'discovery') return summarize(discovery({ repo: options.repo }));
   let protocolText;
   try { protocolText = fs.readFileSync(protocolFile, 'utf8'); } catch { return { code: 2, lines: [TABLE_DRIFT] }; }
-  return reconcileRows({ ...options, protocolText });
+  return (operation === 'rows' ? reconcileRows : reconcileDigest)({ ...options, protocolText });
 }
 
 if (isMain(import.meta.url)) {

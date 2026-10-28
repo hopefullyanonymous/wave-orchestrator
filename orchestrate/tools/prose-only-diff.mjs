@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Classifies a polish diff between two commits in ONE line: PROSE-ONLY when every changed
-// JavaScript file differs only in its prose comments, CODE <path> or UNKNOWN <reason> otherwise.
+// JavaScript file differs only in its prose comments, CODE <path> (<cause>) or UNKNOWN <reason> otherwise.
 // It reads git objects and writes nothing. A path that is not JavaScript is counted and left to
 // the path rule; it never makes the verdict PROSE-ONLY on its own.
 import fs from 'node:fs';
@@ -247,10 +247,12 @@ export function scan(source) {
 // comments goes (or stays as an empty line where `lines` keeps the line structure a kept
 // comment counts on); spaces and tabs before a comment that ends its line go with it; a block
 // comment inside a line becomes one space, and one that spans lines leaves its line break.
-export function remainder(source, comments, lines) {
+// `pieces`, when given, collects each output line with the 1-based source line it came from.
+export function remainder(source, comments, lines, pieces) {
   const removed = comments.filter(c => !c.kept);
   let out = '', k = 0;
-  for (let start = 0; ;) {
+  const emit = (piece, line) => { out += piece; if (pieces && piece) pieces.push({ piece, line }); };
+  for (let start = 0, line = 1; ; line++) {
     let end = start;
     while (end < source.length && !isTerminator(source[end])) end++;
     const eol = source.startsWith('\r\n', end) ? '\r\n' : source.slice(end, end + 1);
@@ -270,8 +272,8 @@ export function remainder(source, comments, lines) {
       }
     }
     if (touched && /^[ \t]*$/.test(source.slice(lastCut, end))) text = text.replace(/[ \t]+$/, '');
-    if (!touched || text !== '') out += text + eol;
-    else if (lines) out += eol;
+    if (!touched || text !== '') emit(text + eol, line);
+    else if (lines) emit(eol, line);
     if (!eol) return out;
     start = end + eol.length;
   }
@@ -280,6 +282,18 @@ export function remainder(source, comments, lines) {
 // One file's two sides: PROSE-ONLY when their remainders are identical, CODE when not, UNKNOWN
 // when either side cannot be read with certainty.
 export function compareSources(before, after) {
+  const { verdict, reason } = classifySources(before, after);
+  return verdict === 'UNKNOWN' ? { verdict, reason } : { verdict };
+}
+// Why one file reads CODE, { cause, line }, or null when it does not; the three causes are
+// decided in the order of `classifySources` below.
+export function codeCause(before, after) {
+  const result = classifySources(before, after);
+  return result.verdict === 'CODE' ? { cause: result.cause, line: result.line } : null;
+}
+// The 1-based line holding `index`, a CRLF, a lone CR, LS and PS each counting as one break.
+const lineAt = (source, index) => 1 + (source.slice(0, index).match(new RegExp('\\r\\n|' + TERMINATOR.source, 'g'))?.length ?? 0);
+function classifySources(before, after) {
   const sides = [['base', before], ['head', after]].map(([side, source]) => {
     if (source.includes('\0')) return { side, reason: 'a NUL byte (binary)' };
     const scanned = scan(source);
@@ -292,7 +306,19 @@ export function compareSources(before, after) {
   // so either side carrying one keeps every line where it stands.
   const lines = sides.some(s => s.comments.some(c => c.kept));
   const [a, b] = sides.map(s => remainder(s.source, s.comments, lines));
-  return { verdict: a === b ? 'PROSE-ONLY' : 'CODE' };
+  if (a === b) return { verdict: 'PROSE-ONLY' };
+  // The cause, first that holds: the remainders differ with every comment stripped (code changed),
+  // or with the kept comments kept (kept comment changed); else only the line structure a kept
+  // comment keeps differs. Neither comparison keeps lines, so each names the line that changed:
+  // the head side's, or the base side's where the head has none (a deletion at the end).
+  for (const [cause, keep] of [['code changed', () => false], ['kept comment changed', c => c.kept]]) {
+    const [x, y] = sides.map(s => { const pieces = []; remainder(s.source, s.comments.map(c => ({ ...c, kept: keep(c) })), false, pieces); return pieces; });
+    const at = Array.from({ length: Math.max(x.length, y.length) }, (_, i) => i).find(i => x[i]?.piece !== y[i]?.piece);
+    if (at !== undefined) return { verdict: 'CODE', cause, line: (y[at] ?? x[at]).line };
+  }
+  // Reached only where a side holds a kept comment: the head's first, else the base's.
+  const side = sides[1].comments.some(c => c.kept) ? sides[1] : sides[0];
+  return { verdict: 'CODE', cause: 'line structure kept for a non-prose comment', line: lineAt(side.source, side.comments.find(c => c.kept).start) };
 }
 
 export function rawChanges(text) {
@@ -321,6 +347,10 @@ export function proseOnlyDiff({ repo, base, head, ...options }) {
   if (!diff.ok) return unknown('git diff did not run');
   return classifyRaw(repo, diff.text, options);
 }
+// A file-level change's cause, the first that applies: --no-renames above makes a rename a
+// deletion and an addition.
+const fileCause = ({ from, to }) => from === '000000' ? 'added' : to === '000000' ? 'deleted'
+  : [from, to].includes('120000') ? 'link' : [from, to].includes('160000') ? 'submodule' : 'mode changed';
 // The verdict for one `git diff --raw -z` output; blobs are read from `repo`.
 export function classifyRaw(repo, raw, options = {}) {
   let changes;
@@ -331,18 +361,20 @@ export function classifyRaw(repo, raw, options = {}) {
     if (!JAVASCRIPT.test(change.path)) other++;
     // Never prose: a mode that changes (added from 000000, deleted to 000000, turned into a link
     // or re-moded), or a path that is not a regular file on either side.
-    else if (change.from !== change.to || !REGULAR.test(change.from)) code.push(change.path);
+    else if (change.from !== change.to || !REGULAR.test(change.from)) code.push({ path: change.path, cause: 'code changed: ' + fileCause(change) });
     else {
       const [a, b] = [change.before, change.after].map(sha => blobText(repo, sha, options));
-      const result = a.reason || b.reason ? { verdict: 'UNKNOWN', reason: `${a.reason || b.reason} (${a.reason ? 'base' : 'head'})` } : compareSources(a.text, b.text);
+      const result = a.reason || b.reason ? { verdict: 'UNKNOWN', reason: `${a.reason || b.reason} (${a.reason ? 'base' : 'head'})` } : classifySources(a.text, b.text);
       if (result.verdict === 'UNKNOWN') doubts.push(`${change.path}: ${result.reason}`);
-      else if (result.verdict === 'CODE') code.push(change.path);
+      else if (result.verdict === 'CODE') code.push({ path: change.path, cause: `${result.cause} at :${result.line}` });
       else prose++;
     }
   }
   const others = other ? `; ${other} other path(s) left to the path rule` : '';
   if (doubts.length) return unknown(doubts[0]);
-  if (code.length) return { code: 1, line: `CODE ${code[0]}` };
+  // The first file whose code changed, so a kept-comment cause is never named while one did.
+  const named = code.find(c => c.cause.startsWith('code changed')) ?? code[0];
+  if (named) return { code: 1, line: `CODE ${named.path} (${named.cause})` };
   if (!prose) return unknown(`no JavaScript file changed${others}`);
   return { code: 0, line: `PROSE-ONLY ${prose} file(s)${others}` };
 }
@@ -351,15 +383,23 @@ const HELP = `prose-only-diff.mjs --repo <repo> --base <ref> --head <ref>
 Classifies the committed diff from <base> to <head>. Each changed JavaScript file (.js, .cjs, .mjs) is
 compared with its prose comments stripped from both sides; every other path is counted and left to the
 path rule. Prints ONE line: PROSE-ONLY <n> file(s), with "; <m> other path(s) left to the path rule" when
-there are any, exits 0 when every JavaScript remainder is byte-identical; CODE <path>, the first
+there are any, exits 0 when every JavaScript remainder is byte-identical; CODE <path> (<cause>), a
 JavaScript file whose remainder differs, exits 1; UNKNOWN <reason> exits 2. UNKNOWN outranks CODE, and
-CODE outranks PROSE-ONLY. Fails closed: a comment is prose only when it is shaped like a sentence (two words
-or more, a plain first word, no colon in the second, no word:word or word=word join, no @name or $name) and
-names or is shaped like no tool directive (eslint, istanbul, c8, @ts-, prettier, node:coverage and others)
-and carries no JSDoc tag; every other comment is code, so an unlisted tool's directive is too, though one
-written in plain words alone (nosec B101) reads as prose. An added, deleted or re-moded file is code too; a
-string, template literal or regular expression it cannot delimit with certainty, JSX, a binary, and a
-diff with no JavaScript file are UNKNOWN. Read-only: it reads git objects and writes nothing.`;
+CODE outranks PROSE-ONLY. The cause is the first that holds: "code changed at :<line>" when the sides
+differ with every comment stripped; "kept comment changed at :<line>" when they differ with the comments
+kept as code kept; else "line structure kept for a non-prose comment at :<line>", the line of the head's
+first kept comment, since any kept comment keeps every line where it stands. The line is the head's first
+line that differs, or the base's where the head has none; CRLF, CR, LS and PS each end one line. An added,
+deleted, linked, submodule or re-moded file reads "code changed: <added | deleted | link | submodule | mode
+changed>", the first that applies; a rename is a deletion and an addition. The file named is the first in
+path order whose cause starts "code changed", else the first CODE file. Trailing whitespace after a kept
+comment reads "kept comment changed". Fails closed: a comment is prose only when it is shaped like a
+sentence (two words or more, a plain first word, no colon in the second, no word:word or word=word join,
+no @name or $name) and names or is shaped like no tool directive (eslint, istanbul, c8, @ts-, prettier,
+node:coverage and others) and carries no JSDoc tag; every other comment is code, so an unlisted tool's directive is too, though one
+written in plain words alone (nosec B101) reads as prose. A string, template literal or regular
+expression it cannot delimit with certainty, JSX, a binary, and a diff with no JavaScript file are
+UNKNOWN. Read-only: it reads git objects and writes nothing.`;
 
 export function proseOnlyDiffCli(args) {
   if (args.length === 1 && args[0] === '--help') return { code: 0, line: HELP };

@@ -152,9 +152,16 @@ async function busy($, w) {
 }
 const ledger = async $ => $.command.run({ command: 'ledger', args: '' })
 const toolRuns = (w, tool) => w.runs.filter(argv => argv[1].endsWith('/tools/' + tool)).length
-// Every Text of a drawing in order, a dim one led by `dim: `.
-const texts = async ui => (await ui.findAll({ type: 'Text' })).map(t => (t.props.dimColor === true ? 'dim: ' : '') + t.text)
-const mountPane = ($, surface) => $.ui.mount({ plugin: 'orchestrate-mod', surface, component: 'Pane', props: PANE, requestId: 'ledger' })
+// Every Text of a drawing in order, a dim one led by `dim: `, but for the Texts the Buttons hold as labels: they
+// come last, in the buttons' row.
+const texts = async ui => {
+  const held = (await ui.findAll({ type: 'Button' })).reduce((n, b) => n + b.children.filter(c => c?.type === 'Text').length, 0)
+  const all = await ui.findAll({ type: 'Text' })
+  return all.slice(0, all.length - held).map(t => (t.props.dimColor === true ? 'dim: ' : '') + t.text)
+}
+// Every Text of a drawing, labels included, as `[text, color, dim]`, `color` null where it names none.
+const inks = async ui => (await ui.findAll({ type: 'Text' })).map(t => [t.text, t.props.color ?? null, t.props.dimColor === true])
+const mountPane = ($, surface, props = PANE) => $.ui.mount({ plugin: 'orchestrate-mod', surface, component: 'Pane', props, requestId: 'ledger' })
 const mountBand = ($, surface, props = BAND) => $.ui.mount({ plugin: 'orchestrate-mod', surface, component: 'AbovePrompt', props })
 // The pane's Texts from the integration line on: what a test changes in the rows, agents, conductor and costs.
 const body = lines => lines.slice(lines.indexOf(INTEGRATION) + 1)
@@ -174,6 +181,34 @@ describe('the pane', () => {
       await ui.unmount()
     }
   })
+
+  // The terminal fills a docked pane with the theme's sidebar colour and leaves plain text the terminal's own: a
+  // light ANSI theme in a dark terminal drew both the same. An inline pane has no fill, and the desktop its own look.
+  test('docked on the terminal, every plain line and both buttons\' labels take the theme\'s text colour; dim lines keep the dim', async ($, on) => {
+    const w = world(on)
+    await busy($, w)
+    await ledger($)
+    const ui = await mountPane($, 'terminal')
+    const found = await inks(ui)
+    expect(found.filter(([, , dim]) => dim).map(([text]) => text)).toEqual(['    merged at fb69885', '    branch feat/c: not found'])
+    expect(found.filter(([, color, dim]) => (dim ? color !== null : color !== 'text'))).toEqual([])
+    expect((await ui.findAll({ type: 'Button' })).map(b => [b.props.label, b.children.map(c => [c.type, c.props.color, c.children])]))
+      .toEqual([['refresh', [['Text', 'text', ['refresh']]]], ['close', [['Text', 'text', ['close']]]]])
+    expect(await texts(ui)).toEqual([HEADER, asOf(T0 + 12 * MIN), INTEGRATION, ' ', ...ROWS, ' ', ...AGENTS, CONDUCTOR, COSTS])
+    await ui.unmount()
+  })
+  for (const [label, surface, placement] of [['inline on the terminal', 'terminal', 'inline'], ['docked on the desktop', 'desktop', 'dock']]) {
+    test(label + ', no Text names a colour and the buttons hold only their labels', async ($, on) => {
+      const w = world(on)
+      await busy($, w)
+      await ledger($)
+      const ui = await mountPane($, surface, { ...PANE, placement })
+      expect((await inks(ui)).filter(([, color]) => color !== null)).toEqual([])
+      expect((await ui.findAll({ type: 'Button' })).map(b => [b.props.label, b.children])).toEqual([['refresh', []], ['close', []]])
+      expect(await texts(ui)).toEqual([HEADER, asOf(T0 + 12 * MIN), INTEGRATION, ' ', ...ROWS, ' ', ...AGENTS, CONDUCTOR, COSTS])
+      await ui.unmount()
+    })
+  }
 
   test('registers /ledger at session.start, to run at once mid-turn', async ($, on) => {
     const w = world(on)
@@ -268,6 +303,20 @@ describe('the pane', () => {
       await ui.unmount()
     }
   })
+
+  // The ledger fixture above carries no clear threshold, so every other test draws the default.
+  for (const [label, clearThreshold, safe] of [['a clear threshold of 250K', { tokens: 250000, source: 'contract' }, '250K'],
+    ['a clear threshold that carries an error', { error: 'lines 5, 6 each open with **Clear threshold**' }, '300K']]) {
+    test('a ledger with ' + label + ': the conductor line\'s safe point is at ' + safe, async ($, on) => {
+      const w = world(on, { view: viewOf([ledgerOf({ clearThreshold })]) })
+      await busy($, w)
+      for (const surface of SURFACES) {
+        const ui = await mountPane($, surface)
+        expect(body(await texts(ui)).slice(-2)).toEqual(['conductor  412K of 1M (41%) · safe point at ' + safe, COSTS])
+        await ui.unmount()
+      }
+    })
+  }
 })
 
 describe('unknown is never zero', () => {

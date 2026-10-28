@@ -28,7 +28,9 @@ First word of the arguments:
 - `new <description>` → scaffold a ledger
 - `continue [<id>]` → run the session algorithm on the active ledger, or on ledger `<id>`
   when one is named; `continue <id> after-clear` is the form orchestrate-mod sends after it
-  clears the conversation (protocol.md §Session algorithm step 8)
+  clears the conversation, and `continue <id> in-place <reason>` the one it sends in place of a
+  skipped clear, which carries on with no boot when the tip is unchanged (protocol.md
+  §Session algorithm step 8)
 - `status` → read-only reconcile + report
 - `close` → process smoke verdicts / finish the change
 - empty or anything else → run Discovery, then route by message shape: a smoke verdict
@@ -123,7 +125,8 @@ ledger's gates are its pinned directory's, and a changed directory stops it at b
 
 - Statuses are claims; **git is truth** — reconcile before believing any PROGRESS row.
   The orchestrator never switches the main checkout: it reads with `git show` and writes
-  through an integration worktree under the session scratchpad.
+  through an integration worktree under the contract's worktree root (its boot step 2 and
+  Git model), or under the session scratchpad for a contract that names none.
 - One branch per batch, cut from the integration branch when its wave opens. Never
   commit to the default branch, never push. The orchestrator merges REVIEWED batches
   into the integration branch; anything merges toward the default branch only per the
@@ -201,8 +204,9 @@ table with weights and file fences; item→batch coverage) → structure for thr
 disjointness, build the wave map (widest safe waves), classify each batch hands-on vs
 machine-verifiable and each smoke step `Runner: agent | human`, place the smoke
 checkpoints (fewest possible — hands-on waves + one final) → per-batch census (one
-`census` agent per drafted batch; each item its report opens with is recorded in LOG.md
-as carried or rejected, per scaffolding.md) → backlog sweep (propose
+`census` agent per drafted batch, given its fence; each item its report opens with is recorded in LOG.md
+as carried or rejected, once the lines folded from it in other words and the fixes chosen for
+what it only flagged have gone back to that agent, per scaffolding.md) → backlog sweep (propose
 eligible fold-ins per scaffolding.md; the user picks at plan approval) → plan checks on
 a draft (`node "<skill-dir>/tools/scaffold.mjs" --answers <draft answers> --repo <scratch worktree>`
 writes the draft ledger into a scratch worktree of the base, and `check-ledger.mjs` runs
@@ -233,7 +237,10 @@ runs all of these at once) → scaffold commit on
    `continue` or `close`; AMBIGUOUS, INCOMPLETE, UNKNOWN, `status` or `none` → ask), else
    exactly one ACTIVE ledger (else ask).
 2. Read the ledger's OWN contract (`00-READBEFORE.md`; legacy names per protocol.md;
-   contract absent → protocol.md fills the gaps, ask before acting on ambiguity).
+   contract absent → protocol.md fills the gaps, ask before acting on ambiguity). A
+   session that orchestrate-mod opened when it cleared the conversation reads the
+   contract's §Boot sequence first, then only what that section names for such a session,
+   or the whole contract when it names nothing for one.
 3. Boot (a pinned contract verifies its skill pin first) + reconcile (for a pinned contract
    `node "<skill-dir>/tools/reconcile.mjs" rows --repo <repo> --ledger <id> --integration <full-ref>`,
    `<skill-dir>` being its pinned directory, if the tool is there) + resume-time
@@ -253,6 +260,8 @@ runs all of these at once) → scaffold commit on
    tools, or the full plain-text script when no usable HTML delivery is available.
    Render the per-batch prompts with `node "<skill-dir>/tools/prompt.mjs"`; the skeletons
    live in [references/subagent-prompts.md](references/subagent-prompts.md).
+4. The final checkpoint's close-out begins with the run-end prose sweep whenever LOG.md
+   holds a `### prose sweep:` heading (protocol.md).
 
 ## Mode: status
 
@@ -277,7 +286,7 @@ Drift corrections happen in `continue`, not here.
    the new report rides that fix-up as additional failure notes); batches the
    user explicitly passed flip ✅; the rest stay 🧪 for the re-run. Smoke-page verdicts
    beyond pass/fail ([references/smoke-page.md](references/smoke-page.md)):
-   **works-but** → named backlog entry, never a failure; **blocked** → correct the
+   **works-but** → a residual the change-complete ruling step decides, never a failure; **blocked** → correct the
    step and re-issue the page, or reclassify as a fail if the app lacks the behavior.
 2. Merge / push / release ONLY on the user's explicit authorization — their exact words
    are the record (a verdict message may carry the authorization; quote it). Verdicts on
@@ -287,7 +296,11 @@ Drift corrections happen in `continue`, not here.
 3. Final checkpoint ✅ → change-complete close-out per protocol.md with the contract's facts: convergence pass
    (when the contract turns it on, a fresh read-only sub-agent classifies every item
    against the tip; otherwise the audit comes from PROGRESS + git and says so), final coverage
-   audit (zero unaccounted items; fold-ins removed from the backlog), distillation (new
+   audit (zero unaccounted items; fold-ins removed from the backlog), the ruling step (every
+   residual of the run on one list committed to LOG.md, ruled once by the user at a STOP,
+   the proposals as defaults; only the user's word registers or rules an item; a ledger
+   with every row ✅ or `⛔ (dropped)` (advisory `👤` rows aside) and no COMPLETE marker
+   resumes the change-complete close-out at its first unfinished step), distillation (new
    bug classes → one-line guardrails with pointers; propose retirements past the size
    threshold, never delete unasked; harvest LOG.md learnings), optional release command,
    session-log row marked COMPLETE + `**State**: COMPLETE`, propose deleting merged
@@ -304,6 +317,8 @@ Drift corrections happen in `continue`, not here.
 
 ## Skill files
 
+- [references/backlog.md](references/backlog.md) — the backlog and rulings entry forms,
+  the bar for registering, packs by production file, expiry, reconsideration
 - [references/protocol.md](references/protocol.md) — canonical spec, severity and round
   accounting, legacy interop, degraded environments
 - [references/execution-models.md](references/execution-models.md) — the waved stack:
@@ -316,5 +331,9 @@ Drift corrections happen in `continue`, not here.
   format: filling and publishing
   [references/smoke-page-template.html](references/smoke-page-template.html),
   pre-verified steps, verdict intake and triage
+- [references/ruling-page.md](references/ruling-page.md) — the change-complete ruling
+  step's hand-over: the sidecar, building
+  [references/ruling-page-template.html](references/ruling-page-template.html), and
+  checking the user's paste
 - [templates/](templates/) — `00-request.md`, `00-READBEFORE.md`, `01-plan.md`,
   `02-batch.md` (one per batch), `PROGRESS.md`, `LOG.md`

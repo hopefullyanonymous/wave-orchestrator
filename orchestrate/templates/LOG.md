@@ -15,7 +15,8 @@ heading per session (date), one `###` per batch or event. Never edit an earlier 
 
 ## {{DATE}} — scaffold
 
-<!-- What planning decided and why: each census report's opening items, carried (the
+<!-- What planning decided and why: each census report's opening items and its send-back's
+     answer, carried (the
      batch-file line) or rejected (the reason); pre-flight findings and how each was resolved,
      backlog fold-ins considered and rejected (with the reason), wave-map reasoning beyond
      the plan's one-liners, environment facts verified. Later sessions append below. -->

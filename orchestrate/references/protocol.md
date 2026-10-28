@@ -45,18 +45,23 @@ ledgers may be parked in a sibling `.agents/archive/` directory; discovery never
   that edits version files, the changelog, PROGRESS or LOG. Never switches the main
   checkout: reads any branch with `git show <branch>:./<path>` (keep the `./` — Git Bash
   on Windows mangles `branch:path`; run it from the repo or worktree root), writes through
-  an integration worktree under the session scratchpad — reusing one `git worktree list`
-  already shows, pruning first if its directory is gone.
+  an integration worktree under the contract's worktree root (its boot step 2 and Git
+  model), or under the session scratchpad for a contract that names none — reusing one
+  `git worktree list` already shows, pruning first if its directory is gone.
   The orchestrator never polls: it never calls `ReadNotifications` to wait for a sub-agent
   and never sleeps; when the only remaining work waits on sub-agents it ends the turn, and
   the task notification resumes it.
 - **Implementer** — a sub-agent given one batch. Codes inside the file fence in the
   batch's isolated worktree, ticks the batch checklist, commits on the batch branch (one
-  commit per fold-in item). Wave siblings run concurrently. Reports in the fixed shape:
-  line 1 `DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED`; line 2 `NONCE <nonce>` (the
-  nonce its rendered prompt ends with); an evidence block (each validation run's
-  `validate.mjs` line and exit code; SHAs; checklist n/m); ≤40 lines of
-  prose. `NEEDS_FENCE` / `BLOCKED` use Expected / Found / Why it matters / How to proceed.
+  commit per fold-in item). Wave siblings run concurrently. Its full report goes with the
+  Write tool to the file its rendered prompt names, under the session scratchpad and never
+  inside a worktree or the repository, in the fixed shape: its heading
+  `### B<NN> R<k> <role> findings`; the status, one of
+  `DONE | DONE_WITH_CONCERNS | NEEDS_FENCE | BLOCKED`; `NONCE <nonce>` (the nonce its
+  rendered prompt ends with); an evidence block (each validation run's `validate.mjs` line
+  and exit code; SHAs; checklist n/m); ≤40 lines of prose. `NEEDS_FENCE` / `BLOCKED` use Expected / Found / Why
+  it matters / How to proceed. The final message is four lines, or three without a nonce:
+  the status, `NONCE <nonce>`, `checklist <n>/<m>`, the file's path.
 - **Reviewer** — ONE fresh read-only sub-agent per batch per round, never the
   implementer, never reused. Maps every hunk to a batch item (unmapped = scope creep =
   reject; the batch file's ticks are exempt), verifies acceptance criteria, runs
@@ -114,7 +119,8 @@ checkpoint is recorded (`escaped` counts every fail across re-runs).
   recorded extension), never the class.
 - **ASK** — in-fence, about the batch's OWN artifacts (its new tests' strength, smoke-step
   prose, comments, a doc sweep it owns), no production behavior change. Rides under
-  `SHIP` as a list. Polish pass: resume the same implementer with the pointer to its
+  `SHIP` as a list. Polish pass: resume the same implementer (a fresh one when the render
+  prints `FRESH` — `subagent-prompts.md` §Spawning rules) with the pointer to its
   rendered `polish` prompt (the findings file by path); it appends `- [ ] polish:`
   items to its checklist, does them, commits; closes mechanically (fence check +
   validations; polish commits touch only test/doc/prose paths — a production file touched
@@ -160,12 +166,21 @@ checkpoint is recorded (`escaped` counts every fail across re-runs).
   polish passes, scoped re-reviews and `NEEDS A CLOSER LOOK` checks never do — nor does a
   `FIX FIRST` a scoped re-review returns: its bound is the polish-discard rule above, not
   the cap.
+- Each item of a reviewer's `SWEEP:` list (an out-of-fence prose fix carrying its verified
+  replacement text) is recorded for the run-end prose sweep (§Session algorithm step 8) by a
+  one-line LOG.md heading, `### prose sweep: B<NN> R<k> SWEEP <n>`, which names that
+  findings entry's heading and, as `<n>`, the item's 1-based position in the `SWEEP:` list;
+  the item's text is never re-typed. A prose finding outside the fence without verified
+  wording keeps its present route, and so does a `SWEEP` item recorded after the sweep has
+  merged (a fix-up's reviewer at a re-issue, say): no second sweep runs, and the item takes
+  the backlog route with its findings heading named.
 - Round 1: resume the SAME implementer with the pointer to its rendered fix-round prompt
   (the findings file by path, after the LOG append — §Session algorithm step 6); a fresh re-review
   verifies the fixes and scans only the fix diff. Reviewers are fresh every round. An
-  agent gone after a crash → fresh, at the first unticked item. Past about 400K tokens of
-  implementer context, round 1 goes to a fresh implementer with its rendered `rework`
-  prompt instead (`subagent-prompts.md` §Spawning rules).
+  agent gone after a crash → fresh, at the first unticked item. When the fix-round render
+  prints `FRESH` (implementer context at or past the renderer's line), round 1 goes to a
+  fresh implementer with its rendered `rework` prompt instead (`subagent-prompts.md`
+  §Spawning rules).
 - The SECOND `FIX FIRST`: `⛔ defective` (finding open, not green) or `⛔ green, residual
   finding open (<severity>)`. Both stay out of integration; once the wave's other members
   are gated and integrated the session stops instead of opening the next wave, quotes the
@@ -295,7 +310,8 @@ the same fresh semantic reviewer gate. No helper or fallback changes round caps.
 - An **integration branch** (default: the scaffold branch `chore/<slug>-ledger`)
   accumulates the change. One branch per batch, cut from the integration tip when the
   batch's wave opens; wave members run concurrently, each implementer in an isolated
-  worktree under the session scratchpad.
+  worktree under the contract's worktree root (its boot step 2 and Git model), or under
+  the session scratchpad for a contract that names none.
 - **Integration procedure, per batch**: `git merge-tree --write-tree <integration>
   <batch>` as a dry run — a conflict is STOP AND INVESTIGATE (fence violation, unrecorded
   fence extension, or a ledger file edited on both sides; git reports the conflict, not
@@ -370,6 +386,10 @@ to the batch file's notes on the integration branch — for a running implemente
 which also carries it — and each opening item is recorded in LOG.md as carried or rejected; a
 correction that needs a path outside the fence passes this section's test first, and one that adds a
 checklist item or an acceptance criterion needs the user's words, recorded verbatim in PROGRESS.
+Before a correction is committed, the lines it writes in words other than the report's, and a fix
+chosen for a problem the report only flagged, go back to the same `census` agent by
+`scaffolding.md` step 3's send-back, and the prompt of the re-run keeps that step's rule on what it
+may leave out.
 
 ### Complete checkpoint inputs
 
@@ -467,6 +487,8 @@ repair touched; the QA runner re-runs it before the page is re-issued.
 **Delivery.** The batch files' smoke steps are canonical. Use the newest committed
 `smoke-*.html` in the ledger as the page's format and delivery base (or the session's
 own template), update it for this checkpoint, and commit it as `smoke-<Cn>.html`.
+The first checkpoint, with no committed page in the ledger, takes its sidecar's form from
+smoke-page.md §Sidecar shape, never from an archived ledger.
 A `smoke-<Cn>.json` sidecar beside the page is the page's source: change the sidecar
 and regenerate, commit both, and never hand-edit one of them alone.
 Before editing a re-issue, preserve the last issued sidecar as a temporary baseline
@@ -610,6 +632,10 @@ prints as `UNKNOWN` is reconciled by hand from this table.
 Prune worktrees of integrated batches (`git worktree remove`). Log every
 reconciliation: one line in the PROGRESS Session log, detail in LOG.md.
 
+At the FINAL checkpoint the Close-out unfinished row's close-out begins with the run-end
+prose sweep whenever LOG.md holds a `### prose sweep:` heading, resumed from its branch by
+§Session algorithm step 8's adoption rule.
+
 Before any polish pass or resume at a `SHIP … asks=` tip whose batch file lists no
 `polish:` item yet, its worktree clean or dirty, the orchestrator completes the list
 commit, as §Severity and round accounting says for a smoke-step ASK.
@@ -655,7 +681,9 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
      the same mini-batch on `fix/<batch>-tip` (`<batch>` = the last batch merged before
      the red) with the failing output as the spec; once green, return to step 7 or step 4
      — no 🧪, no STOP. Failing review twice → rows keep their status, the tip stays red
-     (no further merges).
+     (no further merges). A tip the run-end prose sweep's merge turned red (step 8) takes
+     this repair, the sweep counting as the last batch's merge, and once green the run
+     returns to the close-out, not to step 7 or 4.
    - **Failed pre-smoke step** (step 8): `fix/<batch>-presmoke-<step>`; failing review
      twice → the step is issued as a HUMAN step carrying the failure note.
    - **Pending markers**: spawning a `-tip`/`-presmoke` repair writes `tip repair
@@ -691,8 +719,23 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
    | capped `-tip` repair | third round on the repair's own branch; `FIX FIRST` again → capped, marker re-written | trial-validate, then merge only if green (the open finding → backlog + smoke step); trial red → no merge, stays capped, marker re-written, ask again | reviewed revert mini-batch `fix/<batch>-revert` of the offending merge; that batch → `⛔ (dropped)`, items → backlog |
    | capped `-presmoke` repair | as above | the human step stands; residual → backlog | as ship; the repair branch is deleted (the recorded drop is the authorization) |
    | `❌ (fix-up capped)` | third round on the fix-up's own branch; `SHIP` → row ❌ and the fix-up proceeds (dry run → merge → tip validation → 🧪 → re-issue); `FIX FIRST` again → capped, marker re-written | trial-validate, then merge only if green; indicted rows → 🧪; re-issue with the failing step annotated as a known residual (backlog) | reviewed `fix/<batch>-revert` of the indicted batch's merge; that batch → `⛔ (dropped)`; the rest → 🧪 for the re-issue |
+
+   Wherever this document routes an item to the backlog — this table's cells, §Severity and
+   round accounting's discarded polish and its `SWEEP` items that keep or take the backlog
+   route, the Status legend's `⛔ (dropped)` batch, a works-but verdict, the convergence
+   pass, step 8's run-end prose sweep returning an item or its reviewer's `FIX FIRST`
+   reverting one, and any other dropped item — the orchestrator records it as a residual: a
+   LOG.md heading `### residual: <source> — <one line>`, `<source>` being `B<NN> R<k>`,
+   `B<NN> R<k> SWEEP <n>`, `B<NN> R1 sweep`, `C<n> step <k>`, `convergence` or `audit`, that
+   names the byte-copied findings heading holding the item's wording, or carries the wording
+   when no findings file holds it; the change-complete ruling step decides it.
 3. If any batch is `🧪`: a checkpoint is open — ask the user for its verdict (passed /
-   failed / waive). Never open the next wave past an unanswered checkpoint.
+   failed / waive). Never open the next wave past an unanswered checkpoint. A checkpoint
+   whose close-out has not run — every member of its wave 🟢, ⛔ or 👤 and its row not
+   🧪/✅, §Recovery's Close-out unfinished row — goes to step 8's per-checkpoint close-out
+   before any wave opens. A ledger with every row ✅ or `⛔ (dropped)` (advisory `👤` rows
+   aside) and no COMPLETE marker, met by `continue` or `close`, goes to the change-complete
+   close-out's first unfinished step.
 4. Open the next wave: the earliest wave that still has `⬜` batches (or a recorded
    deferral) whose deps are all `🟢`/`✅`. From the second wave on, before the cut, run the
    `census` agent again for each member whose fence path a test added or changed by an
@@ -704,7 +747,9 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
    as carried or rejected, so every member branch starts from them. A correction that needs a
    path outside the member's fence is first recorded as an extension under §Fence changes'
    test, and one that adds a checklist item or an acceptance criterion needs the user's
-   words, recorded verbatim in PROGRESS. Once a member branch of this wave exists at the
+   words, recorded verbatim in PROGRESS. The lines the census's corrections write in other words,
+   and any fix chosen for what it only flagged, go back to the same agent before they are
+   committed, as §Fence changes says. Once a member branch of this wave exists at the
    integration tip — an open that crashed after its cut began — no census runs again at
    this open, so the cut below adopts the branches cut from the corrected tip.
    From the integration tip: cut every member's branch, create every
@@ -722,7 +767,11 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
    (`--help` lists each role's facts) prints `PROMPT <path> NONCE <nonce>`; spawn the
    agent with this fixed pointer message, `<prompt file>` replaced by that path:
    `Your complete instructions are in the file <prompt file>. Open it with the Read tool before doing anything else and follow it to its last line, which gives your report's exact line 2.`
-   Keep the nonce for the gate (step 6); it never enters the pointer. When the renderer
+   Keep the nonce for the gate (step 6); it never enters the pointer. The roles whose report
+   is a file take two more facts: `reportFile`, the file the orchestrator names under the
+   session scratchpad, and `round`, `1` for a first implementer report, `<k>` for fix round
+   `<k>` or the rework standing in for it, and the `SHIP … asks=` round for a polish report.
+   When the renderer
    is unavailable or refuses (`UNKNOWN …`), the manual procedure is a pasted prompt with
    no nonce line, and every such prompt must be SELF-CONTAINED: the spec text + codebase
    facts from the batch file, the exact file fence, acceptance criteria, the applicable guardrails, the
@@ -735,7 +784,19 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
 6. Gate PER BATCH, as each implementer reports (don't wait for the wave's slowest). A
    report without the status line + evidence block, or with the wrong nonce (line 2 not
    `NONCE <the nonce the renderer printed>`: the agent did not read its prompt to the end),
-   is no report → resume the implementer for it (not a round).
+   is no report → resume the implementer for it (not a round). The roles whose report is a
+   file have it checked with `node "<skill-dir>/tools/prompt.mjs" --report "<file>" --nonce <nonce>`,
+   `<file>` the path on the final message's last line (without `--nonce` for a fix-up or a
+   pasted prompt, which ends with no nonce line); a `REPORT FAIL …` line, or an `UNKNOWN` line
+   naming the report file, is no report, resumed the same way, and only
+   `REPORT <status> checklist <n>/<m>` is a report. A check that does not run, or prints any
+   other `UNKNOWN` line, leaves the rule before it as the manual procedure, read from the
+   file's status, `NONCE` and `EVIDENCE:` lines alone. The orchestrator never reads the
+   report file in full: anything that needs the whole report reads the file itself, and the file reaches
+   LOG.md by the published append (Verdicts, below), its heading the file's first line, in the
+   commit with that gate step's PROGRESS update. No later prompt takes that file as its
+   findings file, so the recovery form below never meets it, and a resumed implementer
+   writing the same heading a second time is harmless.
    - **6a Fence check (mechanical, orchestrator).** Run the read-only helper above
      or its manual fallback. Worktree clean (`git status
      --porcelain` empty); `git diff --name-status -M <integration>...HEAD`; every
@@ -743,6 +804,27 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
      batch's own file — and within the batch file only ticks, `polish:` appends and a
      recorded Files change. Anything else → no reviewer; `NEEDS_FENCE` → §Fence changes,
      otherwise resume the implementer to revert. Not a round.
+     For each fold-in the plan's §Backlog fold-ins marks `(prose-only)`
+     (`<id> — <text> → B<NN> (prose-only)`; an unmarked fold-in is gated as any other), the
+     orchestrator proves its own commit, the one whose message carries its id: it first reads
+     that commit's paths with `git show --name-only --no-renames --format= <sha>`, and a commit
+     changing only Markdown is decided by the path rule; otherwise the classifier of §Severity and
+     round accounting runs with its `--base` the commit's parent and its `--head` the commit.
+     A cause that begins `code changed`, or a changed path that is neither Markdown nor
+     JavaScript, returns the fold-in: one commit on the batch branch reverses only that
+     commit's own changes (`git revert --no-commit <sha>`, then
+     `git restore --source=HEAD --staged --worktree -- <batch file>` so its tick stays; never
+     the files' parent content, which would also undo the batch's later commits to them), the
+     row's Notes get `fold-in returned: <id> @<sha>`, and the item stays in the backlog.
+     A returned fold-in is not proved a second time at any later 6a of the batch. A
+     revert whose conflicts outlast that restore (a later commit of the batch changed the same
+     lines) is abandoned with `git revert --abort`; the fold-in then stays, and the reviewer
+     reads its commit under the path rule. For a returned fold-in, before the reviewer is
+     rendered, a ledger commit adds to the batch file's notes on the integration branch
+     `[<id>] returned to the backlog at 6a: its checklist item and acceptance criterion no longer apply`,
+     so the reviewer holds the batch to the rest. Any other cause keeps the fold-in, the reviewer reading its kept lines under
+     the path rule, and an `UNKNOWN` line keeps the path rule for that commit, which the
+     reviewer applies.
    - **6b Failing-on-base (mechanical, `fix` batches and repairs).** In a temporary
      worktree at the branch's base, run the ledger's per-worktree setup there (skip only if `n/a`),
      then copy over the batch's TEST-ONLY files and run its changed tests: an
@@ -796,7 +878,9 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
    (SHA, reviewer arc, tier, residuals) ending with the metrics token
    `m: rounds=<n> asks=<n> fence-bounces=<n> gate=<findings/prod> tip-red=<0|1>`. A red
    tip → repair mini-batch before any further merge.
-8. Wave closed. If the checkpoint table places a checkpoint here: per-checkpoint close-out (a ⛔
+8. Wave closed. The window at the end of this step, where the conversation may be cleared,
+   opens before a checkpoint's close-out begins.
+   If the checkpoint table places a checkpoint here: per-checkpoint close-out (a ⛔
    member's steps are omitted from the page and appended on re-issue if it later ships) —
    version/changelog per cadence, tip validation, QA runner pre-smoke with evidence,
    covered rows `🟢` → `🧪`, checkpoint-table row, session-log row with the checkpoint's
@@ -807,12 +891,85 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
    → STOP, delivering the checkpoint's COMBINED smoke script per §Smoke checkpoints. Otherwise: go to step 4 and open the next wave in this SAME
    session. Default cadence: run until the next checkpoint — stop early only at `⛔` or
    an unplanned user gate.
+   **Run-end prose sweep.** Whenever LOG.md holds a `### prose sweep:` heading, the FINAL
+   checkpoint's close-out begins with this sweep; plan approval is its standing OK, and it
+   runs alone, so §Fence changes' mid-wave test passes trivially. The orchestrator first
+   commits `prose sweep cut @<sha>` to the session log, `<sha>` the integration tip just
+   before that commit, then cuts `fix/<batch>-prose-sweep` (`<batch>` the last batch merged)
+   AT that SHA, so the branch starts one ledger-only commit behind the tip and a crash after
+   the cut always finds the record; its worktree is `<the contract's worktree root>/sweep`,
+   or under the session scratchpad for a contract that names no root. A branch of that name
+   whose tip equals that SHA is adopted and its items applied; one with commits past it, not
+   yet an ancestor of the integration branch, resumes (the missing items applied, then the
+   check and the reviewer); one with commits past it that is an ancestor is the merged sweep
+   (→ tip validation and the session-log row); any other, one that does not descend from that
+   SHA (`git merge-base --is-ancestor <sha> <branch>` fails: a leftover from before this run),
+   is STOP AND INVESTIGATE. Ancestry alone never proves the merge, since a branch cut and not
+   yet committed to is trivially an ancestor. The orchestrator applies each item's
+   replacement text from its findings entry itself, one commit per item, its subject naming
+   the item's heading, and classifies each item's commit as step 6a proves a prose-only
+   fold-in, a return there reverting that commit and sending the item to the backlog route.
+   The mechanical check is manual: worktree clean, and every changed path, both rename
+   endpoints, one that a recorded item names. ONE fresh reviewer, its prompt written in the
+   scoped re-review's shape (the sweep's changes, the items, duties 1, 2 and 4), has its
+   findings reach LOG.md under `### B<NN> R1 sweep findings` by the published append (step
+   6); its `FIX FIRST` reverts each item it names and sends it to the backlog route — one
+   strike, never a round, never ⛔. Then dry run → merge → tip validation, a red tip going to
+   step 2's tip repair. The sweep being the close-out's first step, a crash in it meets
+   §Recovery's Close-out unfinished row, the rows staying 🟢 and State ACTIVE throughout, and
+   the close-out resumes the sweep from its branch by the adoption rule above (no branch:
+   cut at the recorded SHA). The session-log row records
+   `prose sweep: <n> item(s) @<merge sha>`.
    Compaction happens only at a safe point, never mid-flight: a wave close, the start of a
    checkpoint close-out, or the moment a checkpoint's fix-ups have all merged, before their
    rows go back to 🧪 and the re-issue (never after a capped fix-up's *ship*: its row still
    reads as awaiting a verdict) — each counting only once PROGRESS and LOG are
    committed and no agent is in
-   flight. At a safe point with context past about 300K tokens, the orchestrator posts ONE
+   flight. The compaction rules of this step cover both orchestrate-mod's automatic clear
+   and `/compact`; those about the mod's tool, its answers and the session a clear opens
+   apply only to the clear.
+   At a wave close where the checkpoint table places a checkpoint, the compaction
+   window below opens before the close-out's first step, so a conversation cleared there
+   leaves the whole close-out to the fresh one, and the checkpoint's STOP, which comes
+   after the close-out, never stands in for that window.
+   When this session's tools include `mcp__orchestrate-mod__schedule_clear`
+   (orchestrate-mod's), the orchestrator calls it at every safe point, whatever its context
+   size, with the ledger id and the integration tip's full SHA, once no background
+   command of its own is running either and a committed PROGRESS session-log row names the
+   LOG heading that records the work since the row before it. An answer that begins
+   `scheduled` gives the one line to post: the orchestrator posts it and ends its turn, and
+   the mod clears the conversation two minutes later unless a message arrives first, then
+   runs `/orchestrate continue <id> after-clear`; a mod that finds it cannot clear runs
+   `/orchestrate continue <id> in-place <reason>` in this conversation instead, `<reason>`
+   naming what stopped the clear. That conversation still holds the run: when it sees its own
+   call for that ledger and the integration tip is still the SHA it passed, it posts one line
+   naming the reason and carries on with the step it would take next, with no boot,
+   reconcile or validation; a tip that moved, or a call it no longer sees, has it boot as
+   any `continue` does. A conversation that goes on
+   after a `scheduled` answer, because a message or a notice arrived first, is not cleared
+   and carries on. After an automatic clear, the session that
+   `/orchestrate continue <id> after-clear` opened follows the boot its contract's
+   §Boot sequence gives such a session; under a contract that gives none, it boots as any
+   `continue` does. Its first message to the user opens with one line
+   saying it continued after an automatic clear and naming the LOG heading that the newest
+   session-log row names. It ignores a task notice for a task it did not start, whose
+   output file sits under another session's folder. An answer that begins `not needed`
+   (the context is under the ledger's clear threshold) has the orchestrator carry on at
+   once, with no line and no timer. A `declined` answer that names an agent `waiting`
+   (returned its report; a command of its own still runs), whose report is in while the ledger
+   awaits nothing from that command, has the orchestrator stop that agent with TaskStop on
+   the agent's id — it ends `killed` with its shell and runs no turn, where TaskStop on the
+   shell's id would resume it for one more turn whose report lands in whatever conversation
+   is current — and then call the tool once more. If the answer is `declined` and no such
+   retry applies, or the retry's answer is `declined` too, or the answer begins as none of
+   those three, or there is no such tool, the orchestrator takes the timer path: it first
+   reads its own context size as `scaffolding.md`
+   §Preconditions step 5 reads it and compares it with the contract's
+   `**Clear threshold**` line (300K for a contract without one), carrying on as at
+   `not needed` when the size is under it. An unknown context size or an unreadable
+   threshold, the mod's decline saying the ledger's Clear threshold line cannot be read
+   included, is never treated as below the threshold.
+   At or past the threshold, or when either cannot be read, the orchestrator posts ONE
    line: its context size, the time it will continue, and the answers: `/compact` now (then
    wait for the timer, or say `continue`), or `go`. It then starts a 10-minute timer, a
    background Bash `sleep 600`, and ends its turn; the first of the timer's completion
@@ -820,25 +977,9 @@ commit, as §Severity and round accounting says for a smoke-step ASK.
    notice shows the task's description, not its output, so the description carries the
    reminder, verbatim:
    `Compaction window over: if this session was compacted, run the boot sequence and the reconcile before any transition`.
-   When this session's tools include `mcp__orchestrate-mod__schedule_clear`
-   (orchestrate-mod's), the orchestrator calls it at that point in place of that line and
-   the timer, with the ledger id and the integration tip's full SHA, once no background
-   command of its own is running either and a committed PROGRESS session-log row names the
-   LOG heading that records the work since the row before it. An answer that begins
-   `scheduled` gives the one line to post: the orchestrator posts it and ends its turn, and
-   the mod clears the conversation two minutes later unless a message arrives first, then
-   runs `/orchestrate continue <id> after-clear`; a mod that finds it cannot clear runs
-   `/orchestrate continue <id>` in this conversation instead. Any other answer, or no such
-   tool, takes the line and the timer above. A conversation that goes on after a
-   `scheduled` answer, because a message or a notice arrived first, is not cleared and
-   carries on. One that `/orchestrate continue <id> after-clear` opened boots as any
-   `continue` does; its first message to the user opens with one line saying it continued
-   after an automatic clear and naming the LOG heading that the newest session-log row
-   names, and it ignores a task notice for a task it did not start, whose output file sits
-   under another session's folder.
    A compacted session is resumed early only through `continue`, which starts this
    algorithm at step 1. A STOP that already waits for the user (⛔ verdicts, checkpoints),
-   past about 300K, carries the context size and `/compact` now in its message
+   at or past the threshold, or when the size or the threshold cannot be read, carries the context size and `/compact` now in its message
    instead of a timer. After any compaction, an automatic one included, the boot
    sequence and the reconcile run before any transition, because a summary is a claim, not
    truth; a merge, push or third-round authorization that exists only in a summary is
@@ -873,7 +1014,14 @@ re-authored on its way into the page is unverified, and the pre-smoke that ran b
 page existed does not cover it; the pre-smoke's timing is unchanged —
 commit on the integration branch, STOP with the combined smoke script (smoke page link
 + gate essentials in text, or the full plain-text script; pre-verified steps marked,
-with the evidence SHA).
+with the evidence SHA). The FINAL checkpoint's close-out runs the run-end prose sweep
+(step 8) before all of these whenever LOG.md holds a `### prose sweep:` heading.
+
+**The backlog file is a to-do list.** An item enters it only through the change-complete
+ruling step (step 3 below), and only past the bar of the pinned skill's
+`references/backlog.md`: works-but verdicts, request items the coverage audit finds
+unimplemented and P0/P1 defects with a concrete scenario skip the bar's judgement, and the
+bar never lowers a severity. Below the bar a finding stays in LOG.md only.
 
 **Change-complete** (after the FINAL checkpoint passes and every batch is ✅ or
 `⛔ (dropped)`), run with the contract's convergence, backlog, guardrails and release facts:
@@ -886,11 +1034,82 @@ with the evidence SHA).
    hand-over says so. Never close on PROGRESS claims alone.
 2. Final coverage audit in PROGRESS: every request item (fold-ins included) maps to a
    merged commit, an intended-behavior resolution, or a named entry in the backlog file —
-   zero unaccounted. Fold-ins are REMOVED from the backlog file in the close-out commit
+   zero unaccounted. An item the audit finds unaccounted is recorded as a LOG.md
+   heading `### residual: audit — <one line>`, so it reaches the ruling list of step 3 (with
+   convergence off, the audit is where an unimplemented request item is first found).
+   Fold-ins are REMOVED from the backlog file in the close-out commit
    (the ledger row and commit message carry provenance); a partially done fold-in is
    edited in place there with a pointer to the ledger; residuals added get ids in the
-   repo's id scheme.
-3. **Distillation loop**: any NEW bug class this change uncovered → ONE-LINE guardrail
+   repo's id scheme. Those entries and ids are written by step 3's ruling. A fold-in whose
+   row's Notes carry `fold-in returned: <id> @<sha>` stays in the backlog file: its
+   `Folded into …` marker is removed, its `Since:` rewritten to the date it returned with
+   its source naming the batch that returned it, and its coverage row names that entry.
+3. **Ruling step** — every residual of the run reaches one list, ruled once by the user:
+   - **The list**: every `### residual:` heading of this run's LOG.md, and each item that
+     `node "<skill-dir>/tools/backlog.mjs" expired --backlog <file> --days <n> --today <YYYY-MM-DD>`
+     names, run on the contract's backlog file with the contract's expiry (a whole number
+     of days) and today's date. An expired item is re-checked against the code at the
+     integration tip — does its `Failure:` still hold? — before it is proposed. Each
+     residual's paths are checked against the contract's rulings file with
+     `node "<skill-dir>/tools/backlog.mjs" rulings --rulings <file> --paths <paths>`; one a
+     ruling covers, bringing no new evidence of exposure, is proposed LOG only, naming
+     that ruling.
+   - **Proposals**: for each residual the orchestrator proposes register (the form's
+     fields filled, its paths written repository-relative as `references/backlog.md`
+     says — `backlog.mjs check` does not refuse a `C:/…`, `~/…` or `$HOME/…` path, so the
+     orchestrator reads them itself), rule (accepted or declined, with a reason) or LOG
+     only; for an expired item, keep (its `Since:` rewritten), rule, or drop (removed
+     from the to-do list; LOG.md keeps its text). A residual whose fix is prose-only and
+     carries verified replacement text, as a `SWEEP:` item does, may be proposed fix now;
+     a fix that changes behaviour never is.
+   - **Packs**: `node "<skill-dir>/tools/backlog.mjs" packs --backlog <file> --threshold <n>`
+     with the contract's pack threshold, over the backlog file as it stands, each file's
+     count raised by this run's items proposed for registration that name it (nothing is
+     written before the user rules). A file at or over the threshold that gained an item
+     in this run and that no plan has taken is proposed as a pack, never run unasked; a
+     declined pack returns to this list only when its file gains an item in a later run.
+   - **A file not in the form**: when `backlog.mjs` prints `UNKNOWN` for the backlog or
+     the rulings file (one not yet in the form, every repository's until its migration,
+     or a missing one), the STOP says which file and why, and each item is registered or
+     ruled in that file's current form, a missing file being created in the form. For the
+     backlog file the list then forms from LOG.md's residuals alone and no pack is
+     proposed; for the rulings file the expired items and packs stand, a missing one holds
+     no ruling, and the orchestrator reads one not in the form for the rulings on the
+     residuals' paths. Once the backlog file carries the form, every entry written to it
+     passes `node "<skill-dir>/tools/backlog.mjs" check --backlog <file>`.
+   - **The STOP**: the proposed list is committed to LOG.md under `### Ruling list`
+     before the STOP, which presents it; the user rules once, the proposals as defaults,
+     and only the user's word registers or rules an item. The user's words are recorded
+     verbatim in the smoke-test verdict log (Checkpoint column `ruling`) in their own
+     commit, before anything is written to the backlog file or the rulings file, so a
+     crash after it never loses a ruling. A ruling found only in a
+     summary is asked for once more, never assumed. A ledger with every row ✅ or
+     `⛔ (dropped)` (advisory `👤` rows aside) and no COMPLETE marker resumes the
+     change-complete close-out at its first unfinished step, by `continue` or `close`: a
+     committed `### Ruling list` with no recorded ruling is presented.
+   - **The page**: the list goes to the user as the ruling page whenever the runtime can
+     hand over usable HTML, per the pinned skill's `references/ruling-page.md`: the
+     proposals authored as `ruling.json` in the ledger,
+     `node "<skill-dir>/tools/build-ruling-page.mjs" build <ledger>/ruling.json <ledger>/ruling.html`
+     builds the page, and the block `node "<skill-dir>/tools/build-ruling-page.mjs" list <ledger>/ruling.json`
+     prints is the `### Ruling list`, committed with both files. The paste is saved and
+     checked with `node "<skill-dir>/tools/build-ruling-page.mjs" read <ledger>/ruling.json <paste file> --entries`
+     before it is recorded; a `RULINGS FAIL` is asked about once more, never repaired by
+     guess.
+   - **The ruling sweep**: fix-now rulings run after the ruling commit as step 8's run-end
+     prose sweep does, under its rules with these names: the record
+     `ruling sweep cut @<sha>`, the branch `fix/<batch>-ruling-sweep`, the findings
+     heading `### B<NN> R1 ruling-sweep findings` and the
+     session-log row `ruling sweep: <n> item(s) @<merge sha>`. An item it returns or its
+     reviewer's `FIX FIRST` reverts is registered with its replacement text attached, the
+     user's fix-now ruling being its pass of the bar, and the hand-over names it. The
+     backlog file and the rulings file are written once the sweep has merged; a
+     `ruling sweep cut` with no `ruling sweep:` row resumes the sweep from its branch by
+     step 8's adoption rule.
+   - A ruling is reconsidered only on new evidence of exposure (a user hit it, a calling
+     module changed, a smoke step failed), never on a new instance of the same gap; gate
+     prompts never read the rulings file.
+4. **Distillation loop**: any NEW bug class this change uncovered → ONE-LINE guardrail
    bullet in the project guardrails doc naming the class and pointing at the test or
    mechanism doc that enforces it (prefer adding the test in this close-out). Repo-wide
    rules stay in the always-loaded section; area-specific ones go to the area's doc and
@@ -899,8 +1118,8 @@ with the evidence SHA).
    the user to accept — never delete on your own. Harvest in-run learnings from LOG.md.
    Durable lessons belong in repo files every future session loads — not in any one
    session's memory.
-4. Release step (only on explicit user authorization): the contract's release command.
-5. Mark the change COMPLETE in the Session log and `**State**: COMPLETE`; propose deleting
+5. Release step (only on explicit user authorization): the contract's release command.
+6. Mark the change COMPLETE in the Session log and `**State**: COMPLETE`; propose deleting
    the merged branches and moving the ledger to `.agents/archive/` (`git mv`).
 
 **A COMPLETE ledger is never resumed.** On "continue" with nothing active: reconcile,
@@ -936,6 +1155,8 @@ Never rewrite a legacy ledger into the new format — drive it under its own con
   batch — a separate adversarial pass over each finished diff, with the same
   hunk-mapping duty, before integration. Checkpoint placement is unchanged.
   The census is the orchestrator's own pass, one batch at a time, in the same report shape.
+  The census's send-back is then the orchestrator's own check, in the send-back block's shape, of
+  the lines it folded in other words and the fixes it chose.
 - **No agent definitions installed** (the skeletons' `subagent_type:` lines name types
   this environment does not define): the spawn ERRORS — `Agent type '<name>' not found` —
   it does not degrade on its own, so the ORCHESTRATOR substitutes the general-purpose

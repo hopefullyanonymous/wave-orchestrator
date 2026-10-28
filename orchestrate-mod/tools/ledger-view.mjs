@@ -1,13 +1,18 @@
 #!/usr/bin/env node
 // One JSON line describing a repository's live ledgers, for the orchestrate-mod /ledger pane. Ledgers and
 // their routes come from `reconcile.mjs discovery`, each row's git verdict from `reconcile.mjs rows`; every
-// table and contract line is read through the skill's orchestrate/tools/ledger-parse.mjs, the State and each
-// Notes cell through orchestrate/tools/reconcile.mjs `stateOf` and `readNotes`. This tool joins their answers
-// and parses no ledger text of its own; what it parses is the two reconcile commands' printed lines.
+// table and every other contract line is read through the skill's orchestrate/tools/ledger-parse.mjs, the State
+// and each Notes cell through orchestrate/tools/reconcile.mjs `stateOf` and `readNotes`. This tool joins their
+// answers; the ledger text it parses of its own is the contract's `**Clear threshold**` line (`clearThreshold`), so
+// a ledger pinned to a skill older than that line still reads, and the rest is the two reconcile commands' printed
+// lines.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+
+// A contract's clear threshold when it has no `**Clear threshold**` line: every ledger scaffolded before the line.
+export const DEFAULT_CLEAR_THRESHOLD = 300000;
 
 export const HELP = [
   'ledger-view.mjs --repo <dir> --skill-dir <dir>',
@@ -16,6 +21,9 @@ export const HELP = [
   '  read at its integration branch tip; one entry with "error" set per other AMBIGUOUS or UNKNOWN discovery line.',
   '  --repo is the repository root. --skill-dir holds tools/reconcile.mjs, which runs discovery,',
   "  and tools/ledger-parse.mjs, which reads each contract; every other read uses the skill directory that contract pins.",
+  '  Each entry\'s "clearThreshold", which this tool reads from its contract\'s **Clear threshold**: <n>K line, is',
+  `  {"tokens","source":"contract"}; {"tokens":${DEFAULT_CLEAR_THRESHOLD},"source":"default"} with no such line;`,
+  '  {"error"} for two or a malformed one; null where the contract was not read.',
   'Exit 0: the JSON line, also with no ledger or with a ledger whose "error" is set. Exit 2: `UNKNOWN <reason>` when the',
   '  view cannot start: an invalid invocation, a skill directory without both tools, or a discovery run that does not',
   '  complete. Read-only; every path it prints uses forward slashes.',
@@ -105,6 +113,22 @@ export function readDiscovery(text) {
   return result;
 }
 
+const THRESHOLD = /^\*\*Clear threshold\*\*: (\d+)K$/, CANDIDATE = /^\s*\*\*\s*clear[\W_]*threshold/i;
+// The contract's clear threshold, LF or CRLF: `{ tokens, source: 'contract' }` from its one line in exactly the
+// form THRESHOLD, `{ tokens: DEFAULT_CLEAR_THRESHOLD, source: 'default' }` with none, `{ error }` otherwise. A line
+// is a candidate as by orchestrate/tools/ledger-parse.mjs `skillPin`'s rule, the label at its start in any case or
+// indent, and also with any spacing or punctuation inside the bold label (`**Clear threshold:**`), so a near-miss is
+// an error, never a line skipped.
+export function clearThreshold(text) {
+  const at = [];
+  text.split(/\r?\n/).forEach((line, i) => { if (CANDIDATE.test(line)) at.push({ n: i + 1, line }); });
+  if (at.length === 0) return { tokens: DEFAULT_CLEAR_THRESHOLD, source: 'default' };
+  if (at.length > 1) return { error: `lines ${at.map(c => c.n).join(', ')} each open with **Clear threshold**` };
+  const m = THRESHOLD.exec(at[0].line), tokens = m ? Number(m[1]) * 1000 : NaN;
+  if (!Number.isSafeInteger(tokens)) return { error: `line ${at[0].n} is not **Clear threshold**: <n>K` };
+  return { tokens, source: 'contract' };
+}
+
 // PROGRESS's batch and checkpoint tables and the plan's weights at the integration tip, every table, branch
 // cell, State and Notes cell read by the pinned skill's own functions. { error } when a read throws.
 export function readTables(progressText, planText, pinned, pinnedDir) {
@@ -179,7 +203,7 @@ export function derive(rows, checkpoints) {
 // One ledger discovery routed to a mode: contract, integration tip, tables, verdicts. Every read that fails
 // returns the entry with `error` set and the fields read so far, its rows empty. `child` runs every child.
 async function readLedger({ root, entry, parse, child }) {
-  const view = { id: entry.id, state: null, integration: null, skillDir: null, waves: null, currentWave: null, nextCheckpoint: null, rows: [], checkpoints: [], error: null, warning: entry.warning };
+  const view = { id: entry.id, state: null, integration: null, skillDir: null, clearThreshold: null, waves: null, currentWave: null, nextCheckpoint: null, rows: [], checkpoints: [], error: null, warning: entry.warning };
   const fail = error => ({ ...view, error: slashed(error) });
   const git = args => child('git', args);
   const dir = `.agents/changes/${entry.id}`;
@@ -202,6 +226,7 @@ async function readLedger({ root, entry, parse, child }) {
   const branch = integration.replace(/^refs\/heads\//, ''), pinnedDir = path.resolve(root, pin.dir);
   view.integration = { branch, sha: null };
   view.skillDir = slashed(pinnedDir);
+  view.clearThreshold = clearThreshold(text);
   // A copy whose State differs is read only when its integration branch, as a local branch, holds a copy.
   if (entry.warning !== null && !entry.branches.includes(branch)) return fail(`UNKNOWN integration branch ${branch} holds no copy of ${entry.id}: ${entry.line}`);
   const tip = git(['rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${branch}^{commit}`]);
@@ -247,7 +272,7 @@ export async function ledgerView({ repo, skillDir, env = process.env, timeout = 
   if (!discovered.recognised) return unknown(`discovery printed no line in a form it prints: ${linesOf(found.text)[0] ?? 'no output'}`);
   const ledgers = [];
   for (const entry of discovered.ledgers) {
-    ledgers.push(entry.error ? { id: entry.id, state: null, integration: null, skillDir: null, waves: null, currentWave: null, nextCheckpoint: null, rows: [], checkpoints: [], error: entry.error, warning: null }
+    ledgers.push(entry.error ? { id: entry.id, state: null, integration: null, skillDir: null, clearThreshold: null, waves: null, currentWave: null, nextCheckpoint: null, rows: [], checkpoints: [], error: entry.error, warning: null }
       : await readLedger({ root, entry, parse, child }));
   }
   return { code: 0, view: { v: 1, repo: slashed(root), incomplete: discovered.incomplete, ledgers } };

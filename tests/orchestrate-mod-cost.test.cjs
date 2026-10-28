@@ -11,6 +11,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { pathToFileURL } = require('node:url');
+const { isDeepStrictEqual } = require('node:util');
 const { makeRepo } = require('./support/git-fixture.cjs');
 
 const ROOT = fs.realpathSync(path.resolve(__dirname, '..'));
@@ -72,7 +73,7 @@ function templateLedger(dir, changeId, nn) {
   fs.writeFileSync(path.join(dir, `02-batches-${nn}-render.md`), fill('02-batch.md'));
 }
 // A value for each kind of fact prompt.mjs --help names; every other fact is a one-line string.
-const FACT_VALUES = { guardrails: 'none', gateAgentsRun: false, round: 1, round1Sha: 'abc1234' };
+const FACT_VALUES = { guardrails: 'none', gateAgentsRun: false, round: 1, round1Sha: 'abc1234', subagentTokens: 1 };
 
 test('every role prompt.mjs renders, pointed at with the message the skill publishes, is attributed to its ledger, batch and role', async t => {
   const { promptCli, ROLES } = await prompt, { parsePromptFile, promptFileOf } = await cost;
@@ -511,7 +512,7 @@ test('the report\'s text: the header line, then a row per ledger, batch and role
   const { costReport } = await report, dir = fixture(t);
   const r = costReport(['--dir', dir], {});
   assert.equal(r.code, 0);
-  assert.equal(r.lines[0], 'COSTS 8 records, 3 files, $33.00 (1 unpriced)');
+  assert.equal(r.lines[0], 'COSTS 8 records, 3 files, $33.00 (1 unpriced), main loop and sub-agents only');
   const rows = r.lines.slice(2).map(line => line.split(/\s+/));
   assert.deepEqual(r.lines[1].split(/\s+/), ['ledger', 'batch', 'role', 'requests', 'in', 'out', 'cr', 'cw', 'usd']);
   assert.deepEqual(rows, [
@@ -557,7 +558,7 @@ test('the report fails closed: a malformed line, an unreadable file or directory
   assert.deepEqual(costReport(['--dir', file], {}), { code: 0, lines: [`NO RECORDS ${file}`] }, 'ENOTDIR is a proven absence');
   assert.deepEqual(costReport(['--dir', path.join(file, 'x')], {}), { code: 0, lines: [`NO RECORDS ${path.join(file, 'x')}`] });
   const empty = fixture(t, {});
-  assert.deepEqual(costReport(['--dir', empty], {}).lines, ['COSTS 0 records, 0 files, $0.00 (0 unpriced)', 'ledger  batch  role  requests  in  out  cr  cw  usd']);
+  assert.deepEqual(costReport(['--dir', empty], {}).lines, ['COSTS 0 records, 0 files, $0.00 (0 unpriced), main loop and sub-agents only', 'ledger  batch  role  requests  in  out  cr  cw  usd']);
   for (const args of [['--dir'], ['--dir', ''], ['--dir', base, '--dir', base], ['--format', 'csv', '--dir', base], ['--nope', 'x'], ['dir', base], ['--help', 'x']]) {
     const u = costReport(args, {});
     assert.equal(u.code, 2, args.join(' '));
@@ -588,7 +589,211 @@ test('the report\'s default directory is <home>/.claude/orchestrate-costs, home 
   assert.deepEqual(costReport([], { HOME: '', USERPROFILE: home }).lines, [`NO RECORDS ${dir}`]);
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(path.join(dir, 's.jsonl'), FIXTURE['s-two.jsonl']);
-  assert.equal(costReport([], { HOME: home }).lines[0], 'COSTS 3 records, 1 files, $16.00 (0 unpriced)');
+  assert.equal(costReport([], { HOME: home }).lines[0], 'COSTS 3 records, 1 files, $16.00 (0 unpriced), main loop and sub-agents only');
+});
+
+// ===== --cost-state ======================================================================
+
+// A subagent record of `usd` dollars at epoch ms `ms`: claude-opus-5-5 input at $4 per million tokens, or as many
+// tokens of an unpriced model.
+const at = (ms, session, usd, { ledger = null, model = 'claude-opus-5-5' } = {}) => JSON.stringify({ v: 1, ts: new Date(ms).toISOString(), session,
+  agent: 'a1', parent: null, type: 'Explore', ledger, batch: null, role: 'Explore', model, in: Math.round(usd * 250000), out: 0, cr: 0, cw: 0 }) + '\n';
+// A transcript's cost-state line as Claude Code writes it, its keys in Claude Code's order; other lines a transcript holds.
+const costLine = (sessionId, totalCostUSD, startTime, extra = {}) => JSON.stringify({ type: 'cost-state', sessionId, totalCostUSD, totalAPIDuration: 1200,
+  totalAPIDurationWithoutRetries: 1100, totalToolDuration: 30, totalLinesAdded: 0, totalLinesRemoved: 0, totalDuration: 5000, startTime,
+  modelUsage: totalCostUSD === 0 ? {} : { 'claude-opus-5-5': { costUSD: totalCostUSD } }, ...extra }) + '\n';
+const userLine = sessionId => JSON.stringify({ type: 'user', sessionId, message: { role: 'user', content: 'go "type":"cost-state" here' } }) + '\n';
+// The marker as a nested object of another kind of line: no cost-state line.
+const nestedLine = sessionId => JSON.stringify({ type: 'assistant', sessionId, message: { content: [{ type: 'cost-state', sessionId }] } }) + '\n';
+const T1 = Date.UTC(2026, 9, 20, 12), T2 = T1 + 3600000, MIN = 60000;
+const iso = ms => new Date(ms).toISOString();
+const LF = String.fromCharCode(10), TAB = String.fromCharCode(9);
+const ODD = 'c-' + LF + 'x' + TAB + 'y';
+// Records of ten sessions, and their transcripts in two project directories, each worked by hand:
+//   c-match    $4 at T1, $2 (ledger L-X) at T1+1m; cost-state $7.50 since T1         -> $6.00, outside $1.50, 20.0%
+//   c-resumed  $8 at T2-1ms, $1 at T2; cost-state $1.25 since T2: only the second   -> $1.00, outside $0.25, 20.0%
+//   c-zero     $1 at T1; cost-state $0 since T1, a real total, modelUsage {}         -> $1.00, outside -$1.00, no share
+//   c-several  $3 at T2; cost-state lines of $1, $2 and $3.50, then the marker nested and a line cut inside a character
+//              -> the last: $0.50, 14.3%
+//   c-cents    $0.996 at T1; cost-state $1.004 since T1: each prints $1.00          -> outside $0.00, the printed difference
+//   c-float    $0.1 and $0.2 at T1; cost-state 0.1 + 0.2: two float sums           -> json 0.3 for both, rounded to 6 decimals
+//   c-open     $2 and an unpriced record at T1; cost-state $3 since T1              -> $2.00+?, outside $1.00-?, 33.3%-?
+//   c-none     a transcript holding the marker only nested and in a message: none
+//   c-gone     no transcript one directory deep (one sits two deep): none; ODD the same, its tab and LF printed as ?
+const RECORDS = {
+  'a.jsonl': at(T1, 'c-match', 4) + at(T1 + MIN, 'c-match', 2, { ledger: 'L-X' }) + at(T2 - 1, 'c-resumed', 8) + at(T2, 'c-resumed', 1) + at(T1, 'c-zero', 1),
+  'b.jsonl': at(T2, 'c-several', 3) + at(T1, 'c-open', 2) + at(T1, 'c-open', 1, { model: 'claude-unpriced-9' }) + at(T1, 'c-none', 1) + at(T1, 'c-gone', 1) + at(T1, ODD, 1)
+    + at(T1, 'c-cents', 0.996) + at(T1, 'c-float', 0.1) + at(T1, 'c-float', 0.2),
+};
+const TRANSCRIPTS = {
+  '-tmp-a/c-match.jsonl': userLine('c-match') + costLine('c-match', 7.5, T1),
+  '-tmp-a/c-resumed.jsonl': userLine('c-resumed') + costLine('c-resumed', 1.25, T2),
+  '-tmp-a/c-none.jsonl': userLine('c-none') + nestedLine('c-none'),
+  '-tmp-a/other.jsonl': costLine('other', 9, T1),
+  '-tmp-a/c-cents.jsonl': costLine('c-cents', 1.004, T1),
+  '-tmp-a/c-float.jsonl': costLine('c-float', 0.1 + 0.2, T1),
+  '-tmp-b/c-zero.jsonl': costLine('c-zero', 0, T1),
+  '-tmp-b/c-several.jsonl': costLine('c-several', 1, T2) + userLine('c-several') + costLine('c-several', 2, T2) + costLine('c-several', 3.5, T2)
+    + nestedLine('c-several') + '{"type":"assistant","message":{"content":"cut',
+  '-tmp-b/c-several/subagents/c-gone.jsonl': costLine('c-gone', 5, T1),
+  '-tmp-b/c-open.jsonl': costLine('c-open', 3, T1),
+  '-tmp-b/other.jsonl': costLine('other', 9, T1),
+};
+const STATE_LINES = [
+  `COST-STATE c-?x?y none`,
+  `COST-STATE c-cents records $1.00 since ${iso(T1)}, cost-state $1.00, outside the records $0.00 (0.0% of cost-state)`,
+  `COST-STATE c-float records $0.30 since ${iso(T1)}, cost-state $0.30, outside the records $0.00 (0.0% of cost-state)`,
+  `COST-STATE c-gone none`,
+  `COST-STATE c-match records $6.00 since ${iso(T1)}, cost-state $7.50, outside the records $1.50 (20.0% of cost-state)`,
+  `COST-STATE c-none none`,
+  `COST-STATE c-open records $2.00+? since ${iso(T1)}, cost-state $3.00, outside the records $1.00-? (33.3%-? of cost-state)`,
+  `COST-STATE c-resumed records $1.00 since ${iso(T2)}, cost-state $1.25, outside the records $0.25 (20.0% of cost-state)`,
+  `COST-STATE c-several records $3.00 since ${iso(T2)}, cost-state $3.50, outside the records $0.50 (14.3% of cost-state)`,
+  `COST-STATE c-zero records $1.00 since ${iso(T1)}, cost-state $0.00, outside the records -$1.00`,
+];
+const STATES = {
+  [ODD]: null, 'c-gone': null, 'c-none': null,
+  'c-cents': { records: T(1, 249000, 0, 0, 0, 0.996), costState: 1.004, outside: 0.008, startTime: iso(T1) },
+  'c-float': { records: T(2, 75000, 0, 0, 0, 0.3), costState: 0.3, outside: 0, startTime: iso(T1) },
+  'c-match': { records: T(2, 1500000, 0, 0, 0, 6), costState: 7.5, outside: 1.5, startTime: iso(T1) },
+  'c-open': { records: T(2, 750000, 0, 0, 0, 2, 1), costState: 3, outside: 1, startTime: iso(T1) },
+  'c-resumed': { records: T(1, 250000, 0, 0, 0, 1), costState: 1.25, outside: 0.25, startTime: iso(T2) },
+  'c-several': { records: T(1, 750000, 0, 0, 0, 3), costState: 3.5, outside: 0.5, startTime: iso(T2) },
+  'c-zero': { records: T(1, 250000, 0, 0, 0, 1), costState: 0, outside: -1, startTime: iso(T1) },
+};
+// The records directory and a projects directory holding `transcripts` and a stray file beside the project directories,
+// with a <session>/subagents/ directory beside each transcript, as Claude Code keeps one; c-several's cut line ends in
+// the first two of the three bytes of a euro sign, as a transcript being written can.
+function projectsFixture(t, transcripts = TRANSCRIPTS) {
+  const dir = fixture(t, RECORDS), projects = tempDir(t);
+  fs.writeFileSync(path.join(projects, 'notes.txt'), 'not a project directory\n');
+  for (const [name, text] of Object.entries(transcripts)) {
+    fs.mkdirSync(path.dirname(path.join(projects, name)), { recursive: true });
+    fs.writeFileSync(path.join(projects, name), text);
+    const transcript = /^(-tmp-[ab])\/([^/]+)\.jsonl$/.exec(name);
+    if (transcript) {
+      fs.mkdirSync(path.join(projects, transcript[1], transcript[2], 'subagents'), { recursive: true });
+      fs.writeFileSync(path.join(projects, transcript[1], transcript[2], 'subagents', 'agent-1.jsonl'), userLine(transcript[2]));
+    }
+  }
+  fs.appendFileSync(path.join(projects, '-tmp-b', 'c-several.jsonl'), Buffer.from([0xe2, 0x82]));
+  return { dir, projects };
+}
+
+test('--cost-state: per session in id order, the records from the last cost-state line\'s startTime on against its total, none and a real $0', async t => {
+  const { costReport } = await report, { dir, projects } = projectsFixture(t);
+  assert.ok(fs.readdirSync(projects, { withFileTypes: true }).some(e => e.isFile()), 'the control: a stray file sits beside the project directories');
+  const r = costReport(['--cost-state', '--dir', dir, '--projects', projects], {});
+  assert.equal(r.code, 0, r.lines.join('\n'));
+  assert.deepEqual(r.lines.slice(-STATE_LINES.length), STATE_LINES);
+  // The table is the report's own, its columns aligned without the COST-STATE lines after it.
+  const table = r.lines.slice(1, -STATE_LINES.length);
+  assert.deepEqual(table.map(line => line.split(/ +/)[2]), ['role', '*', '*', 'Explore', '*', '*', 'Explore']);
+  assert.equal(new Set(table.map(line => line.length)).size, 1, 'the table\'s columns are aligned');
+  assert.equal(r.lines[0], 'COSTS 14 records, 2 files, $25.30 (1 unpriced), main loop and sub-agents only');
+  // json: the same entries, and the default key set with costState after it.
+  const out = costReport(['--dir', dir, '--format', 'json', '--cost-state', '--projects', projects], {});
+  const parsed = JSON.parse(out.lines[0]);
+  assert.deepEqual(Object.keys(parsed), ['v', 'dir', 'files', 'records', 'total', 'byLedger', 'byModel', 'bySession', 'costState']);
+  assert.deepEqual(parsed.costState, STATES);
+  // --ledger keeps c-match alone, by its L-X record, and its records still count whole against its total.
+  const kept = costReport(['--dir', dir, '--ledger', 'L-X', '--cost-state', '--projects', projects], {});
+  assert.deepEqual(kept.lines.filter(line => line.startsWith('COST-STATE ')), STATE_LINES.filter(line => line.startsWith('COST-STATE c-match ')));
+  assert.equal(kept.lines[0], 'COSTS 1 records, 2 files, $2.00 (0 unpriced), main loop and sub-agents only');
+  // A session holding a tab and an LF whose transcript has a cost-state line, on a file system no platform needs to allow.
+  const odd = 'c-' + TAB + 'z' + LF + 'w', records = path.resolve('records'), root = path.resolve('projects');
+  const fake = { readdirSync: p => (p === records ? ['a.jsonl'] : p === root ? ['-p'] : [odd + '.jsonl']),
+    readFileSync: p => Buffer.from(p === path.join(records, 'a.jsonl') ? at(T1, odd, 1) : costLine(odd, 1, T1)) };
+  assert.deepEqual(costReport(['--dir', records, '--cost-state', '--projects', root], {}, fake).lines.slice(-1),
+    [`COST-STATE c-?z?w records $1.00 since ${iso(T1)}, cost-state $1.00, outside the records $0.00 (0.0% of cost-state)`]);
+});
+
+test('--cost-state: a CRLF transcript reads as its LF original, and no projects directory is none for every session', async t => {
+  const { costReport } = await report;
+  const crlf = Object.fromEntries(Object.entries(TRANSCRIPTS).map(([name, text]) => [name, text.split('\n').join('\r\n')]));
+  assert.ok(crlf['-tmp-a/c-match.jsonl'].includes('}\r\n'), 'the control: the twin is CRLF');
+  const { dir, projects } = projectsFixture(t, crlf);
+  assert.deepEqual(costReport(['--dir', dir, '--cost-state', '--projects', projects], {}).lines.slice(-STATE_LINES.length), STATE_LINES);
+  const none = STATE_LINES.map(line => line.replace(/ records .*$/, ' none'));
+  const missing = path.join(projects, 'missing'), file = path.join(projects, 'notes.txt');
+  for (const absent of [missing, file]) {
+    const r = costReport(['--dir', dir, '--cost-state', '--projects', absent], {});
+    assert.deepEqual([r.code, r.lines.slice(-none.length)], [0, none], absent);
+  }
+});
+
+test('--cost-state fails closed: a transcript or directory that cannot be read, a bad cost-state line and two transcripts are UNKNOWN', async t => {
+  const { costReport } = await report, { dir, projects } = projectsFixture(t);
+  const fail = code => { throw Object.assign(new Error('refused'), code ? { code } : {}); };
+  // The file system with one path refused, listed or read.
+  const refusing = (where, code) => ({ readdirSync: p => (p === where ? fail(code) : fs.readdirSync(p)), readFileSync: p => (p === where ? fail(code) : fs.readFileSync(p)) });
+  const run = (io, extra = []) => costReport(['--dir', dir, '--cost-state', '--projects', projects, ...extra], {}, io);
+  assert.equal(run(fs).code, 0, 'the control: the fixture reads');
+  const match = path.join(projects, '-tmp-a', 'c-match.jsonl'), project = path.join(projects, '-tmp-b');
+  const refusals = [[match, 'EACCES'], [match, 'ENOENT'], [match, undefined], [projects, 'EACCES'], [project, 'EACCES'], [project, 'ENOENT']];
+  const faults = [];
+  for (const [where, code] of refusals) {
+    const r = run(refusing(where, code));
+    const expected = { code: 2, lines: [`UNKNOWN ${where}: cannot be read (${code ?? 'refused'})`] };
+    if (!isDeepStrictEqual(r, expected)) faults.push(`${where} ${code}: ${JSON.stringify(r.lines.slice(0, 1))}`);
+  }
+  assert.deepEqual(faults, [], 'a listed path that is gone, or refused for any reason, is not an absence');
+  // The last cost-state line of c-match replaced by each bad form, read through the same file. 1e400 is the one
+  // non-finite number JSON reads, written raw.
+  const overflow = costLine('c-match', 7.5, T1).replace('"totalCostUSD":7.5,', () => '"totalCostUSD":1e400,');
+  assert.ok(overflow.includes('1e400') && JSON.parse(overflow).totalCostUSD === Infinity, 'the control: the line holds 1e400, read as Infinity');
+  const bad = [
+    [overflow, 'totalCostUSD is not a non-negative number'],
+    ['{"type":"cost-state","sessionId":"c-match","totalCostUSD":7.', 'a cost-state line that is not JSON'],
+    [costLine('c-other', 7.5, T1), 'the cost-state line names session "c-other"'],
+    [costLine('c-match', 7.5, T1, { sessionId: undefined }), 'the cost-state line names session undefined'],
+    ...['7.5', -0.01, null, undefined].map(v => [costLine('c-match', 0, T1, { totalCostUSD: v }), 'totalCostUSD is not a non-negative number']),
+    ...[T1 + 0.5, -1, String(T1), null, undefined, 9e15].map(v => [costLine('c-match', 1, T1, { startTime: v }), 'startTime is not a time in milliseconds']),
+  ];
+  const lineFaults = [];
+  for (const [line, reason] of bad) {
+    fs.writeFileSync(match, userLine('c-match') + costLine('c-match', 7.5, T1) + line);
+    const r = run(fs), expected = { code: 2, lines: [`UNKNOWN ${match}:3: ${reason}`] };
+    if (!isDeepStrictEqual(r, expected)) lineFaults.push(line.trim() + ' -> ' + JSON.stringify(r.lines.slice(-1)));
+  }
+  assert.deepEqual(lineFaults, []);
+  // The other side of startTime's lower bound: 0 is a time, from which every record of the session counts.
+  fs.writeFileSync(match, costLine('c-match', 7.5, T1));
+  fs.writeFileSync(path.join(projects, '-tmp-a', 'c-resumed.jsonl'), costLine('c-resumed', 9, 0));
+  assert.deepEqual(run(fs).lines.filter(line => line.startsWith('COST-STATE c-resumed ')),
+    ['COST-STATE c-resumed records $9.00 since 1970-01-01T00:00:00.000Z, cost-state $9.00, outside the records $0.00 (0.0% of cost-state)']);
+  // The same session's transcript in a second project directory, named the same way whatever order the projects
+  // directory lists in.
+  fs.writeFileSync(path.join(project, 'c-match.jsonl'), costLine('c-match', 7.5, T1));
+  const second = { code: 2, lines: [`UNKNOWN ${path.join(project, 'c-match.jsonl')}: a second transcript of the session, beside ${match}`] };
+  assert.deepEqual(run(fs), second);
+  const reversed = { readdirSync: p => (p === projects ? fs.readdirSync(p).reverse() : fs.readdirSync(p)), readFileSync: p => fs.readFileSync(p) };
+  const order = reversed.readdirSync(projects);
+  assert.ok(order.indexOf('-tmp-b') < order.indexOf('-tmp-a'), 'the control: the listing names -tmp-b first');
+  assert.deepEqual(run(reversed), second);
+});
+
+test('--cost-state takes no value; --projects takes one and needs --cost-state; with neither --projects nor a home it is a usage error', async t => {
+  const { costReport } = await report, { dir, projects } = projectsFixture(t), home = tempDir(t);
+  const usage = why => ({ code: 2, lines: [`UNKNOWN usage: ${why}; use --help`] });
+  const cases = [
+    [['--dir', dir, '--cost-state', 'x'], usage('unknown argument x')],
+    [['--dir', dir, '--cost-state', '--cost-state'], usage('--cost-state given twice')],
+    [['--dir', dir, '--cost-state', '--projects'], usage('--projects needs a value')],
+    [['--dir', dir, '--cost-state', '--projects', ''], usage('--projects needs a value')],
+    [['--dir', dir, '--projects', projects], usage('--projects needs --cost-state')],
+    [['--cost-state', '--dir', dir], usage('--cost-state with no --projects, and neither HOME nor USERPROFILE is set')],
+  ];
+  assert.deepEqual(cases.map(([args]) => costReport(args, {})), cases.map(([, expected]) => expected));
+  // The controls: the same runs with what each lacked.
+  assert.equal(costReport(['--dir', dir, '--cost-state', '--projects', projects], {}).code, 0);
+  assert.equal(costReport(['--dir', dir, '--projects', projects, '--cost-state'], {}).code, 0);
+  // The default <home>/.claude/projects, home from HOME, else USERPROFILE; --projects over either.
+  fs.cpSync(projects, path.join(home, '.claude', 'projects'), { recursive: true });
+  for (const env of [{ HOME: home }, { HOME: home, USERPROFILE: tempDir(t) }, { USERPROFILE: home }, { HOME: '', USERPROFILE: home }, { HOME: tempDir(t) }]) {
+    const args = env.HOME && env.HOME !== home ? ['--dir', dir, '--cost-state', '--projects', projects] : ['--dir', dir, '--cost-state'];
+    assert.deepEqual(costReport(args, env).lines.slice(-STATE_LINES.length), STATE_LINES, JSON.stringify(env));
+  }
 });
 
 // ===== The CLI as published ==============================================================
@@ -608,7 +813,7 @@ test('published: the CLI prints the JSON and text reports, and exits 2 on a malf
   assert.ok(json.stdout.endsWith('}\n') && json.stdout.split('\n').length === 2, 'one line');
   const text = cli(['--dir', dir]);
   assert.equal(text.status, 0, text.stderr);
-  assert.equal(text.stdout.split('\n')[0], 'COSTS 8 records, 3 files, $33.00 (1 unpriced)');
+  assert.equal(text.stdout.split('\n')[0], 'COSTS 8 records, 3 files, $33.00 (1 unpriced), main loop and sub-agents only');
   const bad = fixture(t, { 'x.jsonl': 'nope\n' });
   const failed = cli(['--dir', bad]);
   assert.deepEqual([failed.status, failed.stdout], [2, `UNKNOWN ${path.join(bad, 'x.jsonl')}:1: not JSON\n`]);
@@ -635,4 +840,136 @@ test('published: every hidden character a record holds prints as ?: C0 but tab a
   assert.equal(r.status, 0, r.stderr);
   assert.ok(r.stdout.includes('r' + '?'.repeat(codes.length) + 'z'), r.stdout);
   for (const code of codes) assert.ok(!r.stdout.includes(String.fromCharCode(code)), code.toString(16));
+});
+
+test('published: an LF and a tab in a record\'s role print as ? inside its one table row, the columns still aligned', async t => {
+  const role = 'r' + String.fromCharCode(10) + 'z' + String.fromCharCode(9) + 'q';
+  const line = JSON.stringify({ v: 1, ts: '2026-10-08T12:00:00.000Z', session: 's', agent: 'a', parent: null, type: 'x', ledger: null, batch: null,
+    role, model: 'm', in: 0, out: 0, cr: 0, cw: 0 }) + '\n';
+  const dir = fixture(t, { 'a.jsonl': line });
+  const r = spawnSync(process.execPath, [REPORT, '--dir', dir], { cwd: ROOT, env: ENV, encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split('\n');
+  assert.equal(lines.pop(), '', 'the output ends with a line break');
+  // Split on spaces alone: a tab printed raw would stay inside the role's cell, an LF printed raw would start a row.
+  assert.deepEqual(lines.slice(2).map(l => l.split(/ +/)), [
+    ['(none)', '*', '*', '1', '0', '0', '0', '0', '$0.00+?'],
+    ['(none)', '(none)', '*', '1', '0', '0', '0', '0', '$0.00+?'],
+    ['(none)', '(none)', 'r?z?q', '1', '0', '0', '0', '0', '$0.00+?'],
+  ], r.stdout);
+  assert.equal(new Set(lines.slice(1).map(l => l.length)).size, 1, 'the table\'s columns are aligned');
+});
+
+test('published: a hidden character in a path the report prints shows as ?: the pass over the whole output stays', async t => {
+  // Every code of the role sweep above but NUL, which no argument can hold: the role's are replaced in its cell, a
+  // path's only by the pass over the output.
+  const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
+  const codes = [...range(0x01, 0x08), ...range(0x0b, 0x1f), ...range(0x7f, 0x9f), 0x2028, 0x2029];
+  const missing = path.join(tempDir(t), 'x' + String.fromCharCode(...codes) + 'y');
+  const r = spawnSync(process.execPath, [REPORT, '--dir', missing], { cwd: ROOT, env: ENV, encoding: 'utf8', windowsHide: true, timeout: 60000 });
+  // A platform that refuses the name rather than finding it absent prints UNKNOWN: the path is printed either way.
+  assert.match(r.stdout, /^(?:NO RECORDS|UNKNOWN) /, r.stderr);
+  assert.equal(r.status, r.stdout.startsWith('NO RECORDS ') ? 0 : 2);
+  assert.ok(r.stdout.includes('x' + '?'.repeat(codes.length) + 'y'), r.stdout);
+  assert.deepEqual(codes.filter(code => r.stdout.includes(String.fromCharCode(code))).map(code => code.toString(16)), []);
+});
+
+test('published: --cost-state prints its lines after the table, and its json key, from the projects directory given', async t => {
+  const { dir, projects } = projectsFixture(t);
+  const text = cli(['--dir', dir, '--cost-state', '--projects', projects]);
+  assert.equal(text.status, 0, text.stderr);
+  assert.deepEqual(text.stdout.split('\n').slice(-STATE_LINES.length - 1), [...STATE_LINES, '']);
+  const json = cli(['--dir', dir, '--format', 'json', '--cost-state', '--projects', projects]);
+  assert.equal(json.status, 0, json.stderr);
+  assert.deepEqual(JSON.parse(json.stdout).costState, STATES);
+});
+
+// ===== README §Use =======================================================================
+
+// README §Use's account of the report, from its bullet to the end of its usage block, whitespace collapsed: the
+// usage line is HELP's synopsis. The words of its scope sit nowhere else in README, so no other sentence restates or
+// reverses them.
+const USE_FROM = '- `cost-report.mjs` totals the records';
+const SCOPE_WORDS = [/cost-state/gi, /agent-progress/gi, /classifier/gi, /sub-agents only/gi, /(?<![\w/.~-])\/cost\b/gi];
+function useFaults(readme, help) {
+  const text = readme.replace(/\r\n/g, '\n'), start = text.indexOf(USE_FROM), open = text.indexOf('```bash\n', start), close = text.indexOf('\n```', open + 8);
+  if (start === -1 || text.indexOf(USE_FROM, start + 1) !== -1 || open === -1 || close === -1) return ['§Use: the passage is not found once'];
+  const expected = "- `cost-report.mjs` totals the records by ledger, batch and role, by model and by session; an unpriced model's dollars are shown"
+    + " as unknown (`+?`), never as $0. The records cover the main loop and sub-agents only: the agent-progress summaries Claude Code requests for each"
+    + " running sub-agent (terminal sessions run them, desktop sessions do not) and auto mode's classifier calls are outside them. `--cost-state` adds a"
+    + " line per session comparing its records since the session last started with the `cost-state` total Claude Code last wrote in its transcript"
+    + " under `~/.claude/projects`, which counts the summaries but not the classifier calls: ```bash " + help.split('\n')[0] + ' ```';
+  const end = close + 4, faults = text.slice(start, end).replace(/\s+/g, ' ').trim() === expected ? [] : ['§Use: the passage changed'];
+  const synopses = text.split('\n').filter(line => line.startsWith('node orchestrate-mod/tools/cost-report.mjs'));
+  if (synopses.length !== 1 || synopses[0] !== help.split('\n')[0]) faults.push('the usage lines are not HELP\'s synopsis once: ' + JSON.stringify(synopses));
+  for (const word of SCOPE_WORDS) {
+    for (const m of text.matchAll(word)) if (m.index < start || m.index >= end) faults.push('outside §Use: ' + m[0]);
+  }
+  return faults;
+}
+// HELP's body, every line after the synopsis useFaults binds to README, whitespace collapsed and pinned whole: no
+// sentence of its scope, of --cost-state or of its exit codes changes, and none joins it, unread. `checked` is
+// orchestrate-mod/hooks/prices.js `PRICES_CHECKED`.
+function helpFaults(help, checked) {
+  const expected = 'Reads every *.jsonl in <dir> (default <home>/.claude/orchestrate-costs, home from HOME, else USERPROFILE), sorted by name, and'
+    + ' validates every line as a cost record. --ledger and --session keep the records of one ledger (`(none)`: untagged) or session. text (the default)'
+    + ' prints the line `COSTS <records> records, <files> files, $<usd> (<n> unpriced), main loop and sub-agents only` and a table by ledger, batch and'
+    + ' role; json prints one line with the totals by ledger, batch and role, by model and by session. A dollar figure sums the priced records; `+?`'
+    + ' marks one that leaves unpriced records out (a model the price table, checked ' + checked + ', lacks).'
+    + ' The records cover the main loop and sub-agents only. Outside them: the agent-progress summaries Claude Code requests for each running sub-agent'
+    + " (terminal sessions run them, desktop sessions do not), and auto mode's classifier calls."
+    + ' --cost-state compares each session of the kept records with the last `"type":"cost-state"` line of its transcript, <projects>/*/<session>.jsonl'
+    + " (default <home>/.claude/projects): Claude Code's own total since the session last started, which counts the summaries but not the classifier"
+    + ' calls. After the table, one line per session in id order: `COST-STATE <session> records $<x> since <startTime>, cost-state $<y>, outside the'
+    + ' records $<y - x> (<n>% of cost-state)`, where <x> sums every record of the session from startTime on, whatever --ledger keeps; an unpriced'
+    + ' record marks <x> `+?` and the outside figure and its share `-?`, and a $0.00 cost-state prints no share. A session with no transcript, or no'
+    + ' cost-state line in it, prints `COST-STATE <session> none`. json adds `costState`: per session `{ records: <a total>, costState, outside,'
+    + ' startTime: <ISO time> }`, or null for none.'
+    + ' Exit 0: every line read and valid, or `NO RECORDS <dir>` when the directory does not exist. Exit 2: one `UNKNOWN <path>[:<line>]: <reason>`'
+    + ' line for a malformed record or cost-state line, a session with two transcripts, a file or directory that cannot be read, or an invalid invocation.';
+  const at = help.indexOf('\n');
+  return at !== -1 && help.slice(at + 1).replace(/\s+/g, ' ').trim() === expected ? [] : ['HELP: its body changed'];
+}
+
+test('README §Use states the report\'s scope and --cost-state, its usage line HELP\'s synopsis; HELP states the scope', async () => {
+  const { costReport } = await report, help = costReport(['--help'], {}).lines[0], read = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const { PRICES_CHECKED } = await prices;
+  assert.deepEqual(helpFaults(help, PRICES_CHECKED), []);
+  // Live: the reviewer's reversed scope, absence printed as $0, the terminal and desktop sessions swapped, the flag unnamed;
+  // each edit's anchor is found once. A changed synopsis alone leaves the body as it was.
+  const edits = [
+    ["auto mode's\n  classifier calls.", "auto mode's\n  classifier calls. Every request of the session is in the records, so the totals equal the /cost of Claude Code."],
+    ['`COST-STATE <session> none`', '`COST-STATE <session> records $0.00`'],
+    ['terminal sessions run them, desktop sessions do not', 'desktop sessions run them, terminal sessions do not'],
+    ['--cost-state compares', 'It compares'],
+  ];
+  assert.deepEqual(edits.map(([from]) => help.split(from).length - 1), edits.map(() => 1), 'each control anchor is found once');
+  assert.deepEqual(edits.map(([from, to]) => helpFaults(help.replace(from, () => to), PRICES_CHECKED)), edits.map(() => ['HELP: its body changed']));
+  assert.deepEqual(helpFaults('node cost-report.mjs' + help.slice(help.indexOf('\n')), PRICES_CHECKED), []);
+  // Both checkout forms of README on every platform, each built from the LF text whatever the checkout wrote, so a Linux
+  // run reads what a CRLF checkout reads (CLAUDE.md "A verdict that depends on the platform, the checkout or the
+  // terminal"). The README as read is one of the two, and every check below runs on each as `readme`, its failures
+  // collected and asserted once.
+  const asLf = text => text.replace(/\r\n/g, '\n'), asCrlf = text => asLf(text).replace(/\n/g, '\r\n'), both = text => [asLf(text), asCrlf(text)];
+  assert.ok(both(read).includes(read), 'the README as read is the LF form or the CRLF form');
+  const checks = readme => {
+    assert.deepEqual(useFaults(readme, help), []);
+    const lf = asLf(readme), crlf = asCrlf(readme), formOf = text => text === lf ? 'LF' : text === crlf ? 'CRLF' : 'neither';
+    assert.deepEqual([lf.includes('\r\n'), /(?<!\r)\n/.test(crlf), crlf.includes('\r\n')], [false, false, true], 'one LF form and one CRLF form');
+    assert.notEqual(formOf(readme), 'neither', 'the form read is the LF form or the CRLF form');
+    assert.deepEqual([readme, lf, crlf].map(form => both(form).map(formOf)), [['LF', 'CRLF'], ['LF', 'CRLF'], ['LF', 'CRLF']], 'every form converts to the same two');
+    assert.deepEqual(both(readme).map(form => useFaults(form, help)), [[], []], 'a CRLF checkout reads alike');
+    // Live: the old emulation, CRLF written over the CRLF form, leaves CR CR LF, and the passage is not found.
+    assert.deepEqual(useFaults(crlf.replace(/\n/g, '\r\n'), help), ['§Use: the passage is not found once']);
+    // Live, on both forms: a stale synopsis, a sentence planted inside the passage, and each scope word planted outside it.
+    const stale = help.split('\n')[0].replace(' [--cost-state [--projects <dir>]]', '');
+    assert.deepEqual(both(readme).map(form => useFaults(form, stale + help.slice(help.indexOf('\n'))).slice(0, 1)), [['§Use: the passage changed'], ['§Use: the passage changed']]);
+    assert.deepEqual(both(lf.replace(help.split('\n')[0], () => stale)).map(form => /^the usage lines are not HELP's synopsis once: /m.test(useFaults(form, help).join('\n'))), [true, true]);
+    assert.deepEqual(both(lf.replace('never as $0.', () => 'never as $0. The totals match /cost.')).map(form => useFaults(form, help)), [['§Use: the passage changed'], ['§Use: the passage changed']]);
+    const planted = ['cost-state', 'agent-progress', 'classifier', 'sub-agents only', '/cost'].map(word => both(lf + '\nThe report reads ' + word + '.\n').map(form => useFaults(form, help)));
+    const outside = [['outside §Use: cost-state'], ['outside §Use: agent-progress'], ['outside §Use: classifier'], ['outside §Use: sub-agents only'], ['outside §Use: /cost']];
+    assert.deepEqual(planted, outside.map(faults => [faults, faults]));
+  };
+  const failures = both(read).map(readme => { try { checks(readme); return null; } catch (err) { return err.message; } });
+  assert.deepEqual(failures, [null, null], 'every check passes on the LF form and the CRLF form');
 });

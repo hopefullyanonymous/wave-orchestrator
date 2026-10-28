@@ -104,8 +104,9 @@ batch or per wave by default.
 
 1. **Open the wave**: from the integration tip — after any `census` agent re-run that
    `protocol.md` §Session algorithm step 4 calls for —, cut every member batch's branch;
-   create one worktree per batch under the session scratchpad (never inside the
-   repo); run the ledger's per-worktree setup; commit ONE PROGRESS flip on the
+   create one worktree per batch under the contract's worktree root (its boot step 2 and
+   Git model), or under the session scratchpad for a contract that names none (never
+   inside the repo); run the ledger's per-worktree setup; commit ONE PROGRESS flip on the
    integration branch through the integration worktree (member rows → 🔄, branches
    named, wave base SHA in the session log, `**State**: ACTIVE`). Spawn all
    implementers in a single message so they run concurrently. The main checkout is
@@ -118,8 +119,8 @@ batch or per wave by default.
    with ASKs → polish pass (not a round; a prose ASK's replacement text the orchestrator
    applies itself, `prose-only-diff.mjs` classifies the polish diff, and a polish-phase
    `FIX FIRST` discards the polish at once — protocol.md §Severity and round
-   accounting); `FIX FIRST` → round 1 resumes the implementer (past about 400K tokens of its
-   context, a fresh one with the `rework` prompt — subagent-prompts.md §Spawning rules);
+   accounting); `FIX FIRST` → round 1 resumes the implementer (a fresh one with the `rework`
+   prompt when the render prints `FRESH` — subagent-prompts.md §Spawning rules);
    the second `FIX FIRST` → ⛔, and once the wave's other members are gated and
    integrated the session STOPs instead of opening the next wave; a user-authorized
    third round is a fresh implementer on the strong tier.
@@ -134,7 +135,9 @@ batch or per wave by default.
    is left out of integration, its dependents stay ⬜-blocked, and it is surfaced at
    the next STOP with three verdicts (fix again / ship with the residual / drop).
 5. **Checkpoint or continue**: if the checkpoint table places a checkpoint here →
-   per-checkpoint close-out (tip validation, QA-runner pre-smoke of the agent-tagged
+   protocol.md §Session algorithm step 8's compaction window first, then the
+   per-checkpoint close-out (at the FINAL checkpoint, the run-end prose sweep first
+   whenever LOG.md holds a `### prose sweep:` heading; tip validation, QA-runner pre-smoke of the agent-tagged
    steps with `evidence/C<n>/`, covered rows 🟢 → 🧪, `**State**: AT-CHECKPOINT`), STOP
    with the combined smoke script, delivered as the smoke page (`smoke-page.md`).
    Otherwise → open the next wave immediately, same session, unless protocol.md

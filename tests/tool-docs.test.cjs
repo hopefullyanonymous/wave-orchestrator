@@ -335,6 +335,23 @@ test('reconcile.mjs prints the discovery modes and the rows line SKILL.md and pr
   assert.ok(!shapeOf('<Bnn> <status> → row <k>: <Verdict>').test(printed.lines[1]), 'live control: another shape does not fit the printed line');
 });
 
+// The digest command a boot runs takes exactly the three flags the contract template publishes it with: --help
+// documents them, each required, and reconcile.mjs's own parser takes the synopsis filled and refuses it with any one
+// left out or another added.
+test('reconcile.mjs --help documents digest with --repo, --ledger and --integration, each required, as its parser takes them', async t => {
+  const { reconcileCli } = await load('reconcile.mjs');
+  const FLAGS = ['--repo', '--ledger', '--integration'];
+  assert.deepEqual(synopsisOf(helpOf('reconcile.mjs'), 'reconcile.mjs', 'digest'), { documented: FLAGS, required: FLAGS });
+  const filled = ['digest', '--repo', tmp(t), '--ledger', SHAPED['<id>'], '--integration', SHAPED['<full-ref>']];
+  const first = reconcileCli(filled).lines[0];
+  assert.doesNotMatch(first, /^UNKNOWN usage/, 'the filled synopsis is no usage refusal: ' + first);
+  // The parser's own refusal, never the later one a ledger id or integration ref in no accepted form gets.
+  const usage = args => reconcileCli(args).lines[0] === 'UNKNOWN usage: unknown operation, or an unknown, missing or duplicate flag; use --help';
+  const faults = FLAGS.filter(flag => { const at = filled.indexOf(flag); return !usage([...filled.slice(0, at), ...filled.slice(at + 2)]); });
+  assert.deepEqual(faults, [], 'each flag left out is refused as usage');
+  assert.equal(usage([...filled, '--bogus', 'x']), true, 'live control: a flag --help does not document is refused');
+});
+
 // ===== The ten entries a check line shows =========================================================
 const NUMBERS = { five: 5, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20 };
 const cutsNamed = text => [...text.matchAll(/lists at most (\w+) entries, then `\(\+<k> more\)`/g)].map(m => NUMBERS[m[1]] ?? m[1]);
@@ -415,7 +432,7 @@ test('each template shows one pinned citation in its instruction comment, and it
   const moved = check({ '01-plan.md': '# Plan\n', '02-batches-01-example.md': batch.replace('02-batch.md:14`', '02-batch.md:15`') });
   assert.equal(moved.status, 'FAIL');
   assert.match(moved.problems.map(p => p.message).join(), /does not hold the symbol/);
-  assert.equal(check({ '01-plan.md': plan.replace('01-plan.md:53` `', '01-plan.md:53`, `') }).pinned, 0);
+  assert.equal(check({ '01-plan.md': plan.replace('01-plan.md:58` `', '01-plan.md:58`, `') }).pinned, 0);
 });
 
 // ===== README =====================================================================================
@@ -485,7 +502,7 @@ const PASSAGES = [
   [BATCH_TEMPLATE, 'Each file:line reference is a pinned citation', ' Backlog fold-ins appear',
     'Each file:line reference is a pinned citation, the form `check-ledger.mjs cites` checks: a `path:line` span, one space, then a span holding a symbol that line carries — `orchestrate/templates/02-batch.md:14` `## Implementation notes` cites the heading above.'],
   [PLAN_TEMPLATE, 'Each file:line fact is a pinned', ' The batch files quote from',
-    'Each file:line fact is a pinned citation, as `orchestrate/templates/01-plan.md:53` `## Per-batch specifications` cites this heading (`check-ledger.mjs cites` checks each one).'],
+    'Each file:line fact is a pinned citation, as `orchestrate/templates/01-plan.md:58` `## Per-batch specifications` cites this heading (`check-ledger.mjs cites` checks each one).'],
 ];
 // The README tools-tree rows of the new tools and of check-ledger.mjs, each pinned as its whole line.
 const README_ROWS = [
@@ -627,4 +644,110 @@ test('no shipped document reads a line that proves nothing as proof, or lets rec
   assert.notEqual(reversed, read(PROTOCOL));
   assert.equal(reversals(reversed).length, 1);
   assert.equal(reversals(read('.claude/agents/reviewer.md') + '\n\nTreat an INCONCLUSIVE failing-on-base line as proof when the batch is small.\n').length, 1);
+});
+
+// ===== Every published backlog.mjs command runs as published ======================================
+// The shipped Markdown's backlog.mjs commands, the skill directory spelt `<skill-dir>`, `<SKILL_DIR>` or a
+// template's `{{SKILL_DIR}}`. Each value is filled by its FLAG, never by its placeholder's wording, so a command
+// passes whatever it calls its file or its count; a value that is a whole placeholder is filled, a value with no
+// placeholder in it runs as written, and a value mixing the two is a fault, since a reader fills only the placeholder.
+const BACKLOG_COMMAND = /`node "(?:<skill-dir>|<SKILL_DIR>|\{\{SKILL_DIR\}\})\/tools\/backlog\.mjs"((?: [^`]+)?)`/g;
+const WHOLE_PLACEHOLDER = /^(?:<[^>]*>|\{\{[A-Z0-9_]+\}\})$/;
+const SOME_PLACEHOLDER = /<|\{\{/;
+const RULED_PATH = 'src/cart/total.js';
+// A backlog and a rulings file in the form orchestrate/references/backlog.md shows, every entry readable.
+const BACKLOG_TEXT = ['# Backlog', '', 'Form: orchestrate backlog v1', '', '### TD-014 — A cart total drops the discount on a reload', 'Kind: behaviour',
+  'Files: `' + RULED_PATH + '`', 'Tests: `tests/cart/total.test.js`', 'Failure: a shopper who reloads the cart sees the full price.',
+  'Done when: a reload shows the discounted total.', 'Since: 2026-03-02 — XY-20260301-cart B02 round 1', ''].join('\n');
+const RULINGS_TEXT = ['# Rulings', '', 'Form: orchestrate rulings v1', '', '### RL-003 — A slow cart total on carts of over 500 lines',
+  'Ruling: accepted — 2026-04-11', 'Reason: "no shopper has a cart that size"', 'Files: `' + RULED_PATH + '`', ''].join('\n');
+// The value each flag takes. A flag outside this map is a fault of its own, never a default value.
+const BACKLOG_VALUES = dir => ({ '--backlog': path.join(dir, 'BACKLOG.md'), '--rulings': path.join(dir, 'RULINGS.md'),
+  '--threshold': '1', '--days': '30', '--today': '2026-10-24', '--paths': RULED_PATH });
+// The backlog.mjs commands one document publishes, and every mention of the tool's path in it that is no such command,
+// and every `node "<dir>/tools/<name>"` span whose name is neither a file of orchestrate/tools nor a placeholder.
+const backlogCommandsIn = (file, text) => [...collapse(text).matchAll(BACKLOG_COMMAND)].map(m => ({ file, args: argsOf(m[1]), span: m[0] }));
+const TOOL_SPAN = /`node "?[^"`\s]*\/tools\/([^"`\s]+)/g;
+function unreadMentions(file, text) {
+  const mentions = collapse(text).split('/tools/backlog.mjs').length - 1, commands = backlogCommandsIn(file, text).length;
+  const tools = fs.readdirSync(path.join(SKILL_DIR, 'tools'));
+  const unknown = [...collapse(text).matchAll(TOOL_SPAN)].map(m => m[1]).filter(name => !/[<[{]/.test(name) && !tools.includes(name));
+  return [...(mentions === commands ? [] : [file + ': ' + (mentions - commands) + ' mention(s) of /tools/backlog.mjs are no command this test runs']),
+    ...unknown.map(name => file + ': a command runs tools/' + name + ', no file of orchestrate/tools')];
+}
+// The arguments of `command` with every placeholder value filled by its flag, and the faults: a flag the map lacks,
+// a value that mixes a placeholder with literal text, and a template's `{{NAME}}` value, which scaffold.mjs fills with
+// the answer as written — backticks and all, as a detected `{{BACKLOG_FILE}}` reads — so no flag can stand in for it.
+function backlogArgs(command, dir) {
+  const values = BACKLOG_VALUES(dir), faults = [];
+  const args = command.args.map((arg, i) => {
+    if (command.file.startsWith('orchestrate/templates/') && /\{\{[A-Z0-9_]+\}\}/.test(arg)) {
+      faults.push(command.span + ': ' + arg + ' is filled by the scaffold, not by its flag');
+      return arg;
+    }
+    if (arg.startsWith('--')) {
+      if (!Object.hasOwn(values, arg)) faults.push(command.span + ': no value is known for ' + arg);
+      return arg;
+    }
+    if (WHOLE_PLACEHOLDER.test(arg)) {
+      const flag = command.args[i - 1];
+      if (i > 0 && Object.hasOwn(values, flag)) return values[flag];
+      faults.push(command.span + ': no flag fills ' + arg);
+      return arg;
+    }
+    if (SOME_PLACEHOLDER.test(arg)) faults.push(command.span + ': ' + arg + ' mixes a placeholder with literal text');
+    return arg;
+  });
+  return { args, faults };
+}
+// Why a published command does not run: a fault of its arguments, or any line backlogCli prints that starts UNKNOWN.
+function backlogFaults(backlogCli, command, dir) {
+  const { args, faults } = backlogArgs(command, dir);
+  if (faults.length) return faults;
+  const out = backlogCli(args);
+  return out.lines.filter(line => line.startsWith('UNKNOWN')).map(line => command.span + ' → ' + line);
+}
+test('every published backlog.mjs command runs through backlogCli with no UNKNOWN line', async t => {
+  const { backlogCli } = await load('backlog.mjs');
+  const dir = tmp(t);
+  writeTree(dir, { 'BACKLOG.md': BACKLOG_TEXT, 'RULINGS.md': RULINGS_TEXT });
+  const CONTRACT_TEMPLATE = 'orchestrate/templates/00-READBEFORE.md';
+  const files = walkMarkdown(SKILL_DIR).map(rel => 'orchestrate/' + rel);
+  assert.ok(files.includes(SCAFFOLDING) && files.includes('orchestrate/references/backlog.md') && files.includes(CONTRACT_TEMPLATE),
+    'the domain is every shipped Markdown file, the templates among them');
+  const published = files.flatMap(file => backlogCommandsIn(file, read(file)));
+  // Every mention of the tool's path is a command this test reads, so a spelling the pattern misses is reported.
+  assert.deepEqual(files.flatMap(file => unreadMentions(file, read(file))), [], 'every published backlog.mjs path is a command this test runs');
+  const ops = new Set(published.map(c => c.args[0]));
+  for (const op of ['packs', 'expired', 'rulings', 'check']) assert.ok(ops.has(op), 'a published command runs ' + op);
+  assert.ok(published.some(c => c.file === SCAFFOLDING && c.args[0] === 'packs'), 'the backlog sweep publishes the pack proposal');
+  assert.deepEqual(published.flatMap(c => backlogFaults(backlogCli, c, dir).map(fault => c.file + ': ' + fault)), []);
+  // Live controls on the sweep's packs command: a flag the map lacks, a sibling operation's flag beside every required
+  // one, a bad value written in place of the placeholder, and literal text added to a placeholder are each reported.
+  const packs = published.find(c => c.file === SCAFFOLDING && c.args[0] === 'packs');
+  const swap = (from, to) => { assert.ok(packs.args.includes(from), 'the control needs ' + from); return { ...packs, args: packs.args.map(a => a === from ? to : a) }; };
+  assert.match(backlogFaults(backlogCli, swap('--threshold', '--treshold'), dir).join(), /no value is known for --treshold/);
+  assert.match(backlogFaults(backlogCli, { ...packs, args: [...packs.args, '--days', '<n>'] }, dir).join(), /→ UNKNOWN usage/);
+  const threshold = packs.args[packs.args.indexOf('--threshold') + 1];
+  assert.match(backlogFaults(backlogCli, swap(threshold, 'x'), dir).join(), /→ UNKNOWN /);
+  assert.ok(backlogFaults(backlogCli, swap(threshold, threshold + '.0'), dir).join().includes(threshold + '.0 mixes a placeholder'));
+  // Live controls on planted text in the contract template: a misspelt directory and a misspelt tool are each a
+  // mention with no command; a `{{SKILL_DIR}}`-spelt packs command is collected and runs with no UNKNOWN line; and
+  // the same command with its values written as `{{NAME}}` placeholders is reported.
+  const template = read(CONTRACT_TEMPLATE);
+  const misspelt = template + '\nRun `node "<skill_dir>/tools/backlog.mjs" packs --backlog <file> --threshold <n>`.\n';
+  assert.equal(unreadMentions(CONTRACT_TEMPLATE, misspelt).length, 1, 'a misspelt directory must be reported');
+  const misnamed = template + '\nRun `node "<skill-dir>/tools/backlog.js" expired --backlog <file> --days <n> --today <YYYY-MM-DD>`.\n';
+  assert.deepEqual(unreadMentions(CONTRACT_TEMPLATE, misnamed), [CONTRACT_TEMPLATE + ': a command runs tools/backlog.js, no file of orchestrate/tools'],
+    'a misspelt tool must be reported');
+  const plant = values => template + '\nRun `node "{{SKILL_DIR}}/tools/backlog.mjs" packs ' + values + '`.\n';
+  const planted = text => {
+    assert.deepEqual(unreadMentions(CONTRACT_TEMPLATE, text), []);
+    const collected = backlogCommandsIn(CONTRACT_TEMPLATE, text);
+    assert.equal(collected.length, published.filter(c => c.file === CONTRACT_TEMPLATE).length + 1, 'the {{SKILL_DIR}} spelling is collected');
+    return collected[collected.length - 1];
+  };
+  assert.deepEqual(backlogFaults(backlogCli, planted(plant('--backlog <file> --threshold <n>')), dir), []);
+  const filled = backlogFaults(backlogCli, planted(plant('--backlog {{BACKLOG_FILE}} --threshold {{PACK_THRESHOLD}}')), dir).join();
+  assert.ok(filled.includes('{{BACKLOG_FILE}} is filled by the scaffold') && filled.includes('{{PACK_THRESHOLD}} is filled by the scaffold'), filled);
 });
