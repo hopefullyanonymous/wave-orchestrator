@@ -350,8 +350,9 @@ test('runSpec and parseRunnerOutput are exported with the documented shapes', as
   assert.ok(pending instanceof Promise, 'runSpec is async');
   const result = await pending;
   assert.deepEqual(Object.keys(result).sort(), ['line', 'status', 'steps']);
-  assert.deepEqual(result.steps.map(s => Object.keys(s).sort()), [['emptyFiles', 'exit', 'failed', 'loadFailures', 'name', 'names', 'passed', 'result', 'skipped', 'total']]);
-  assert.deepEqual(result.steps[0], { name: 'one', result: 'FAIL', passed: 1, failed: 2, skipped: 1, total: 4, names: ['node nested spec failure', 'node spec failure'], loadFailures: [], emptyFiles: [], exit: 1 });
+  assert.deepEqual(result.steps.map(s => Object.keys(s).sort()), [['emptyFiles', 'exit', 'failed', 'loadFailures', 'name', 'names', 'passed', 'result', 'skipped', 'tests', 'total']]);
+  assert.deepEqual(result.steps[0], { name: 'one', result: 'FAIL', passed: 1, failed: 2, skipped: 1, total: 4, names: ['node nested spec failure', 'node spec failure'], loadFailures: [], emptyFiles: [],
+    tests: { ran: ['node spec keeps passing', 'node suite > node nested spec failure', 'node suite', 'node spec failure'], skipped: ['node todo failure'] }, exit: 1 });
   assert.equal(result.status, 'FAIL');
   assert.equal(result.line, `FAIL one 2 of 4 failed, 1 skipped: node nested spec failure, node spec failure — log: ${logPath}`);
   const noLog = await runSpec({ steps: [{ name: 'one', argv: [NODE, '-e', ''], parser: 'none' }] }, { cwd: dir });
@@ -995,7 +996,8 @@ test('live: the real spec and TAP reporters report the failing name and counts 1
     const logPath = path.join(dir, reporter + '.log');
     const r = await runSpec({ steps: [{ name: 'tests', argv: [NODE, '--test', '--test-reporter=' + reporter, files.mixed], parser: 'node' }] }, { cwd: dir, logPath });
     assert.equal(r.status, 'FAIL', reporter);
-    assert.deepEqual(r.steps[0], { name: 'tests', result: 'FAIL', passed: 1, failed: 1, skipped: 0, total: 2, names: ['live control zebra fails 7f3a'], loadFailures: [], emptyFiles: [], exit: 1 }, reporter);
+    assert.deepEqual(r.steps[0], { name: 'tests', result: 'FAIL', passed: 1, failed: 1, skipped: 0, total: 2, names: ['live control zebra fails 7f3a'], loadFailures: [], emptyFiles: [],
+      tests: { ran: ['live control passes', 'live control zebra fails 7f3a'], skipped: [] }, exit: 1 }, reporter);
     assert.equal(r.line, `FAIL tests 1 of 2 failed: live control zebra fails 7f3a — log: ${logPath}`);
     const green = await runSpec({ steps: [{ name: 'tests', argv: [NODE, '--test', '--test-reporter=' + reporter, files.green], parser: 'node' }] }, { cwd: dir, logPath });
     assert.equal(green.status, 'PASS', reporter);
@@ -1004,6 +1006,52 @@ test('live: the real spec and TAP reporters report the failing name and counts 1
   const viaCli = cli(['--spec', writeSpec(dir, [{ name: 'tests', argv: [NODE, '--test', '--test-reporter=spec', files.mixed], parser: 'node' }]), '--log', path.join(dir, 'cli.log')]);
   assert.equal(viaCli.code, 1);
   assert.equal(viaCli.line, `FAIL tests 1 of 2 failed: live control zebra fails 7f3a — log: ${path.join(dir, 'cli.log')}`);
+});
+
+// listTests (mutate.mjs compares which tests ran by name): every test and suite each real reporter
+// lists, by path. A failing test's message carries a fake result line of each reporter, so the
+// spec failing-tests block and the TAP YAML block must not be read; a CR in a name is spec's raw byte.
+const LISTED = lines("const { test, describe } = require('node:test');", "test('plain', () => {});", "test('skipped one', { skip: true }, () => {});",
+  "test('todo reason', { todo: 'later' }, () => {});", "test('todo failing', { todo: true }, () => { throw new Error('nope'); });",
+  "test('parent', async t => { await t.test('child a', () => {}); await t.test('child b', { skip: 'Windows only' }, () => {}); });",
+  "describe('outer', () => { describe('inner', () => { test('deep', () => {}); }); });", "describe.skip('skipped suite', () => { test('never counted', () => {}); });",
+  "test('fails', () => { throw new Error(['line one', '✔ fake in error (2ms)', 'ok 3 - fake tap in error'].join(String.fromCharCode(10))); });",
+  "test('a # hash', () => {});", '');
+const LISTED_WANT = { ran: ['plain', 'parent > child a', 'parent', 'outer > inner > deep', 'outer > inner', 'outer', 'fails', 'a # hash'],
+  skipped: ['skipped one', 'todo reason', 'todo failing', 'parent > child b', 'skipped suite'] };
+test('live: listTests names each test and suite both reporters list, by path, ran or skipped; null unless exactly the tests plus suites', async t => {
+  const { runSpec, listTests } = await api;
+  const dir = tmp(t);
+  fs.writeFileSync(path.join(dir, 'listed.test.cjs'), LISTED);
+  fs.writeFileSync(path.join(dir, 'carriage.test.cjs'), lines("const test = require('node:test');", "test('carriage' + String.fromCharCode(13) + ' return', () => {});", ''));
+  const run = async (reporter, file) => {
+    const r = await runSpec({ steps: [{ name: 'tests', argv: [NODE, '--test', '--test-reporter=' + reporter, file], parser: 'node' }] }, { cwd: dir, logPath: path.join(dir, reporter + '.log'), env: cleanEnv() });
+    return { step: r.steps[0], text: stripAnsi(fs.readFileSync(path.join(dir, reporter + '.log'), 'utf8')) };
+  };
+  const out = {};
+  for (const reporter of ['spec', 'tap']) {
+    out[reporter] = await run(reporter, 'listed.test.cjs');
+    assert.equal(out[reporter].step.total, 10, reporter + ': ' + out[reporter].text);
+    assert.deepEqual(out[reporter].step.tests, LISTED_WANT, reporter);
+  }
+  // The text forms: CRLF and every kind of ANSI read alike; a line too many or too few is no listing.
+  const spec = out.spec.text, tap = out.tap.text;
+  for (const text of [spec, tap]) {
+    assert.deepEqual(listTests('node', text.replace(/\n/g, '\r\n')), LISTED_WANT, 'CRLF');
+    for (const kind of Object.keys(ANSI_KINDS)) assert.deepEqual(listTests('node', paint(text, kind)), LISTED_WANT, kind);
+  }
+  const printed = spec.replace('✔ plain (', '✔ printed by a test (1ms)\n✔ plain ('), dropped = spec.replace(/^✔ plain \(.*\n/m, '');
+  assert.notEqual(printed, spec); assert.notEqual(dropped, spec);
+  assert.equal(listTests('node', printed), null, 'a result line a test printed itself');
+  assert.equal(listTests('node', dropped), null, 'a result line missing');
+  assert.equal(listTests('node', tap.replace(/^ok 1 - plain$/m, 'ok 1 - plain\nok 2 - printed by a test')), null, 'TAP: one too many');
+  assert.equal(listTests('node', spec.replace(/^ℹ tests 10$/m, 'ℹ tests 99')), null, 'a summary that counts other tests');
+  assert.equal(listTests('node', spec.split('\n').filter(l => !l.startsWith('ℹ ')).join('\n')), null, 'no summary: nothing to hold the listing to');
+  for (const parser of ['jest', 'pytest', 'cargo', 'none']) assert.equal(listTests(parser, spec), null, parser + ' names no listing');
+  // spec prints a lone CR in a name raw: it stays inside its line.
+  const carriage = await run('spec', 'carriage.test.cjs');
+  assert.ok(carriage.text.includes('carriage\r return ('), carriage.text);
+  assert.deepEqual(carriage.step.tests, { ran: ['carriage\r return'], skipped: [] });
 });
 
 test('live: a test file that fails to load comes back in loadFailures, absolute or relative, both reporters', async t => {

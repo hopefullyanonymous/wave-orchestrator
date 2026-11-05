@@ -440,7 +440,7 @@ async function recordStep($, e, result) {
   const agent = e.agentId ?? null;
   const attribution = agent === null ? mainAttribution(costs.tag) : await attributionOf($, agent);
   const record = buildRecord({ now, session, agent, attribution, usage });
-  addRecord(costs, record, PRICES);
+  addRecord(costs, record, PRICES, e.effort);
   fileOf(session).pending.push(recordLine(record));
 }
 

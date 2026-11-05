@@ -273,7 +273,11 @@ function workTreeRoot(repo) {
   if (top !== real) throw new Unknown(`--repo ${repo} is not the root of its git work tree`);
   return real;
 }
-const exists = p => { try { fs.lstatSync(p); return true; } catch { return false; } };
+// Whether a path is there, a final link unfollowed: only ENOENT and ENOTDIR prove it absent.
+const exists = (p, shown) => {
+  try { fs.lstatSync(p); return true; }
+  catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return false; throw new Unknown(`cannot stat ${shown}`); }
+};
 const removeTree = dir => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
 
 // The staged ledger held to every check, each problem named by its rule; the parse problems that
@@ -296,7 +300,7 @@ const refused = problems => verdict({ status: 'FAIL', problems });
 
 // Pure core: an answers object in; the ledger written under <repo>/.agents/changes/<CHANGE_ID> and
 // the fold-in markers applied only when nothing is refused. Throws Unknown for an unusable --repo,
-// skill directory or template.
+// skill directory or template, or a ledger path it cannot stat.
 export async function scaffold(answers, { repo, skillDir = DEFAULT_SKILL, tmpRoot = os.tmpdir() } = {}) {
   const root = workTreeRoot(repo);
   const { batch: batchTemplate, rest, domain } = domainOf(readTemplates(skillDir));
@@ -337,8 +341,11 @@ export async function scaffold(answers, { repo, skillDir = DEFAULT_SKILL, tmpRoo
   if (problems.length || !computed) return refused(problems);
 
   const changeId = computed.CHANGE_ID, target = path.join(root, '.agents', 'changes', changeId);
+  // A closed ledger keeps its id, so one under .agents/archive/ is taken as well.
+  const taken = () => ['changes', 'archive'].map(dir => `.agents/${dir}/${changeId}`)
+    .filter(rel => exists(path.join(root, ...rel.split('/')), rel)).map(rel => `${rel} already exists`);
   const edited = foldIns(root, answers.foldins, changeId, names.map(n => n.id), text(values, 'BACKLOG_ID_PREFIX'), problems);
-  if (exists(target)) problems.push(`.agents/changes/${changeId} already exists`);
+  problems.push(...taken());
   if (problems.length) return refused(problems);
 
   // Every file in memory first: the templates, one batch file each, then the specs.
@@ -358,7 +365,8 @@ export async function scaffold(answers, { repo, skillDir = DEFAULT_SKILL, tmpRoo
     problems.push(...stagedProblems(staged, root));
   } finally { removeTree(stage); }
   if (problems.length) return refused(problems);
-  if (exists(target)) return refused([`.agents/changes/${changeId} already exists`]);
+  const late = taken();
+  if (late.length) return refused(late);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   fs.mkdirSync(target);
   try {

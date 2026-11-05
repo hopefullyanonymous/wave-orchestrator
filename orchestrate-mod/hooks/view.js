@@ -74,6 +74,10 @@ const padStart = (text, width) => ' '.repeat(Math.max(0, width - cells(text))) +
 export const tokensK = n => (isCount(n) ? `${Math.round(n / 1000)}K` : '?');
 // A context window: `1M` for 1,000,000, else as tokens.
 export const windowText = n => (n === 1000000 ? '1M' : tokensK(n));
+// A model id without its `claude-` prefix and date suffix: `opus-5-5`; `?` when unknown.
+export const modelText = id => (typeof id === 'string' && id !== '' ? id.replace(/^claude-/, '').replace(/-\d{8}$/, '') : '?');
+// An effort as sent: a level as itself, a budget as tokens, `-` for a request that sent none.
+export const effortText = effort => (typeof effort === 'string' && effort !== '' ? effort : isCount(effort) ? tokensK(effort) : '-');
 // Whole minutes in `ms`; `?` when unknown.
 export const minutes = ms => (isNumber(ms) ? String(Math.max(0, Math.floor(ms / 60000))) : '?');
 // Dollars to two decimals from a number or a `{ usd, unpriced }` total; a total leaving unpriced records out
@@ -151,7 +155,7 @@ export function readCosts(run, id) {
 
 // The running agents of `$.agent.list()`'s answer, joined to `agents`, the cost log's aggregates by agent id
 // (orchestrate-mod/hooks/cost.js `newTotals`): copies, oldest first, then the ones the aggregates do not hold,
-// which carry only their type.
+// which carry only their type. A known one carries its last request's model and effort.
 export function runningAgents(list, agents) {
   if (!Array.isArray(list)) return null;
   const known = [], unknown = [];
@@ -159,7 +163,7 @@ export function runningAgents(list, agents) {
     if (!isObject(info) || info.status !== 'running') continue;
     const a = typeof info.id === 'string' ? agents.get(info.id) : undefined;
     if (!a) { unknown.push({ known: false, type: typeof info.type === 'string' ? info.type : '?' }); continue; }
-    known.push({ known: true, role: a.role ?? a.type ?? info.type, batch: a.batch, firstSeen: a.firstSeen, ctx: a.lastPrompt, usd: a.usd, unpriced: a.unpriced });
+    known.push({ known: true, role: a.role ?? a.type ?? info.type, batch: a.batch, firstSeen: a.firstSeen, ctx: a.lastPrompt, model: a.model ?? null, effort: a.effort ?? null, usd: a.usd, unpriced: a.unpriced });
   }
   known.sort((a, b) => a.firstSeen - b.firstSeen);
   return [...known, ...unknown];
@@ -222,10 +226,11 @@ function agentLines(agents, at) {
   if (agents === null) return ['running  agents unknown — the agent list cannot be read'];
   if (agents.length === 0) return ['running  none'];
   const cols = agents.map(a => (a.known
-    ? [String(a.role), a.batch ?? '-', `${isNumber(at) ? minutes(at - a.firstSeen) : '?'}m`, `${tokensK(a.ctx)} ctx`, dollars({ usd: a.usd, unpriced: a.unpriced })]
-    : [a.type, '?', '?m', '? ctx', '?']));
-  const widths = [0, 1, 2, 3, 4].map(i => Math.max(...cols.map(c => cells(c[i]))));
-  return cols.map((c, n) => `${n === 0 ? 'running' : '       '}  ${c.map((cell, i) => (i < 2 ? padEnd(cell, widths[i]) : padStart(cell, widths[i]))).join('  ')}`.trimEnd());
+    ? [String(a.role), a.batch ?? '-', `${isNumber(at) ? minutes(at - a.firstSeen) : '?'}m`, `${tokensK(a.ctx)} ctx`, modelText(a.model), effortText(a.effort), dollars({ usd: a.usd, unpriced: a.unpriced })]
+    : [a.type, '?', '?m', '? ctx', '?', '?', '?']));
+  const widths = cols[0].map((_, i) => Math.max(...cols.map(c => cells(c[i]))));
+  const left = i => i < 2 || i === 4 || i === 5;
+  return cols.map((c, n) => `${n === 0 ? 'running' : '       '}  ${c.map((cell, i) => (left(i) ? padEnd(cell, widths[i]) : padStart(cell, widths[i]))).join('  ')}`.trimEnd());
 }
 
 // The safe point the pane names: the shown ledger's clear threshold, else SAFE_POINT when the view cannot be read,

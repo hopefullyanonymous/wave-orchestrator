@@ -48,6 +48,16 @@ const PATHS = lines('// Joins two path parts.', 'exports.onWindows = () => false
 const WIN_TEST = lines("const test = require('node:test');", "const assert = require('node:assert/strict');", "const { onWindows, join } = require('./paths.cjs');",
   "test('join puts a slash between', () => { assert.equal(join('a', 'b'), 'a/b'); });",
   "test('windows join', { skip: !onWindows() && 'Windows only' }, () => { assert.equal(join('a', 'b'), 'a\\\\b'); });");
+// A swap: the control runs the POSIX test and skips the Windows one; turned on, the switch skips
+// the one and runs the other, which passes (swap) or fails (swap-red). Every count stays the same.
+const swapTest = windows => lines("const test = require('node:test');", "const assert = require('node:assert/strict');", "const { onWindows, join } = require('./paths.cjs');",
+  "test('posix join', { skip: onWindows() && 'POSIX only' }, () => { assert.equal(join('a', 'b'), 'a/b'); });",
+  `test('windows join', { skip: !onWindows() && 'Windows only' }, () => { ${windows} });`);
+// A test holding `blocks` buffers of 16 MiB, filled so the pages are real: off the V8 heap, where
+// --max-old-space-size never reaches.
+const HOG = lines('// How many 16 MiB blocks the test holds.', 'exports.blocks = 1;');
+const HOG_TEST = lines("const test = require('node:test');", "const assert = require('node:assert/strict');", "const { blocks } = require('./hog.cjs');",
+  "test('holds its blocks', () => { const kept = []; for (let i = 0; i < blocks; i++) kept.push(Buffer.alloc(16 * 1024 * 1024, 1)); assert.equal(kept.length, blocks); });");
 const DATA_TEST = lines(...HEAD_LINES, 'const CASES = [[2, 3, 5]];', 'for (const [a, b, sum] of CASES) test(`add ${a} and ${b}`, () => { assert.equal(add(a, b), sum); });');
 const TESTS = ['math.test.cjs', 'extra.test.cjs', 'crlf.test.cjs'];
 const specOf = (files = TESTS) => ({ steps: [{ name: 'tests', argv: [NODE, '--test', ...files], parser: 'node' }] });
@@ -76,6 +86,8 @@ const M = {
     replace: "second: true };\ntest('flip first adds', { skip: SKIP.first && 'flipped off' }, () => { assert.equal(add(1, 1), 3); });" },
   u1: { id: 'u1', file: 'paths.cjs', find: 'exports.onWindows = () => false;', replace: 'exports.onWindows = () => true;' },
   j1: { id: 'j1', file: 'paths.cjs', find: "a + '/' + b", replace: "a + '-' + b" },
+  // g1 makes the hog hold 512 MiB.
+  g1: { id: 'g1', file: 'hog.cjs', find: 'exports.blocks = 1;', replace: 'exports.blocks = 32;' },
 };
 
 function fixture(t) {
@@ -84,7 +96,8 @@ function fixture(t) {
   fs.mkdirSync(work);
   const files = { 'math.cjs': MATH, 'math.test.cjs': MATH_TEST, 'crlf.txt': CRLF_TXT, 'crlf.test.cjs': CRLF_TEST, 'sub/keep.txt': 'kept\n', 'overlap.txt': 'aaa\n',
     'mixed.txt': 'one\r\ntwo\nthree\n', 'flat.txt': 'flat', 'skipped.test.cjs': SKIPPED_TEST, 'flip.test.cjs': twoSkippable('flip', false),
-    'part.test.cjs': twoSkippable('part', true), 'data.test.cjs': DATA_TEST, 'paths.cjs': PATHS, 'win.test.cjs': WIN_TEST };
+    'part.test.cjs': twoSkippable('part', true), 'data.test.cjs': DATA_TEST, 'paths.cjs': PATHS, 'win.test.cjs': WIN_TEST,
+    'swap.test.cjs': swapTest("assert.equal(join('a', 'b').length, 3);"), 'swap-red.test.cjs': swapTest("assert.equal(join('a', 'b'), 'a\\\\b');"), 'hog.cjs': HOG, 'hog.test.cjs': HOG_TEST };
   for (const [file, text] of Object.entries(files)) repo.write(file, text);
   repo.write('extra.test.cjs', extraTest(true));
   const red = repo.commit('red: extra two fails');
@@ -303,8 +316,8 @@ test('a red control, and a control that ran no tests, abort before any mutation'
 
 // ===== Skips and files that run no tests: a verdict needs the control's own skipped count ==========
 // Counts are not names: a mutation that skips one test and runs one the control skipped changes
-// neither the total nor the skipped count, so these pins say what a moved skipped count does, never
-// that equal counts mean the same tests ran.
+// neither the total nor the skipped count, so these pins say what a moved skipped count does; the
+// swap, which equal counts hide, is decided by name below.
 const scoped = (fx, files, muts, log) => mutateArgs(fx, muts, log).map(a => a === fx.validate ? fx.json(log.replace(/\.log$/, '.json'), specOf(files)) : a);
 const secs = '\\(\\d+s\\)';
 test('a scoped suite whose only test is skipped is no control: CONTROL FAILED, nothing mutated; a partly skipped one runs, and its skip is no verdict', t => {
@@ -348,6 +361,24 @@ test('a mutation that moves a step\'s skipped count — a test skipped that ran,
   assert.deepEqual(back.lines.slice(2), ['MUTATE 0 killed, 0 survived, 1 other']);
   assert.equal(back.code, 2);
   assert.ok(readLog(back).includes('==> mutate: p1: CRASHED — step tests: 1 test ran that the control skipped'), readLog(back));
+});
+
+test('a swap — the test the control ran skipped, the one it skipped run — keeps every count and is CRASHED by name, never SURVIVED or KILLED', t => {
+  const fx = fixture(t);
+  // u1 turns the Windows switch on: the POSIX test is skipped and the Windows one runs, passing in
+  // swap and failing by name in swap-red; by counts alone they read SURVIVED and KILLED. j1, beside
+  // it, breaks the join the control's running test checks.
+  const reason = '==> mutate: u1: CRASHED — step tests: 1 test ran that the control did not run (windows join); 1 test did not run that ran in the control (posix join)';
+  const swap = cli(fx, 'mutate', scoped(fx, ['swap.test.cjs'], fx.muts(M.u1, M.j1), 'swap.log'));
+  assert.match(swap.lines[0], new RegExp(`^CONTROL PASS PASS tests 1/2, 1 skipped ${secs}$`));
+  assert.match(swap.lines[1], new RegExp(`^CRASHED u1: PASS tests 1/2, 1 skipped ${secs}$`));
+  assert.deepEqual(swap.lines.slice(2), ['KILLED j1: posix join', 'MUTATE 1 killed, 0 survived, 1 other']);
+  assert.equal(swap.code, 2);
+  assert.ok(readLog(swap).includes(reason), readLog(swap));
+  const red = cli(fx, 'mutate', scoped(fx, ['swap-red.test.cjs'], fx.muts(M.u1, M.j1), 'swap-red.log'));
+  assert.match(red.lines[0], new RegExp(`^CONTROL PASS PASS tests 1/2, 1 skipped ${secs}$`));
+  assert.deepEqual(red.lines.slice(1), [`CRASHED u1: FAIL tests 1 of 2 failed, 1 skipped: windows join — log: ${red.log}`, 'KILLED j1: posix join', 'MUTATE 1 killed, 0 survived, 1 other']);
+  assert.ok(readLog(red).includes(reason), readLog(red));
 });
 
 test('a mutation after which no test passes is CRASHED, and its log says that no test passed', t => {
@@ -409,6 +440,55 @@ test('a mutation that outlives --timeout is TIMEOUT, killed, and the run still e
   assert.equal(r.code, 2);
   assert.ok(r.ms < 90000, 'the run ended ' + r.ms + 'ms after start');
   assert.ok(readLog(r).includes('==> mutate: h1: TIMEOUT — a step outlived --timeout'));
+});
+
+// Whether this machine can hold a step to a cap, asked without mutate.mjs: a scope's own cgroup
+// read back by a shell.
+const scopeHolds = mib => {
+  const r = spawnSync('systemd-run', ['--user', '--scope', '--quiet', '-p', `MemoryMax=${mib}M`, '--', 'sh', '-c', 'cat "/sys/fs/cgroup$(sed -n "s/^0:://p" /proc/self/cgroup)/memory.max"'],
+    { encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  return process.platform === 'linux' && r.status === 0 && r.stdout.trim() === String(mib * 1024 * 1024);
+};
+test('--memory caps each run: a mutant holding more is killed and CRASHED, the same mutant under a larger cap survives; uncapped, the log says why', t => {
+  const fx = fixture(t), capped = scopeHolds(256);
+  const run = (mib, log) => cli(fx, 'mutate', [...scoped(fx, ['hog.test.cjs'], fx.muts(M.g1), log), '--memory', String(mib)]);
+  const small = run(256, 'hog-small.log'), large = run(2048, 'hog-large.log');
+  for (const [r, mib] of [[small, 256], [large, 2048]]) {
+    assert.match(r.lines[0], new RegExp(`^CONTROL PASS PASS tests 1/1 ${secs}$`));
+    const first = readLog(r).split('\n')[0];
+    if (capped) assert.equal(first, `==> mutate: memory cap: ${mib} MiB per step, swap barred (a systemd-run --user scope)`);
+    else assert.match(first, /^==> mutate: no memory cap: /);
+  }
+  // The cap, not the mutation, decides: the 512 MiB the mutant holds outgrows only the small one.
+  assert.deepEqual(large.lines.slice(1), ['SURVIVED g1', 'MUTATE 0 killed, 1 survived, 0 other']);
+  if (!capped) return assert.deepEqual(small.lines.slice(1), large.lines.slice(1));
+  assert.deepEqual(small.lines.slice(1), [`CRASHED g1: FAIL tests CRASHED before summary (exit SIGKILL) — log: ${small.log}`, 'MUTATE 0 killed, 0 survived, 1 other']);
+  assert.ok(readLog(small).includes('==> mutate: g1: CRASHED — step tests ended by a signal (SIGKILL): over the memory cap, killed from outside, or crashed'), readLog(small));
+});
+
+test('memoryCap: a systemd user scope only once a probe reads the cap back from its own cgroup; anywhere else none, and the note says why', async () => {
+  const { memoryCap, memoryOf, defaultMemoryMib } = await api();
+  const MIB = 256 * 1024 * 1024, want = `${MIB} 0 1`, calls = [];
+  const fake = out => (command, args) => { calls.push([command, ...args]); return out; };
+  const capped = memoryCap(256, { platform: 'linux', run: fake({ status: 0, stdout: want }) });
+  assert.deepEqual(capped, { prefix: ['systemd-run', '--user', '--scope', '--quiet', '-p', 'MemoryMax=256M', '-p', 'MemorySwapMax=0', '-p', 'OOMPolicy=kill', '--'],
+    note: 'memory cap: 256 MiB per step, swap barred (a systemd-run --user scope)' });
+  assert.deepEqual(calls[0].slice(0, capped.prefix.length), capped.prefix, 'the probe runs in the scope the steps get');
+  const none = why => ({ prefix: [], note: `no memory cap: a systemd-run --user scope could not be shown to hold one (${why})` });
+  for (const [label, out, why] of [['no memory cap set', { status: 0, stdout: `max 0 1` }, `its cgroup read "max 0 1", not "${want}"`],
+    ['swap allowed', { status: 0, stdout: `${MIB} max 1` }, `its cgroup read "${MIB} max 1", not "${want}"`],
+    ['an OOM kill not group-wide', { status: 0, stdout: `${MIB} 0 0` }, `its cgroup read "${MIB} 0 0", not "${want}"`],
+    ['no systemd-run', { error: Object.assign(new Error('spawn'), { code: 'ENOENT' }) }, 'ENOENT'],
+    ['no user manager, or a cgroup v1 host', { status: 1, stdout: '' }, 'exit 1']]) {
+    assert.deepEqual(memoryCap(256, { platform: 'linux', run: fake(out) }), none(why), label);
+  }
+  for (const platform of ['win32', 'darwin']) {
+    assert.deepEqual(memoryCap(256, { platform, run: () => assert.fail('no probe off Linux') }), { prefix: [], note: `no memory cap: none is set on ${platform}` });
+  }
+  // This machine, unfaked: capped exactly where a scope independently holds a cap.
+  assert.equal(memoryCap(256).prefix.length > 0, scopeHolds(256), memoryCap(256).note);
+  assert.equal(defaultMemoryMib(), Math.floor(require('node:os').totalmem() / 2 / 1024 / 1024));
+  assert.deepEqual([memoryOf(undefined), memoryOf('1'), memoryOf(String(2 ** 30))], [undefined, 1, 2 ** 30]);
 });
 
 test('a ref that names no commit, a checkout that fails and a temp root that cannot hold a directory: UNKNOWN, nothing left', t => {
@@ -740,13 +820,15 @@ test('classification: TIMEOUT first, then CRASHED on no summary, a file that fai
   ];
   for (const [label, got, want] of rows) assert.deepEqual(got, want, label);
   // The reverse move, against a control that skipped two; and a moved count in one step voids a named failure in another.
-  const skipping = { status: 'PASS', steps: [step({ passed: 3, skipped: 2 })] };
+  // Beside the control's own skips a verdict also needs both runs to name the same tests that ran.
+  const named = { tests: { ran: ['a test', 't2', 't3'], skipped: ['s1', 's2'] } };
+  const skipping = { status: 'PASS', steps: [step({ passed: 3, skipped: 2, ...named })] };
   assert.deepEqual(classifyRun(skipping, { status: 'PASS', steps: [step({ passed: 4, skipped: 1 })] }, ['node']), { kind: 'CRASHED', reason: 'step tests: 1 test ran that the control skipped' });
-  assert.deepEqual(classifyRun(skipping, { status: 'PASS', steps: [step({ passed: 3, skipped: 2 })] }, ['node']), { kind: 'SURVIVED' }, 'the control\'s own skips are no verdict');
+  assert.deepEqual(classifyRun(skipping, { status: 'PASS', steps: [step({ passed: 3, skipped: 2, ...named })] }, ['node']), { kind: 'SURVIVED' }, 'the control\'s own skips are no verdict');
   // Fewer skipped beside a named failure: the failing test may be the one the control skipped.
   assert.deepEqual(classifyRun(skipping, { status: 'FAIL', steps: [step({ result: 'FAIL', passed: 3, failed: 1, skipped: 1, names: ['a test'], exit: 1 })] }, ['node']),
     { kind: 'CRASHED', reason: 'step tests: 1 test ran that the control skipped' });
-  assert.deepEqual(classifyRun(skipping, { status: 'FAIL', steps: [step({ result: 'FAIL', passed: 2, failed: 1, skipped: 2, names: ['a test'], exit: 1 })] }, ['node']),
+  assert.deepEqual(classifyRun(skipping, { status: 'FAIL', steps: [step({ result: 'FAIL', passed: 2, failed: 1, skipped: 2, names: ['a test'], exit: 1, ...named })] }, ['node']),
     { kind: 'KILLED', names: ['a test'] }, 'a failure beside the control\'s own skips is a kill');
   const two = { status: 'PASS', steps: [step(), step({ name: 'more' })] };
   assert.deepEqual(classifyRun(two, { status: 'FAIL', steps: [failed, step({ name: 'more', passed: 4, skipped: 1 })] }, ['node', 'node']),
@@ -762,6 +844,58 @@ test('classification: TIMEOUT first, then CRASHED on no summary, a file that fai
   assert.equal(verdictLine('m1', { kind: 'TIMEOUT' }, 'FAIL'), 'TIMEOUT m1');
 });
 
+// Each rule below decides cases no earlier rule does: the same runs with the rule's cause removed
+// read SURVIVED or KILLED, the live controls.
+const counted = over => ({ name: 'tests', result: 'PASS', passed: 5, failed: 0, skipped: 0, total: 5, names: [], loadFailures: [], emptyFiles: [], exit: 0, ...over });
+const verdictOf = async (control, ...steps) => (await api()).classifyRun({ status: 'PASS', steps: control }, { status: steps.every(s => s.result === 'PASS') ? 'PASS' : 'FAIL', steps }, steps.map(() => 'node'));
+const killedBy = over => counted({ result: 'FAIL', passed: 4, failed: 1, names: ['a test'], exit: 1, ...over });
+test('a step whose passed, failed and skipped counts do not add up to its total is CRASHED, short or over, the control\'s too: never SURVIVED or KILLED', async () => {
+  assert.deepEqual(await verdictOf([counted()], counted()), { kind: 'SURVIVED' });
+  assert.deepEqual(await verdictOf([counted()], killedBy()), { kind: 'KILLED', names: ['a test'] });
+  const odd = (who, p, f, s, total) => ({ kind: 'CRASHED', reason: `step tests: ${who} counts do not add up (${p} passed, ${f} failed, ${s} skipped of ${total})` });
+  // A pass count that moved with nothing failed or skipped, one short and one over; beside a named failure.
+  assert.deepEqual(await verdictOf([counted()], counted({ passed: 4 })), odd('its', 4, 0, 0, 5));
+  assert.deepEqual(await verdictOf([counted()], counted({ passed: 6 })), odd('its', 6, 0, 0, 5));
+  assert.deepEqual(await verdictOf([counted()], killedBy({ passed: 3 })), odd('its', 3, 1, 0, 5));
+  assert.deepEqual(await verdictOf([counted({ passed: 4 })], counted()), odd("the control's", 4, 0, 0, 5));
+});
+
+test('a step ended by a signal — exit 137 through a shell, or SIGKILL, as the memory cap kills — is CRASHED, never KILLED', async () => {
+  for (const exit of [1, 128]) assert.deepEqual(await verdictOf([counted()], killedBy({ exit })), { kind: 'KILLED', names: ['a test'] }, 'exit ' + exit);
+  for (const exit of [129, 137, 'SIGKILL', 'SIGTERM']) {
+    assert.deepEqual(await verdictOf([counted()], killedBy({ exit })),
+      { kind: 'CRASHED', reason: `step tests ended by a signal (${typeof exit === 'string' ? exit : 'exit ' + exit}): over the memory cap, killed from outside, or crashed` }, String(exit));
+  }
+  // The timeout's own kill stays TIMEOUT.
+  assert.equal((await verdictOf([counted()], counted({ result: 'TIMEOUT', passed: null, failed: null, skipped: null, total: null, exit: 'SIGKILL' }))).kind, 'TIMEOUT');
+});
+
+test('a swap keeps every count: a test that ran but not in the control, by name, is CRASHED; where either run names no tests, a control that skipped any decides nothing', async () => {
+  const list = (ran, skipped) => ({ tests: { ran, skipped } });
+  const step = over => counted({ passed: 2, skipped: 1, total: 3, ...over });
+  const control = [step(list(['posix join', 'join'], ['windows join']))];
+  const SWAP = { kind: 'CRASHED', reason: 'step tests: 1 test ran that the control did not run (windows join); 1 test did not run that ran in the control (posix join)' };
+  // The same tests: the verdicts stand, a renamed skipped test included, which changes nothing that ran.
+  assert.deepEqual(await verdictOf(control, step(list(['posix join', 'join'], ['windows join']))), { kind: 'SURVIVED' });
+  assert.deepEqual(await verdictOf(control, step({ result: 'FAIL', passed: 1, failed: 1, names: ['posix join'], exit: 1, ...list(['posix join', 'join'], ['windows join']) })), { kind: 'KILLED', names: ['posix join'] });
+  assert.deepEqual(await verdictOf(control, step(list(['join', 'posix join'], ['windows join, renamed']))), { kind: 'SURVIVED' });
+  // The swap, passing and failing by the name of the test the control skipped.
+  assert.deepEqual(await verdictOf(control, step(list(['windows join', 'join'], ['posix join']))), SWAP);
+  assert.deepEqual(await verdictOf(control, step({ result: 'FAIL', passed: 1, failed: 1, names: ['windows join'], exit: 1, ...list(['windows join', 'join'], ['posix join']) })), SWAP);
+  // A name counts as often as it occurs.
+  assert.deepEqual(await verdictOf([step(list(['join', 'join'], ['x']))], step(list(['join', 'x'], ['join']))),
+    { kind: 'CRASHED', reason: 'step tests: 1 test ran that the control did not run (x); 1 test did not run that ran in the control (join)' });
+  // Either run unnamed beside the control's skip; a control that skipped nothing needs no names.
+  const blind = 'a test that ran here may be one the control skipped';
+  assert.deepEqual(await verdictOf(control, step()), { kind: 'CRASHED', reason: `step tests: the control skipped 1 test, and this run does not name each of its tests: ${blind}` });
+  assert.deepEqual(await verdictOf([step()], step(list(['posix join', 'join'], ['windows join']))), { kind: 'CRASHED', reason: `step tests: the control skipped 1 test, and it does not name each of its tests: ${blind}` });
+  assert.deepEqual(await verdictOf([counted()], counted()), { kind: 'SURVIVED' });
+  assert.deepEqual(await verdictOf([counted(list(['a', 'b', 'c', 'd', 'e'], []))], killedBy()), { kind: 'KILLED', names: ['a test'] });
+  // The names a reason lists stop at ten.
+  const many = n => Array.from({ length: n }, (_, i) => 'n' + i);
+  assert.match((await verdictOf([counted(list(many(5), []))], counted(list(many(16).slice(5), [])))).reason, /^step tests: 11 tests ran that the control did not run \(n5, .*, n14 \(\+1 more\)\); 5 tests did not run/);
+});
+
 // ===== Usage ========================================================================================
 test('every invalid invocation is one UNKNOWN line with exit 2, before any checkout or log', async t => {
   const fx = fixture(t);
@@ -772,6 +906,7 @@ test('every invalid invocation is one UNKNOWN line with exit 2, before any check
   const muts = (name, value) => args({ mutations: fx.json(name, value) });
   const one = over => ({ mutations: [{ ...M.m1, ...over }] });
   const FLAGS = /^UNKNOWN usage: unknown, missing or duplicate flag; use --help$/, TIMEOUT = /^UNKNOWN usage: --timeout must be a positive whole number of seconds, at most 2147483$/;
+  const MEMORY = /^UNKNOWN usage: --memory must be a positive whole number of MiB, at most 1073741824$/;
   const SHAPE = /^UNKNOWN --mutations: mutation 1 must hold exactly "id", "file", "find" and "replace"$/, FILE = /^UNKNOWN --mutations: m1: "file" must be a repository-relative path with forward slashes, outside \.git$/;
   const REPLACE = /^UNKNOWN --mutations: m1: "replace" must be a string that differs from "find"$/;
   const cases = [
@@ -780,6 +915,8 @@ test('every invalid invocation is one UNKNOWN line with exit 2, before any check
     ['--help with more', ['--help', ...args()], FLAGS],
     ['--timeout 0', args({ timeout: '0' }), TIMEOUT], ['--timeout 1.5', args({ timeout: '1.5' }), TIMEOUT], ['--timeout soon', args({ timeout: 'soon' }), TIMEOUT],
     ['--timeout above the timer ceiling', args({ timeout: '2147484' }), TIMEOUT],
+    ['--memory 0', args({ memory: '0' }), MEMORY], ['--memory 1.5', args({ memory: '1.5' }), MEMORY], ['--memory 1G', args({ memory: '1G' }), MEMORY],
+    ['--memory above its ceiling', args({ memory: '1073741825' }), MEMORY],
     ['an unreadable --mutations', args({ mutations: path.join(fx.work, 'absent.json') }), /^UNKNOWN cannot read --mutations .*absent\.json \(ENOENT\)$/],
     ['--mutations not JSON', muts('not-json.json', '{"mutations": ['), /^UNKNOWN --mutations: .*not-json\.json is not valid JSON$/],
     ['--mutations an array', muts('array.json', [M.m1]), /^UNKNOWN --mutations: the file must be an object whose only key is "mutations"$/],
@@ -838,7 +975,7 @@ test('every invalid invocation is one UNKNOWN line with exit 2, before any check
 // The --help sentences that define the verdicts and the control's rule, exempt from the sweep below by their exact bytes.
 const HELP_DEFINITIONS = ["KILLED: a step failed, every failing step names its failing tests and no CRASHED cause below holds, so no counted step's skipped count moved.",
   "SURVIVED: every counted step passed with the control's own passed, skipped and total counts, and no CRASHED cause below holds.",
-  "CRASHED: the run did not reach its steps, a test step with no parsed summary, a test file that failed to load or ran no tests, a test count unlike the control's, a counted step in which no test passed or failed, a step whose skipped count differs from the control's, failing tests or not (a test skipped that ran in the control, or the reverse), or a step that failed without a named failing test; the log records which.",
+  "CRASHED: the run did not reach its steps, a step ended by a signal (exit above 128 through a shell: 137 is SIGKILL, the memory cap's), a test step with no parsed summary or whose passed, failed and skipped counts do not add up to its total, a test file that failed to load or ran no tests, a test count unlike the control's, a counted step in which no test passed or failed, a step whose skipped count differs from the control's, failing tests or not (a test skipped that ran in the control, or the reverse), a counted step in which a test ran that the control did not run, by name (a swap keeps every count), or, where either run does not name each test (only node's reporters do), whose control skipped any, or a step that failed without a named failing test; the log records which.",
   'each such step must pass at least one test (one in which none passed, all skipped or todo or none at all, is CONTROL FAILED) in the control.'];
 const resultBesideSkip = (text, results) => HELP_DEFINITIONS.reduce((t, pinned) => t.split(pinned).join(' '), text.replace(/\s+/g, ' ')).split(/(?<=[.!?])\s+/)
   .filter(s => new RegExp('(?<![\\w-])(?:' + results.join('|') + ')(?![\\w-])', 'i').test(s) && /\b(?:skip(?:s|ped|ping)?|todo|never\s+ran|did\s+not\s+run|didn['’]t\s+run|not\s+run|control\s+ran|ran\s+(?:under|in)\s+the\s+control)\b/i.test(s));
@@ -846,7 +983,7 @@ test('--help documents every line kind the tool declares, and the exit codes', a
   const { RESULTS, NOT_RUN } = await api();
   const r = spawnSync(NODE, [TOOLS.mutate, '--help'], { encoding: 'utf8', windowsHide: true });
   assert.equal(r.status, 0);
-  assert.ok(r.stdout.startsWith('mutate.mjs --repo <repo> --ref <ref> --mutations <muts.json> --validate <spec.json> --log <file> [--setup <spec.json>] [--timeout <seconds>]\n'));
+  assert.ok(r.stdout.startsWith('mutate.mjs --repo <repo> --ref <ref> --mutations <muts.json> --validate <spec.json> --log <file> [--setup <spec.json>] [--timeout <seconds>] [--memory <MiB>]\n'));
   for (const kind of [...RESULTS, ...NOT_RUN, 'CONTROL PASS', 'MUTATE']) assert.ok(r.stdout.includes(kind + ' '), '--help names ' + kind);
   assert.ok(r.stdout.includes('Exit 0 every mutation killed; 1 at least one survived and nothing else went wrong; 2 anything else.'));
   // What a verdict rests on and what a control must do, word for word; the old control rule is gone.

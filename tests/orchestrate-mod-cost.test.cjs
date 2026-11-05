@@ -402,16 +402,25 @@ test('addRecord keeps per-agent totals with the main loop under main, per-sessio
   assert.equal(totals.tag, null);
   const rec = (ts, session, agent, extra) => ({ v: 1, ts, session, agent, parent: null, type: agent ? 'Explore' : 'main', ledger: null, batch: null,
     role: agent ? 'Explore' : 'main', model: 'claude-opus-5-5', in: 0, out: 0, cr: 0, cw: 0, ...extra });
-  assert.equal(addRecord(totals, rec('2026-10-08T12:00:00.000Z', 's-1', null, { in: 1000000, cr: 10, cw: 1000000, ledger: 'OS-1' }), PRICES), 12.000002);
+  assert.equal(addRecord(totals, rec('2026-10-08T12:00:00.000Z', 's-1', null, { in: 1000000, cr: 10, cw: 1000000, ledger: 'OS-1' }), PRICES, 'high'), 12.000002);
   addRecord(totals, rec('2026-10-08T12:00:05.000Z', 's-1', null, { in: 7, ledger: 'OS-2' }), PRICES);
-  assert.equal(addRecord(totals, rec('2026-10-08T12:01:00.000Z', 's-2', 'a1', { model: 'claude-unknown', out: 5, batch: 'B01' }), PRICES), null);
-  addRecord(totals, rec('2026-10-08T12:02:00.000Z', 's-2', 'a1', { cw: 1000000, cr: 3, in: 2 }), PRICES);
+  assert.equal(addRecord(totals, rec('2026-10-08T12:01:00.000Z', 's-2', 'a1', { model: 'claude-unknown', out: 5, batch: 'B01' }), PRICES, 'max'), null);
+  addRecord(totals, rec('2026-10-08T12:02:00.000Z', 's-2', 'a1', { cw: 1000000, cr: 3, in: 2 }), PRICES, 32000);
   assert.deepEqual([...totals.agents.keys()], ['main', 'a1']);
   const main = totals.agents.get('main'), a1 = totals.agents.get('a1');
   assert.deepEqual({ ...main, usd: Number(main.usd.toFixed(6)) }, { type: 'main', role: 'main', ledger: 'OS-2', batch: null, parent: null,
-    firstSeen: Date.UTC(2026, 9, 8, 12), requests: 2, in: 1000007, out: 0, cr: 10, cw: 1000000, usd: 12.00003, unpriced: 0, lastPrompt: 7 });
+    firstSeen: Date.UTC(2026, 9, 8, 12), requests: 2, in: 1000007, out: 0, cr: 10, cw: 1000000, usd: 12.00003, unpriced: 0, lastPrompt: 7, model: 'claude-opus-5-5', effort: null });
   assert.deepEqual({ ...a1, usd: Number(a1.usd.toFixed(6)) }, { type: 'Explore', role: 'Explore', ledger: null, batch: null, parent: null,
-    firstSeen: Date.UTC(2026, 9, 8, 12, 1), requests: 2, in: 2, out: 5, cr: 3, cw: 1000000, usd: 5.000009, unpriced: 1, lastPrompt: 1000005 });
+    firstSeen: Date.UTC(2026, 9, 8, 12, 1), requests: 2, in: 2, out: 5, cr: 3, cw: 1000000, usd: 5.000009, unpriced: 1, lastPrompt: 1000005, model: 'claude-opus-5-5', effort: 32000 });
+  // The last request's model and effort stand, whatever the first sent; one that sent no effort reads null, never the one before.
+  const later = newTotals();
+  for (const bad of ['', 0, -1, 1.5, null, undefined]) {
+    addRecord(later, rec('2026-10-08T12:03:00.000Z', 's-3', 'a1', {}), PRICES, 'max');
+    addRecord(later, rec('2026-10-08T12:03:01.000Z', 's-3', 'a1', { model: 'claude-haiku-4-5-20251001' }), PRICES, bad);
+    assert.deepEqual([later.agents.get('a1').model, later.agents.get('a1').effort], ['claude-haiku-4-5-20251001', null], String(bad));
+  }
+  addRecord(later, rec('2026-10-08T12:03:02.000Z', 's-3', 'a1', {}), PRICES, 'low');
+  assert.deepEqual([later.agents.get('a1').model, later.agents.get('a1').effort], ['claude-opus-5-5', 'low']);
   assert.deepEqual([...totals.sessions.keys()], ['s-1', 's-2']);
   assert.equal(totals.sessions.get('s-2').unpriced, 1);
   assert.equal(totals.sessions.get('s-1').requests, 2);

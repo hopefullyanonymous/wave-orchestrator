@@ -184,6 +184,54 @@ test('malformed duplicate glob traversal missing and wrong-linkage authority is 
   await t.test('invalid encoding', async t => { const f = fixture(t); f.authority(Buffer.from([0xff])); const c = f.cli(); assert.equal(c.status, 2); state(c.json, 'UNKNOWN', 'invalid-encoding'); });
   await t.test('wrong requested filename', async t => { const f = fixture(t); state((await api).checkFence({ ...f.opts, 'batch-file': `${LEDGER}/02-batches-02-work.md` }), 'UNKNOWN', 'batch-linkage'); });
 });
+// A repair worktree cut from the integration tip, its branch renamed through each name a case checks.
+function repairFixture(t) {
+  const f = fixture(t), wt = path.join(f.repo.root, 'repair worktree');
+  let current = 'fix/B01-c1-followup';
+  f.repo.git('worktree', 'add', '-b', current, wt, 'integration');
+  const repair = f.repo.at(wt);
+  const fence = async (name, gate = {}) => {
+    if (name !== current) { f.repo.git('branch', '-m', current, name); current = name; }
+    return (await api).checkFence({ ...f.opts, ...gate, batch: `refs/heads/${name}` });
+  };
+  return { ...f, repair, fence };
+}
+test('a repair branch named for its batch links to that batch; any other name stays UNKNOWN on the linkage', async t => {
+  const f = repairFixture(t); f.repair.write('allowed.txt', 'repaired\n'); f.repair.commit('repair');
+  // The protocol's three repair names: the plan and PROGRESS rows name batch-one, the batch file too.
+  for (const name of ['fix/B01-c1-followup', 'fix/B01-c12-followup-2', 'fix/B01-tip', 'fix/B01-presmoke-04']) state(await f.fence(name), 'PASS');
+  // The revert, the sweeps, each part's boundary, another batch, the slug and another prefix.
+  for (const name of ['fix/B01-revert', 'fix/B01-prose-sweep', 'fix/B01-ruling-sweep', 'fix/B01-c-followup', 'fix/B01-c1-followup-', 'fix/B01-c1-followup-x',
+    'fix/B01-followup', 'fix/B01-tip-2', 'fix/B01-presmoke-', 'fix/B01-presmoke-x', 'fix/B02-tip', 'fix/B010-tip', 'fix/b01-tip', 'fix/work-tip', 'feat/B01-tip', 'fix/B01-tip/x']) {
+    const r = await f.fence(name);
+    assert.deepEqual([r.status, r.unknowns.map(d => `${d.code}: ${d.message}`)], ['UNKNOWN', ['authority: Plan/PROGRESS branch linkage does not agree']], name);
+  }
+  // The batch the gate names is the one the branch must name.
+  const r = await f.fence('fix/B01-tip', { 'batch-id': 'B02', 'batch-file': `${LEDGER}/02-batches-02-work.md` });
+  state(r, 'UNKNOWN', 'authority');
+});
+test('a repair is held to its batch rows and fence, as published', async t => {
+  await t.test('the CLI passes a repair inside the fence', async t => {
+    const f = repairFixture(t); f.repair.write('allowed.txt', 'repaired\n'); f.repair.commit('repair'); await f.fence('fix/B01-tip');
+    const c = f.repo.cli('check-fence.mjs', f.args.map(a => a === BATCH ? 'refs/heads/fix/B01-tip' : a));
+    assert.equal(c.status, 0, c.stdout); state(c.json, 'PASS'); assert.deepEqual(c.json.evidence.allowedPaths, ['allowed.txt', BATCHFILE]);
+  });
+  await t.test('a path outside the batch fence is a violation', async t => {
+    const f = repairFixture(t); f.repair.write('outside.txt', 'repaired outside\n'); f.repair.commit('repair');
+    const r = await f.fence('fix/B01-tip'); state(r, 'VIOLATION', 'outside-fence'); assert.deepEqual(r.violations.map(d => d.path), ['outside.txt']);
+  });
+  for (const [where, edit] of [['PROGRESS', p => [p.plan, p.progress.replace('| B01 | batch-one |', '| B01 | fix/B01-tip |')]],
+    ['the plan', p => [p.plan.replace('| B01 | Work | batch-one |', '| B01 | Work | fix/B01-tip |'), p.progress]]]) await t.test(`${where} naming the repair, not the batch branch`, async t => {
+    const f = repairFixture(t); f.repair.write('allowed.txt', 'repaired\n'); f.repair.commit('repair'); f.authority(...edit(f));
+    state(await f.fence('fix/B01-tip'), 'UNKNOWN', 'authority');
+  });
+  await t.test('a batch file naming the repair, not the batch branch', async t => {
+    const f = repairFixture(t); f.repo.write(BATCHFILE, f.batchText.replace('`batch-one`', '`fix/B01-tip`')); f.authority();
+    f.repair.git('merge', '--ff-only', 'integration'); f.repair.write('allowed.txt', 'repaired\n'); f.repair.commit('repair');
+    const r = await f.fence('fix/B01-tip');
+    assert.deepEqual(r.unknowns.map(d => `${d.code}: ${d.message}`), ['batch-linkage: Baseline batch Files/Branch must match authoritative plan']);
+  });
+});
 test('own batch permits ticks and appended polish while retaining all original lines', async t => {
   const f = fixture(t); f.candidate.write(BATCHFILE, f.batchText.replace('- [ ] Implement', '- [x] Implement').replace('\n\n## Acceptance', '\n- [x] polish: Strengthen test.\n- [ ] polish: Follow up.\n\n## Acceptance')); f.candidate.commit('ticks polish');
   state((await api).checkFence(f.opts), 'PASS');

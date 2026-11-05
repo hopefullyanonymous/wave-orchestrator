@@ -250,7 +250,10 @@ changes ledger state, replaces semantic hunk mapping, or approves a merge.
 Supported fence grammar: full local refs for integration and batch; a single id under
 .agents/changes; unambiguous Markdown tables with #, Branch, Files (fence) in 01-plan
 and #, Branch, Notes in PROGRESS; Bnn ids; exact comma-separated backtick paths (no
-globs). Baseline batch Branch and Files lines must exactly match the plan; Files is
+globs). The batch ref is the batch's Branch, or a repair named for it
+(`fix/<Bnn>-c<n>-followup[-<k>]`, `fix/<Bnn>-tip`, `fix/<Bnn>-presmoke-<step>`) while
+both rows still name that Branch; a revert keeps the manual gate.
+Baseline batch Branch and Files lines must exactly match the plan; Files is
 "**Files**: " followed by those paths. A unique "## Checklist" ends at the next
 level-two heading. Only [ ] to [x] ticks, appended "- [ ] polish: ..." items (or
 their completed ticks), and precisely authorized Files additions are permitted.

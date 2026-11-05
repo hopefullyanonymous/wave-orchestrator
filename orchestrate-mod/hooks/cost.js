@@ -222,21 +222,24 @@ export function addTo(total, record, usd) {
 export const roundedTotal = total => ({ ...total, usd: Number(total.usd.toFixed(6)) });
 
 // The running aggregates of a module instance: `agents` by agent id, the main loop under `main`, each with its
-// attribution, when it was first seen (ms), its totals and `lastPrompt` (its last request's in + cr + cw, the
-// context it sent); `sessions` by session id; `total`; and `tag`, the session's ledger tag.
+// attribution, when it was first seen (ms), its totals, `lastPrompt` (its last request's in + cr + cw, the
+// context it sent), and `model` and `effort`, its last request's (`effort` null when that request sent none); `sessions` by session id; `total`; and `tag`, the session's ledger tag.
 export const newTotals = () => ({ agents: new Map(), sessions: new Map(), total: emptyTotal(), tag: null });
-// Adds one record to the aggregates; returns its price (null when unpriced).
-export function addRecord(totals, record, prices) {
+// Adds one record, its request sent at `effort` (`turn.step`'s; the log holds none), to the aggregates; returns its
+// price (null when unpriced).
+export function addRecord(totals, record, prices, effort) {
   const usd = priceOf(record, prices), key = record.agent ?? 'main';
   let agent = totals.agents.get(key);
   if (!agent) {
-    agent = { type: null, role: null, ledger: null, batch: null, parent: null, firstSeen: Date.parse(record.ts), ...emptyTotal(), lastPrompt: 0 };
+    agent = { type: null, role: null, ledger: null, batch: null, parent: null, firstSeen: Date.parse(record.ts), ...emptyTotal(), lastPrompt: 0, model: null, effort: null };
     totals.agents.set(key, agent);
   }
   // The latest record's attribution stands: the main loop's ledger tag follows each discovery refresh.
   Object.assign(agent, { type: record.type, role: record.role, ledger: record.ledger, batch: record.batch, parent: record.parent });
   addTo(agent, record, usd);
   agent.lastPrompt = record.in + record.cr + record.cw;
+  agent.model = record.model;
+  agent.effort = text(effort) || Number.isInteger(effort) && effort > 0 ? effort : null;
   if (!totals.sessions.has(record.session)) totals.sessions.set(record.session, emptyTotal());
   addTo(totals.sessions.get(record.session), record, usd);
   addTo(totals.total, record, usd);

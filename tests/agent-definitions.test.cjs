@@ -161,9 +161,10 @@ const FRONTMATTER_CASES = [
   { line: 'name: qa-runner', field: { key: 'name', value: 'qa-runner' } },
   { line: 'tools: Read, Glob, Grep, Bash',
     field: { key: 'tools', value: 'Read, Glob, Grep, Bash' } },
-  // The reviewer's effort line, exactly as its definition carries it, and the test hunter's and the census's.
+  // The reviewer's effort line, exactly as its definition carries it, the test hunter's and the census's, and the implementer's.
   { line: 'effort: max', field: { key: 'effort', value: 'max' } },
   { line: 'effort: medium', field: { key: 'effort', value: 'medium' } },
+  { line: 'effort: xhigh', field: { key: 'effort', value: 'xhigh' } },
   { line: 'description: "Runs the steps: quickly"',
     field: { key: 'description', value: '"Runs the steps: quickly"' } },
   { line: "description: 'it''s fine: really'",
@@ -697,9 +698,10 @@ test('no definition pins a model or reaches past the browser MCP server', () => 
 // Effort by role: the reviewer, which also runs the plan pre-flight, runs at max
 // whatever the session's effort (the user's decision, 2026-09-27); the census runs at medium (the
 // user's standing choice since 2026-10-07, confirmed 2026-10-13), and so does the test hunter (the
-// user's decision, 2026-10-25); the implementer and the QA runner declare none, so they run at the
-// session's. Judged on what definition() parses.
-const EFFORT = { implementer: null, reviewer: 'max', 'test-hunter': 'medium', 'qa-runner': null, census: 'medium' };
+// user's decision, 2026-10-25); the implementer runs at xhigh whatever the session's effort (the user's
+// decision, 2026-11-03); the QA runner declares none, so it runs at the session's. Judged on what
+// definition() parses.
+const EFFORT = { implementer: 'xhigh', reviewer: 'max', 'test-hunter': 'medium', 'qa-runner': null, census: 'medium' };
 // What a parsed frontmatter says about effort that the role's verdict forbids: any key naming
 // effort but the one `effort` a role with a level declares, and that key's value if it is not
 // exactly that level.
@@ -708,7 +710,7 @@ const effortFaults = (fields, expected) => {
   if (expected !== null && fields.get('effort') !== expected) faults.push('effort is ' + JSON.stringify(fields.get('effort')) + ', not ' + expected);
   return faults;
 };
-test('the reviewer declares effort: max, the test hunter and the census effort: medium, and the implementer and the QA runner declare no effort', () => {
+test('the reviewer declares effort: max, the implementer effort: xhigh, the test hunter and the census effort: medium, and the QA runner declares no effort', () => {
   assert.deepEqual(Object.keys(EFFORT).sort(), Object.keys(TOOLS).sort(), 'every known definition has its effort verdict');
   for (const [name, expected] of Object.entries(EFFORT)) {
     const { file, fields } = definition(name);
@@ -718,12 +720,52 @@ test('the reviewer declares effort: max, the test hunter and the census effort: 
   const fieldsOf = line => frontmatterFields('---\nname: x\n' + line + '\n---\n\nbody\n', 'synthetic.md').fields;
   assert.deepEqual(effortFaults(fieldsOf('effort: max'), 'max'), [], 'a max role declaring effort: max passes');
   assert.deepEqual(effortFaults(fieldsOf('effort: medium'), 'medium'), [], 'a medium role declaring effort: medium passes');
+  assert.deepEqual(effortFaults(fieldsOf('effort: xhigh'), 'xhigh'), [], 'an xhigh role declaring effort: xhigh passes');
   assert.deepEqual(effortFaults(fieldsOf('tools: Read'), null), [], 'a role declaring no effort passes');
   for (const [line, expected] of [['effort: high', 'max'], ['effort: "max"', 'max'], ['tools: Read', 'max'], ['Effort: max', 'max'],
     ['reasoning_effort: low', 'max'], ['effort: medium', 'max'], ['effort: low', 'medium'], ['effort: high', 'medium'], ['effort: max', 'medium'],
     ['effort: "medium"', 'medium'], ['tools: Read', 'medium'], ['Effort: medium', 'medium'], ['reasoning_effort: medium', 'medium'],
+    ['effort: max', 'xhigh'], ['effort: high', 'xhigh'], ['effort: "xhigh"', 'xhigh'], ['tools: Read', 'xhigh'], ['Effort: xhigh', 'xhigh'],
+    ['reasoning_effort: xhigh', 'xhigh'], ['effort: xhigh', 'max'], ['effort: xhigh', 'medium'], ['effort: xhigh', null],
     ['effort: max', null], ['effort: low', null], ['effort: medium', null], ['Effort: max', null], ['reasoning_effort: max', null]]) {
     assert.ok(effortFaults(fieldsOf(line), expected).length >= 1, 'must be caught for ' + (expected ? 'a ' + expected + ' role' : 'a role with no effort') + ': ' + line);
+  }
+});
+
+// Auto-compaction by role: the implementer caps its own window at 400000, so a long first pass
+// compacts near 367K instead of carrying its context to 800K and more (FBM A's B06 replay,
+// 2026-10-28: $27.20 against production's $41.34, the R1 review unchanged); every other role
+// declares none. The body paragraph is what makes a compacted implementer re-read the prompt
+// file the compaction dropped: the definition is the system prompt, which survives it.
+const COMPACT = { implementer: '400000', reviewer: null, 'test-hunter': null, 'qa-runner': null, census: null };
+const REREAD = 'If your context opens with a summary of an earlier part of this conversation ("This session is being continued '
+  + 'from a previous conversation that ran out of context"), it was compacted '
+  + 'and your instructions survive only as that summary\'s paraphrase. Before your next tool call of any other kind, '
+  + 'Read your prompt file again in full (the file your first message named; its path is in the summary), then your '
+  + 'batch file, then run `git status --porcelain` and `git diff --stat <integration branch>...HEAD` in your worktree. '
+  + 'The diff and the ticked boxes, not the summary, say what is done; the prompt file, not the summary, says what is binding.';
+const compactFaults = (fields, expected) => {
+  const faults = [...fields.keys()].filter(key => /compact/i.test(key) && (key !== 'autoCompactWindow' || expected === null)).map(key => 'declares ' + key + ':');
+  if (expected !== null && fields.get('autoCompactWindow') !== expected) faults.push('autoCompactWindow is ' + JSON.stringify(fields.get('autoCompactWindow')) + ', not ' + expected);
+  return faults;
+};
+test('the implementer declares autoCompactWindow: 400000 and the re-read paragraph, and no other definition declares either', () => {
+  assert.deepEqual(Object.keys(COMPACT).sort(), Object.keys(TOOLS).sort(), 'every known definition has its compaction verdict');
+  const carriers = [];
+  for (const [name, expected] of Object.entries(COMPACT)) {
+    const { file, fields } = definition(name);
+    assert.deepEqual(compactFaults(fields, expected), [], file + ': autoCompactWindow must be ' + (expected || 'undeclared'));
+    if (flow(read(file)).includes('it was compacted')) carriers.push(name);
+  }
+  assert.deepEqual(carriers, ['implementer'], 'only the implementer carries the re-read paragraph');
+  assert.equal(flow(read(definition('implementer').file)).split(REREAD).length, 2, 'the implementer carries the re-read paragraph once, verbatim');
+  const fieldsOf = line => frontmatterFields('---\nname: x\n' + line + '\n---\n\nbody\n', 'synthetic.md').fields;
+  assert.deepEqual(compactFaults(fieldsOf('autoCompactWindow: 400000'), '400000'), [], 'the implementer\'s line passes');
+  assert.deepEqual(compactFaults(fieldsOf('tools: Read'), null), [], 'a role declaring no window passes');
+  for (const [line, expected] of [['autoCompactWindow: 450000', '400000'], ['autoCompactWindow: 350000', '400000'], ['autoCompactWindow: "400000"', '400000'],
+    ['tools: Read', '400000'], ['autocompactwindow: 400000', '400000'], ['auto_compact_window: 400000', '400000'],
+    ['autoCompactWindow: 400000', null], ['autocompactwindow: 400000', null], ['compact: 400000', null]]) {
+    assert.ok(compactFaults(fieldsOf(line), expected).length >= 1, 'must be caught for ' + (expected ? 'the implementer' : 'a role with no window') + ': ' + line);
   }
 });
 

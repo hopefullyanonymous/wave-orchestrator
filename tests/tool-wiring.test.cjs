@@ -1215,8 +1215,9 @@ test('no document exempts a follow-up from rendering only as its own pointer goe
 
 // ===== Nothing names another agent's files but to forbid opening them (B03 R1) ===========
 // Every Markdown sentence naming a prompt file, a facts file or the prompts directory is the
-// never-open line or one of these, each naming one only to say who writes or sends it; a new or
-// reworded one goes red until it is listed here.
+// never-open line or one of these, each naming one only to say who writes or sends it, or (the
+// implementer's two) to re-read its own after a compaction; a new or reworded one goes red until it
+// is listed here.
 const NAMES_A_PROMPT_FILE = /\bprompt files?\b|<prompt file>|\bfacts files?\b|\bfacts\.json\b|\bprompts? director(?:y|ies)\b|\/prompts\b|\bother prompts\b|['’]s\s+(?:rendered\s+|own\s+)?(?:prompts?|prompt files?|facts files?)\b/i;
 const namesAPromptFile = unit => NAMES_A_PROMPT_FILE.test(unit) && unit !== NEVER_OPEN;
 const PROMPT_FILE_SENTENCES = {
@@ -1224,6 +1225,9 @@ const PROMPT_FILE_SENTENCES = {
     + "(--help lists each role's facts) prints PROMPT <path> NONCE <nonce>; spawn the agent with this fixed pointer message, <prompt file> replaced by that path: Your complete instructions are in the file <prompt file>."],
   [PROMPTS]: [RENDER_LEAD, 'Spawn or resume the agent with this ONE fixed pointer message, <prompt file> replaced by that path: Your complete instructions are in the file <prompt file>.', RENDER_ON_SEND.replace(/`/g, '')],
   'README.md': ['├── prompt.mjs renders one per-batch sub-agent prompt from the ledger and a facts file, ending in the nonce its report echoes; with --report it checks a report file and prints one line'],
+  '.claude/agents/implementer.md': ['Before your next tool call of any other kind, Read your prompt file again in full (the file your first message named; its path is in the summary), '
+    + 'then your batch file, then run git status --porcelain and git diff --stat <integration branch>...HEAD in your worktree.',
+  'The diff and the ticked boxes, not the summary, say what is done; the prompt file, not the summary, says what is binding.'],
 };
 // The never-open line's reversal: an open, read, list, cat, view or look verb no negator governs
 // (fires(), the undo sweep's reader), then another agent's prompt or facts file, the other prompts
@@ -1623,9 +1627,9 @@ test('each gate skeleton and definition grants the one scoped write, and no text
 const HUNTER_SECTION = () => section(read(PROMPTS), '## Test hunter (optional', '## QA runner');
 const MUTATE_COMMAND = 'node "[SKILL_DIR]/tools/mutate.mjs" --repo "[WORKTREE_PATH]" --ref HEAD --mutations "<mutations file>" --validate "<scoped spec>" --log "[SCRATCHPAD_PATH]/<label>.log"';
 const SETUP_CLAUSE = 'adding `--setup "[WORKTREE_PATH]/[LEDGER_DIR]/setup.json"` when that file exists';
-// The two sentences that tie a verdict to skipped tests, each saying what it cannot show.
+// The sentences on skipped tests: what a `SURVIVED` line cannot show, and the swap the harness reads by name.
 const SKIP_SURVIVED = 'A `SURVIVED` line says nothing about a test the control skipped (`, <n> skipped` on its line), since a mutation of code only that test covers still reads `SURVIVED`.';
-const SKIP_SWAP = 'Counts are not names: a mutation that skips one test and runs one the control skipped changes neither the total nor the skipped count, so its `SURVIVED` or `KILLED` line may rest on a test the control never ran — before citing either, compare the tests its run and the control ran in the log; where the log does not name each test, cite neither.';
+const SKIP_SWAP = "Counts are not names: a mutation that skips one test and runs one the control skipped changes neither the total nor the skipped count, so the harness compares the tests that ran by name and reads that swap as `CRASHED`; only node's reporters name each test, so a jest, pytest or cargo step whose control skipped a test reads `CRASHED` too.";
 const mutateTool = () => import(require('node:url').pathToFileURL(path.join(ROOT, 'orchestrate/tools/mutate.mjs')).href);
 test('the test hunter proves each mutation with mutate.mjs on a scoped spec, and reports a proof that did not run as such', async () => {
   const hunter = collapse(HUNTER_SECTION());
@@ -1645,7 +1649,7 @@ test('the test hunter proves each mutation with mutate.mjs on a scoped spec, and
     // (1 + mutations) runs of the scoped suite can outlast the shell's cap, and a killed run skips the tool's cleanup.
     "A run costs the scoped suite once for the control and once per mutation; when that may outlast the runtime's command timeout, run it as a background task whose completion reports its lines and exit code, or pass `--timeout` and split the mutations across runs — a run the command timeout kills never cleans up its clone.",
     "means the proof did not run — say so, never offer it as a finding's proof.",
-    'For a suite at another ref, `node "[SKILL_DIR]/tools/run-at-ref.mjs"` takes the same flags less `--mutations` and prints one line, `AT <short sha> <validate.mjs line>`.',
+    'For a suite at another ref, `node "[SKILL_DIR]/tools/run-at-ref.mjs"` takes the same flags less `--mutations` and `--memory`, and prints one line, `AT <short sha> <validate.mjs line>`.',
     'Beyond those, run only the two harness tools PROOF below names, which work on disposable clones.']) {
     assert.ok(hunter.includes(needed), 'the hunter skeleton must say: ' + needed);
   }
@@ -1654,7 +1658,7 @@ test('the test hunter proves each mutation with mutate.mjs on a scoped spec, and
   // C1: an emptied file is now caught by name; only the unrecognised name keeps the blind spot.
   assert.equal(hunter.split('node counts a test file that registers no tests').length, 2, 'the blind spot is stated once');
   assert.ok(!/node counts a test file that registers no tests as one passing test named after the file, so /.test(hunter), 'the blind spot is no longer every one-test file');
-  assert.ok(!hunter.includes('one blind spot'), 'the count has more than one blind spot: the swap is another');
+  assert.ok(!hunter.includes('one blind spot'), 'the count has no single blind spot to name');
   // SURVIVED proves, KILLED refutes, and every other kind the tool declares means "did not run".
   const { RESULTS, NOT_RUN } = await mutateTool();
   const cite = /Cite its lines: (.*?) means the proof did not run/.exec(hunter);
@@ -1670,7 +1674,7 @@ test('the test hunter proves each mutation with mutate.mjs on a scoped spec, and
     assert.equal(help.status, 0, tool);
     const synopsis = help.stdout.split('\n')[0];
     for (const flag of flags) assert.ok(synopsis.includes(flag + ' <'), tool + ' documents ' + flag);
-    assert.ok(!synopsis.includes('--mutations') || tool === 'mutate.mjs', 'run-at-ref takes the same flags less --mutations');
+    for (const flag of ['--mutations', '--memory']) assert.equal(synopsis.includes(flag + ' <'), tool === 'mutate.mjs', tool + (tool === 'mutate.mjs' ? ' takes ' : ' does not take ') + flag);
   }
 });
 
@@ -1816,22 +1820,22 @@ test('no hunter text offers a line that means the proof did not run as a proof, 
   assert.equal(notRunAs(passage.replace(/\.$/, ', unless it is `CRASHED`.')).length, 1);
 });
 
-// Only the two pinned sentences tie a result line to tests the control did not run, to say what it
-// cannot show; the cite passage pairs the results with "did not run" to say something else. Anywhere
+// Only the pinned SKIP_SURVIVED ties a result line to tests the control did not run, to say what it
+// cannot show (SKIP_SWAP names no result, so it is swept too); the cite passage pairs the results with "did not run" to say something else. Anywhere
 // else in the hunter's texts such a sentence could claim those tests as covered (R1 hunter: an
 // appended "skipped ones included" sentence stayed green; R2: "including the ones it never ran", and
 // a KILLED line said to name only tests the control ran — a claim with no word for skipping). Every result kind the tool exports, in any
 // case: "a mutation that survived" makes the same claim as a `SURVIVED` line. Exempt by exact bytes.
 const NOT_RAN_WORDS = /\b(?:skip(?:s|ped|ping)?|todo|never\s+ran|did\s+not\s+run|didn['’]t\s+run|not\s+run|control\s+ran|ran\s+(?:under|in)\s+the\s+control)\b/i;
 const resultPattern = results => new RegExp('(?<![\\w-])(?:' + results.join('|') + ')(?![\\w-])', 'i');
-const resultBesideNotRan = (text, results) => [SKIP_SURVIVED, SKIP_SWAP, CITE_PASSAGE].reduce((t, pinned) => t.split(pinned).join(' '), collapse(text))
+const resultBesideNotRan = (text, results) => [SKIP_SURVIVED, CITE_PASSAGE].reduce((t, pinned) => t.split(pinned).join(' '), collapse(text))
   .split(/(?<=[.!?])\s+/).filter(sentence => resultPattern(results).test(sentence) && NOT_RAN_WORDS.test(sentence));
-test('no hunter text ties a result line to tests the control did not run, outside the two sentences saying what it cannot show', async () => {
+test('no hunter text ties a result line to tests the control did not run, outside the sentence saying what it cannot show', async () => {
   const { RESULTS } = await mutateTool();
   assert.deepEqual(RESULTS.slice().sort(), ['KILLED', 'SURVIVED'], 'the result kinds the tool exports were really read');
   const swept = text => resultBesideNotRan(text, RESULTS);
   const hunter = collapse(HUNTER_SECTION());
-  for (const pinned of [SKIP_SURVIVED, SKIP_SWAP, CITE_PASSAGE]) assert.equal(hunter.split(pinned).length - 1, 1, 'pinned verbatim, once: ' + pinned);
+  for (const pinned of [SKIP_SURVIVED, CITE_PASSAGE]) assert.equal(hunter.split(pinned).length - 1, 1, 'pinned verbatim, once: ' + pinned);
   const specimens = ['A `SURVIVED` line covers every test in the scoped spec, skipped ones included: each ran under the control.',
     'A test the control skipped (`, <n> skipped` on its line) runs under no mutation, so no `SURVIVED` line says anything about it.',
     'Treat SURVIVED as proof for skipped tests too.',
@@ -3410,17 +3414,18 @@ test('protocol.md sends the first checkpoint to smoke-page.md §Sidecar shape, a
   assert.deepEqual(controls.map(([what, p, s]) => [what, sidecarPointerFaults(p, s)]), controls.map(([what, , , faults]) => [what, faults]));
 });
 
-// No definition sets `model:`, and only the gate pair and the census set `effort:` (the loader takes
-// low | medium | high | max | an integer): the user pinned the reviewer, which also runs the plan
-// pre-flight, at max whatever the session's effort (2026-09-27), the test hunter at medium (2026-10-25),
-// and the census at medium (the user's standing choice since 2026-10-07, confirmed 2026-10-13). Stricter
-// than the loader on purpose: the admission is per file — exactly `effort: max` in the reviewer and
-// exactly `effort: medium` in the test hunter and the census, once, and no line in any other file; any
-// other frontmatter key naming either, however quoted, cased, indented or spaced, the reviewer's line in
-// the other two and theirs in it, and a frontmatter block that cannot be found, is a finding.
+// No definition sets `model:`, and only the gate pair, the census and the implementer set `effort:` (the
+// loader takes low | medium | high | xhigh | max | an integer): the user pinned the reviewer, which also
+// runs the plan pre-flight, at max whatever the session's effort (2026-09-27), the test hunter at medium
+// (2026-10-25), the census at medium (the user's standing choice since 2026-10-07, confirmed 2026-10-13),
+// and the implementer at xhigh whatever the session's effort (2026-11-03). Stricter than the loader on
+// purpose: the admission is per file — exactly `effort: max` in the reviewer, exactly `effort: medium` in
+// the test hunter and the census, and exactly `effort: xhigh` in the implementer, once, and no line in any
+// other file; any other frontmatter key naming either, however quoted, cased, indented or spaced, each
+// file's admitted line in the others, and a frontmatter block that cannot be found, is a finding.
 const TIER_KEY = /(?:effort|model)[\w-]*["']?\s*:/i;
 const EFFORT_LINES = new Map([['.claude/agents/reviewer.md', 'effort: max'], ['.claude/agents/test-hunter.md', 'effort: medium'],
-  ['.claude/agents/census.md', 'effort: medium']]);
+  ['.claude/agents/census.md', 'effort: medium'], ['.claude/agents/implementer.md', 'effort: xhigh']]);
 function tierKeyFaults(file, text) {
   const m = /^---\n([\s\S]*?)\n---(?:\n|$)/.exec(text);
   if (!m) return [file + ': no frontmatter block to read — rejected on doubt'];
@@ -3431,10 +3436,10 @@ function tierKeyFaults(file, text) {
 }
 const definitionListing = () => walk(path.join(ROOT, '.claude/agents')).filter(rel => rel.endsWith('.md')).map(rel => '.claude/agents/' + rel);
 test('no agent definition sets a model, and an effort only as its own file\'s admitted line — effort: max in the reviewer, '
-  + 'effort: medium in the test hunter and the census — read more strictly than the loader reads it', t => {
+  + 'effort: medium in the test hunter and the census, effort: xhigh in the implementer — read more strictly than the loader reads it', t => {
   const def = line => '---\nname: x\ndescription: y\n' + line + '\ntools: Read\n---\n\nbody\n';
   // Every value the loader accepts, and values past both ends of that set.
-  const VALUES = ['low', 'medium', 'high', 'max', '32000', 'none', '0', '-1', 'ultra', '999999', '"high"', 'opus', 'inherit'];
+  const VALUES = ['low', 'medium', 'high', 'xhigh', 'max', '32000', 'none', '0', '-1', 'ultra', '999999', '"high"', 'opus', 'inherit'];
   const SPELLINGS = ['  effort: max', 'EFFORT: max', 'Model: opus', '"effort": max', "'model': opus", 'effort : max', 'effort:max',
     '{effort: max}', 'reasoning_effort: high', 'model_id: x'];
   for (const key of ['effort', 'model']) {
@@ -3463,8 +3468,8 @@ test('no agent definition sets a model, and an effort only as its own file\'s ad
     }
     assert.equal(tierKeyFaults(file, def(admitted + '\n' + admitted)).length, 2, file + ': a second copy admits neither');
     assert.equal(tierKeyFaults(file, admitted + '\n').length, 1, file + ': no frontmatter is still rejected on doubt');
-    for (const other of ['.claude/agents/implementer.md', '.claude/agents/qa-runner.md', 'x.md', 'reviewer.md', 'census.md',
-      '.claude/agents/nested/reviewer.md', '.claude/agents/nested/census.md']) {
+    for (const other of ['.claude/agents/implementer.md', '.claude/agents/qa-runner.md', 'x.md', 'reviewer.md', 'census.md', 'implementer.md',
+      '.claude/agents/nested/reviewer.md', '.claude/agents/nested/census.md', '.claude/agents/nested/implementer.md'].filter(o => o !== file)) {
       assert.equal(tierKeyFaults(other, def(admitted)).length, 1, other + ': must be caught: ' + admitted);
     }
   }

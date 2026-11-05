@@ -267,11 +267,11 @@ See smoke-page.md for the complete schema and commands.
   `IST-20260713-ux-fix-pack`).
 - Batch files: `02-batches-{{BATCH_NUM}}-{{BATCH_SLUG}}.md`, `{{BATCH_NUM}}` two digits
   starting at `01` (`00` is reserved for ledger scaffolding).
-- Repair branches: `fix/<batch-slug>-c<n>-followup` (checkpoint failure),
-  `fix/<batch-slug>-tip` (red integration tip), `fix/<batch-slug>-presmoke-<step>`,
-  `fix/<batch-slug>-revert` (user-ordered revert of a merge),
-  `fix/<batch-slug>-prose-sweep` (the run-end prose sweep, `<batch-slug>` the last batch
-  merged); NEEDS_FENCE continuations:
+- Repair branches: `fix/<batch>-c<n>-followup` (checkpoint failure),
+  `fix/<batch>-tip` (red integration tip), `fix/<batch>-presmoke-<step>`,
+  `fix/<batch>-revert` (user-ordered revert of a merge),
+  `fix/<batch>-prose-sweep` (the run-end prose sweep, `<batch>` the last batch
+  merged), `<batch>` the batch id (`B03`); NEEDS_FENCE continuations:
   `<batch-branch>-w<n+1>`.
 - Ledger root is always repo-root `.agents/changes/` — it is the discovery anchor every
   mode globs for. Closed ledgers may move to the sibling `.agents/archive/`. Override

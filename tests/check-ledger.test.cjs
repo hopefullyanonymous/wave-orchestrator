@@ -293,9 +293,9 @@ const CLAUSES = {
   [BRANCH]: { when: "!batch.startsWith('refs/heads/') || branchCell(planRow.Branch) !== branch || branchCell(progressRow.Branch) !== branch",
     clauses: { 'ref-not-heads': "!batch.startsWith('refs/heads/')", 'plan-branch': 'branchCell(planRow.Branch) !== branch', 'progress-branch': 'branchCell(progressRow.Branch) !== branch' } },
   [REDUNDANT]: { when: 'extension.some(p => fence.includes(p) || p === batchFile)', clauses: { 'in-fence': 'fence.includes(p)', 'own-batch-file': 'p === batchFile' } },
-  [FILES_BRANCH]: { when: "fileLines.length !== 1 || branchLines.length !== 1 || branchLines[0] !== `**Branch**: \\`${batch.slice('refs/heads/'.length)}\\`` || JSON.stringify(exactPaths(fileLines[0].slice(11))) !== JSON.stringify(fence)",
+  [FILES_BRANCH]: { when: "fileLines.length !== 1 || branchLines.length !== 1 || branchLines[0] !== `**Branch**: \\`${branch}\\`` || JSON.stringify(exactPaths(fileLines[0].slice(11))) !== JSON.stringify(fence)",
     clauses: { 'files-count': 'fileLines.length !== 1', 'branch-count': 'branchLines.length !== 1',
-      'branch-exact': "branchLines[0] !== `**Branch**: \\`${batch.slice('refs/heads/'.length)}\\``", 'files-equal': 'JSON.stringify(exactPaths(fileLines[0].slice(11))) !== JSON.stringify(fence)' } },
+      'branch-exact': "branchLines[0] !== `**Branch**: \\`${branch}\\``", 'files-equal': 'JSON.stringify(exactPaths(fileLines[0].slice(11))) !== JSON.stringify(fence)' } },
   [STRUCTURE]: { when: "start < 0 || before.filter(l => l === '## Checklist').length !== 1 || !ends.length",
     clauses: { 'no-checklist': 'start < 0', 'two-checklists': "before.filter(l => l === '## Checklist').length !== 1", 'no-later-heading': '!ends.length' } },
 };
@@ -580,8 +580,8 @@ test('the rejection-site extractor: a planted site grows the domain, an unreadab
   const grows = [
     ['a throw before the first authority statement', swap(fence, '  try {\n    if (plan === null', "  try {\n    if (plan !== null && plan.includes('ZZZ-SENTINEL')) throw new Error('Sentinel plan rejected');\n    if (plan === null"), parser,
       ['authority: Sentinel plan rejected']],
-    ['a template-literal throw in the authority block', swap(fence, "    const branch = batch.slice('refs/heads/'.length);\n",
-      "    const branch = batch.slice('refs/heads/'.length);\n    if (branch === 'zzz') throw new Error(`Sentinel ${branch}`);\n"), parser, ['authority: Sentinel ${branch}']],
+    ['a template-literal throw in the authority block', swap(fence, "    const named = batch.slice('refs/heads/'.length);\n",
+      "    const named = batch.slice('refs/heads/'.length);\n    if (branch === 'zzz') throw new Error(`Sentinel ${branch}`);\n"), parser, ['authority: Sentinel ${branch}']],
     ['a measured diagnostic with a literal message', swap(fence, "{ path: file }));\n", "{ path: file }));\n  unknowns.push(diagnostic('authority', 'Sentinel batch file'));\n"), parser,
       ['authority: Sentinel batch file']],
     ['a double-quoted throw in a parser the fence reaches', fence, swap(parser, 'export function table(text, required) {\n', 'export function table(text, required) {\n  if (text === \'zzz\') throw new Error("Sentinel table");\n'),
@@ -1386,6 +1386,58 @@ test('census: path, import and basename references outside every fence and .agen
   assert.match(ledgerCli(['census', '--dir', plain, '--repo', repo.cwd]).line, /^UNKNOWN cannot read .*01-plan\.md$/);
   writeTree(plain, { [PLAN]: '# Plan\n' });
   assert.match(ledgerCli(['census', '--dir', plain, '--repo', repo.cwd]).line, /^UNKNOWN 01-plan\.md batch table: /);
+});
+
+// ===== cites and census: only a proven absence is absence ==================
+// fs[name] throws `code` for one path while `run` runs, then is put back: an unreadable file on every
+// platform and as root. Returns run's result and how often the error was raised.
+function failing(name, target, code, run) {
+  const real = fs[name];
+  let hits = 0;
+  fs[name] = (p, ...rest) => { if (p === target) { hits++; throw Object.assign(new Error(`${code}: injected, ${name}`), { code }); } return real(p, ...rest); };
+  try { return [run(), hits]; } finally { fs[name] = real; }
+}
+test('cites and census: ENOENT and ENOTDIR are absence, any other failure to stat or read a file is UNKNOWN', async t => {
+  const { ledgerCli } = await ledgerApi;
+  const c = (p, s) => '`' + p + '` `' + s + '`';
+  await t.test('cites', () => {
+    const root = tmp(t), dir = path.join(root, 'ledger');
+    const repo = writeTree(path.join(root, 'repo'), { 'src/a.mjs': 'alpha\n', 'src/f.txt': 'a file\n', 'src/bin.dat': Buffer.from([0x61, 0xff, 0x0a]) });
+    const cli = () => ledgerCli(['cites', '--dir', dir, '--repo', repo]);
+    writeTree(dir, { [PLAN]: '# Plan\n\n' + c('src/a.mjs:1', 'alpha') + '\n' });
+    assert.deepEqual(cli(), { code: 0, line: 'CITES OK 1 pinned, 0 unpinned' });
+    const a = path.join(repo, 'src', 'a.mjs');
+    for (const [name, code, line] of [['lstatSync', 'EACCES', 'cannot stat src/a.mjs'], ['lstatSync', 'EIO', 'cannot stat src/a.mjs'], ['readFileSync', 'EACCES', 'cannot read src/a.mjs']]) {
+      const [r, hits] = failing(name, a, code, cli);
+      assert.ok(hits > 0, `${name} ${code}: the injected error was raised`);
+      assert.deepEqual(r, { code: 2, line: `UNKNOWN ${line} under ${repo}` }, `${name} ${code}`);
+    }
+    writeTree(dir, { [PLAN]: '# Plan\n\n' + c('src/bin.dat:1', 'a') + '\n' });
+    assert.deepEqual(cli(), { code: 2, line: `UNKNOWN not UTF-8: src/bin.dat under ${repo}` });
+    // A missing file and a path through a file: each a citation naming no file, never UNKNOWN.
+    writeTree(dir, { [PLAN]: '# Plan\n\n' + c('src/none.mjs:1', 'x') + ' ' + c('src/f.txt/x.mjs:1', 'x') + '\n' });
+    assert.deepEqual(cli(), { code: 1, line: 'CITES FAIL 2 problem(s): ' + ['src/none.mjs:1', 'src/f.txt/x.mjs:1'].map(p => `01-plan.md:3 ${c(p, 'x')} names no file under the repository`).join('; ') });
+  });
+  await t.test('census', () => {
+    const repo = makeRepo(t);
+    repo.git('config', 'maintenance.auto', 'false'); repo.git('config', 'gc.auto', '0');
+    for (const [name, text] of Object.entries(baseLedger())) repo.write(LEDGER + '/' + name, text);
+    repo.write('docs/one.md', 'See c.txt.\n'); repo.write('docs/sub/two.md', 'And c.txt.\n'); repo.commit('fixture');
+    const dir = path.join(repo.cwd, ...LEDGER.split('/')), cli = () => ledgerCli(['census', '--dir', dir, '--repo', repo.cwd, '--batch', 'B02']);
+    const found = files => ({ code: 0, line: `CENSUS ${files.length} reference(s) outside every fence: ` + files.map(f => `B02 c.txt ← ${f} (path)`).join('; ') });
+    assert.deepEqual(cli(), found(['docs/one.md', 'docs/sub/two.md']));
+    const one = path.join(repo.cwd, 'docs', 'one.md');
+    for (const [name, code, line] of [['lstatSync', 'EACCES', 'cannot stat docs/one.md'], ['lstatSync', 'EIO', 'cannot stat docs/one.md'], ['readFileSync', 'EACCES', 'cannot read docs/one.md']]) {
+      const [r, hits] = failing(name, one, code, cli);
+      assert.ok(hits > 0, `${name} ${code}: the injected error was raised`);
+      assert.deepEqual(r, { code: 2, line: `UNKNOWN ${line} under ${repo.cwd}` }, `${name} ${code}`);
+    }
+    // A tracked file under a directory now a file (ENOTDIR) holds nothing, as a deleted one (ENOENT) does.
+    fs.rmSync(path.join(repo.cwd, 'docs', 'sub'), { recursive: true }); fs.writeFileSync(path.join(repo.cwd, 'docs', 'sub'), 'a file now\n');
+    assert.deepEqual(cli(), found(['docs/one.md']));
+    fs.rmSync(one);
+    assert.deepEqual(cli(), { code: 0, line: 'CENSUS 0 references outside every fence' });
+  });
 });
 
 test('flags, --help and one-line output in every case', async () => {

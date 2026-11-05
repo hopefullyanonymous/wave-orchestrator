@@ -39,7 +39,7 @@ const ledgerOf = (over = {}) => ({
 const dataOf = (over = {}) => ({
   at: T0 + 12 * MIN, tzOffset: 0, root: '/repo', tag: ID, view: { incomplete: false, ledger: ledgerOf(), more: 0 },
   costs: { ledger: ID, total: { usd: 24.33, unpriced: 0 }, byBatch: { B01: { usd: 11.84, unpriced: 0 }, B03: { usd: 9.47, unpriced: 0 } } },
-  agents: [{ known: true, role: 'implementer', batch: 'B03', firstSeen: T0, ctx: 211000, usd: 0.294, unpriced: 0 }, { known: false, type: 'Explore' }],
+  agents: [{ known: true, role: 'implementer', batch: 'B03', firstSeen: T0, ctx: 211000, model: 'claude-opus-5-5', effort: 'xhigh', usd: 0.294, unpriced: 0 }, { known: false, type: 'Explore' }],
   conductor: { tokens: 412345, window: 1000000, percent: 41 }, session: { usd: 2.694, unpriced: 0 }, slashCost: 2.75, ...over,
 });
 const ROWS = [
@@ -49,7 +49,7 @@ const ROWS = [
   'B03 🔄 W2 M  pane' + sp(8) + 'R2 SHIP  git: unknown' + sp(3) + '$9.47',
   { text: '    branch feat/c: not found', dim: true },
 ];
-const TAIL = ['running  implementer  B03  12m  211K ctx  $0.29', sp(9) + 'Explore      ?     ?m     ? ctx      ?',
+const TAIL = ['running  implementer  B03  12m  211K ctx  opus-5-5  xhigh  $0.29', sp(9) + 'Explore      ?     ?m     ? ctx  ?         ?          ?',
   'conductor  412K of 1M (41%) · safe point at 300K', 'ledger $24.33 · session $2.69 · /cost $2.75 (-2.0%)'];
 const lined = items => items.map(item => (typeof item === 'string' ? { text: item, dim: false } : item));
 
@@ -208,20 +208,27 @@ test('readCosts: a report that fails, is cut short or is not its JSON is an erro
   for (const [run, expected] of cases) assert.deepEqual(readCosts(run, ID), expected, JSON.stringify(run));
 });
 
+test('modelText drops the claude- prefix and a date suffix only; effortText reads a level, a budget as tokens, none as -', async () => {
+  const { modelText, effortText } = await view;
+  assert.deepEqual(['claude-opus-5-5', 'claude-haiku-4-5-20251001', 'opus', 'my-claude-x', 'claude-x-2025', '', null, undefined].map(modelText),
+    ['opus-5-5', 'haiku-4-5', 'opus', 'my-claude-x', 'x-2025', '?', '?', '?']);
+  assert.deepEqual(['max', 'low', 32000, 1499, 1500, null, undefined, ''].map(effortText), ['max', 'low', '32K', '1K', '2K', '-', '-', '-']);
+});
+
 test('runningAgents: running ones only, joined to the cost log\'s aggregates oldest first, the rest by type after them', async () => {
   const { runningAgents } = await view;
   const agg = new Map([['main', { role: 'main' }],
-    ['a-1', { type: 'general-purpose', role: 'implementer', batch: 'B03', firstSeen: T0 + 5, lastPrompt: 211000, usd: 1.5, unpriced: 0 }],
-    ['a-2', { type: 'general-purpose', role: 'test-hunter', batch: 'B03', firstSeen: T0, lastPrompt: 96000, usd: 0.5, unpriced: 1 }],
+    ['a-1', { type: 'general-purpose', role: 'implementer', batch: 'B03', firstSeen: T0 + 5, lastPrompt: 211000, model: 'claude-opus-5-5', effort: 'xhigh', usd: 1.5, unpriced: 0 }],
+    ['a-2', { type: 'general-purpose', role: 'test-hunter', batch: 'B03', firstSeen: T0, lastPrompt: 96000, model: 'claude-fable-5-1', effort: 32000, usd: 0.5, unpriced: 1 }],
     ['a-3', { type: 'unknown', role: null, batch: null, firstSeen: T0, lastPrompt: 0, usd: 0, unpriced: 0 }]]);
   const list = [{ id: 'x-9', type: 'Explore', status: 'running' }, { id: 'a-1', type: 'general-purpose', status: 'running' },
     { id: 'a-2', type: 'general-purpose', status: 'running' }, { id: 'a-3', type: 'Plan', status: 'completed' }, { id: 'main', type: 'x', status: 'killed' }];
   assert.deepEqual(runningAgents(list, agg), [
-    { known: true, role: 'test-hunter', batch: 'B03', firstSeen: T0, ctx: 96000, usd: 0.5, unpriced: 1 },
-    { known: true, role: 'implementer', batch: 'B03', firstSeen: T0 + 5, ctx: 211000, usd: 1.5, unpriced: 0 },
+    { known: true, role: 'test-hunter', batch: 'B03', firstSeen: T0, ctx: 96000, model: 'claude-fable-5-1', effort: 32000, usd: 0.5, unpriced: 1 },
+    { known: true, role: 'implementer', batch: 'B03', firstSeen: T0 + 5, ctx: 211000, model: 'claude-opus-5-5', effort: 'xhigh', usd: 1.5, unpriced: 0 },
     { known: false, type: 'Explore' },
   ]);
-  assert.deepEqual(runningAgents([{ id: 'a-3', type: 'Plan', status: 'running' }], agg), [{ known: true, role: 'unknown', batch: null, firstSeen: T0, ctx: 0, usd: 0, unpriced: 0 }]);
+  assert.deepEqual(runningAgents([{ id: 'a-3', type: 'Plan', status: 'running' }], agg), [{ known: true, role: 'unknown', batch: null, firstSeen: T0, ctx: 0, model: null, effort: null, usd: 0, unpriced: 0 }]);
   assert.equal(runningAgents(undefined, agg), null);
 });
 
@@ -372,10 +379,10 @@ test('everything unknown renders as ? or a stated reason, never as 0', async () 
   assert.deepEqual(paneLines(data, 100).map(l => l.text), ['ledger view unavailable — node cannot start', 'as of ?', '',
     'running  agents unknown — the agent list cannot be read', 'conductor context unknown · safe point at 300K', 'ledger ? · session ? · /cost ? (?)']);
   const unknownAgent = textReport({ ...data, agents: [{ known: false, type: 'Explore' }] });
-  assert.ok(unknownAgent.includes('running  Explore  ?  ?m  ? ctx  ?'), unknownAgent);
+  assert.ok(unknownAgent.includes('running  Explore  ?  ?m  ? ctx  ?  ?  ?'), unknownAgent);
   // A known agent with no time of the data: its minutes are ?, never 0.
   const knownAgent = textReport({ ...data, agents: [dataOf().agents[0]] });
-  assert.ok(knownAgent.includes('running  implementer  B03  ?m  211K ctx  $0.29'), knownAgent);
+  assert.ok(knownAgent.includes('running  implementer  B03  ?m  211K ctx  opus-5-5  xhigh  $0.29'), knownAgent);
   for (const text of [textReport(data), unknownAgent, knownAgent]) assert.doesNotMatch(text, /\$0\.00|\b0K\b|\b0m\b|\(0%\)/);
   // A failed cost report: every row's figure ?, not $0.00.
   const rows = paneLines(dataOf({ costs: { ledger: ID, error: 'exit 2' } }), 100).map(l => l.text).filter(t => /^B0\d /.test(t));
@@ -389,9 +396,9 @@ test('no running agent reads running none, a line of its own', async () => {
 
 test('an agent: a total that leaves unpriced records out reads +?, a known agent with no batch -', async () => {
   const { paneLines } = await view;
-  const agents = [{ ...dataOf().agents[0], unpriced: 1 }, { known: true, role: 'Explore', batch: null, firstSeen: T0, ctx: 1000, usd: 0.1, unpriced: 0 }];
+  const agents = [{ ...dataOf().agents[0], unpriced: 1 }, { known: true, role: 'Explore', batch: null, firstSeen: T0, ctx: 1000, model: 'claude-haiku-4-5-20251001', effort: null, usd: 0.1, unpriced: 0 }];
   assert.deepEqual(paneLines(dataOf({ agents }), 100).map(l => l.text).slice(-4, -2),
-    ['running  implementer  B03  12m  211K ctx  $0.29+?', sp(9) + 'Explore      -    12m    1K ctx    $0.10']);
+    ['running  implementer  B03  12m  211K ctx  opus-5-5   xhigh  $0.29+?', sp(9) + 'Explore      -    12m    1K ctx  haiku-4-5  -        $0.10']);
 });
 
 test('a context reading with tokens and no percent reads (?), never (0%)', async () => {

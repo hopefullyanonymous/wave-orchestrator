@@ -81,7 +81,7 @@ export const SLOTS = {
 };
 // A resuming role's fact beside its slots: the resumed implementer's context, the `subagent_tokens`
 // of its last task notification. At or past FRESH_AT tokens the role renders nothing.
-export const TOKENS_FACT = 'subagentTokens', FRESH_AT = 350000;
+export const TOKENS_FACT = 'subagentTokens', FRESH_AT = 200000;
 const STRING_FACTS = ['repoPath', 'worktreePath', 'scratchpadPath', 'findingsFile', 'reportFile', 'previousFindingsFile', 'failingOnBase', 'testingGuidePath'];
 
 export class Unknown extends Error {}

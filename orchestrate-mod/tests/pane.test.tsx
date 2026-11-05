@@ -64,7 +64,7 @@ const ROWS = [
 ]
 const HEADER = ID + ' · ACTIVE · W2 of 2 · next C1'
 const INTEGRATION = 'chore/ledger-mod-ledger @9f3c2e1'
-const AGENTS = ['running  implementer  B03  12m  211K ctx  $0.29', sp(9) + 'Explore      ?     ?m     ? ctx      ?']
+const AGENTS = ['running  implementer  B03  12m  211K ctx  opus-5-5  xhigh  $0.29', sp(9) + 'Explore      ?     ?m     ? ctx  ?         ?          ?']
 const CONDUCTOR = 'conductor  412K of 1M (41%) · safe point at 300K'
 const COSTS = 'ledger $24.33 · session $2.69 · /cost $2.75 (-2.0%)'
 const INCOMPLETE = 'discovery incomplete — some ledgers may be missing'
@@ -146,7 +146,7 @@ async function busy($, w) {
   await start($, w)
   await $.agent.spawn({ tool_use_id: 'toolu_1', prompt: POINTER, description: 'implement B03', subagentType: 'general-purpose',
     provider: { plugin: 'engine', tier: 'core' }, parentModel: 'claude-opus-5-5', background: true, fork: false })
-  await drain($.turn.step({ turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', messageCount: 3, agentId: 'agent-1' }))
+  await drain($.turn.step({ turnId: 'turn-1', index: 0, model: 'claude-opus-5-5', effort: 'xhigh', messageCount: 3, agentId: 'agent-1' }))
   await drain($.turn.step({ turnId: 'turn-2', index: 0, model: 'claude-opus-5-5', messageCount: 3 }))
   await w.clock.advance(12 * MIN)
 }
@@ -351,7 +351,7 @@ describe('unknown is never zero', () => {
     await busy($, w)
     const lines = await textOf($)
     expect(lines.slice(0, 2)).toEqual([HEADER, 'as of ?'])
-    expect(lines.slice(-4)).toEqual(['running  implementer  B03  ?m  211K ctx  $0.29', sp(9) + 'Explore      ?    ?m     ? ctx      ?', CONDUCTOR, COSTS])
+    expect(lines.slice(-4)).toEqual(['running  implementer  B03  ?m  211K ctx  opus-5-5  xhigh  $0.29', sp(9) + 'Explore      ?    ?m     ? ctx  ?         ?          ?', CONDUCTOR, COSTS])
   })
 
   test('no orchestrate skill installed: the view is unavailable and says why, the ledger figure ?', async ($, on) => {
@@ -376,7 +376,7 @@ describe('unknown is never zero', () => {
     const w = world(on, { surfaces: [], agentUsage: { ...AGENT_USAGE, model: 'claude-unpriced-9' } })
     await busy($, w)
     const lines = await textOf($)
-    expect(lines.slice(-4)).toEqual(['running  implementer  B03  12m  211K ctx  $0.00+?', sp(9) + 'Explore      ?     ?m     ? ctx        ?',
+    expect(lines.slice(-4)).toEqual(['running  implementer  B03  12m  211K ctx  unpriced-9  xhigh  $0.00+?', sp(9) + 'Explore      ?     ?m     ? ctx  ?           ?            ?',
       CONDUCTOR, 'ledger $24.33 · session $2.40+? · /cost $2.75 (?)'])
   })
 

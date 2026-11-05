@@ -47,6 +47,10 @@ function parseChanges(text) {
   }
   return changes;
 }
+// A repair mini-batch runs on `fix/<Bnn>-c<n>-followup[-<k>]`, `fix/<Bnn>-tip` or `fix/<Bnn>-presmoke-<step>`,
+// `<Bnn>` the batch it repairs, and is held to that batch's rows, batch file and fence. A revert is not:
+// it undoes the batch file's own ticks, so it keeps the manual gate.
+const repairOf = (name, batchId) => name.startsWith(`fix/${batchId}-`) && /^(?:c\d+-followup(?:-\d+)?|tip|presmoke-\d+)$/.test(name.slice(batchId.length + 5));
 function ordinaryBlob(repo, sha, file, unknowns, options) {
   const r = git(repo, ['ls-tree', '-z', sha, '--', file], options);
   if (!r.ok) { unknowns.push({ ...r.diagnostic, path: file }); return false; }
@@ -83,14 +87,15 @@ export function checkFence({ repo, integration, batch, ledger: id, 'batch-id': b
   if (associated.length !== 1) unknowns.push(diagnostic('candidate-worktree', 'Exactly one associated candidate worktree is required'));
   else if (associated[0].head !== result.batchSha || associated[0].cleanliness === 'unknown') unknowns.push(diagnostic('candidate-worktree', 'Candidate worktree is inaccessible or its HEAD does not match the captured branch', { path: associated[0].path }));
   else if (associated[0].cleanliness === 'dirty') violations.push(diagnostic('dirty-worktree', 'Candidate has tracked, staged, untracked or conflicted changes', { path: associated[0].path, entries: associated[0].status }));
-  let fence = null, extension = [], baseline = null, proposed = null;
+  let fence = null, extension = [], baseline = null, proposed = null, branch = null;
   const planPath = `${root}/01-plan.md`, progressPath = `${root}/PROGRESS.md`;
   for (const file of [planPath, progressPath]) if (!ordinaryBlob(repo, result.integrationSha, file, unknowns, options)) unknowns.push(diagnostic('authority-file', 'Authority must be an ordinary committed file', { path: file }));
   const plan = readBlob(repo, result.integrationSha, planPath, unknowns, options), progress = readBlob(repo, result.integrationSha, progressPath, unknowns, options);
   try {
     if (plan === null || progress === null) throw new Error('Missing authoritative ledger text');
     const planRow = oneRow(table(plan, ['#', 'Branch', 'Files (fence)']), batchId), progressRow = oneRow(table(progress, ['#', 'Branch', 'Notes']), batchId);
-    const branch = batch.slice('refs/heads/'.length);
+    const named = batch.slice('refs/heads/'.length);
+    branch = repairOf(named, batchId) ? branchCell(planRow.Branch) : named;
     if (!batch.startsWith('refs/heads/') || branchCell(planRow.Branch) !== branch || branchCell(progressRow.Branch) !== branch) throw new Error('Plan/PROGRESS branch linkage does not agree');
     fence = exactPaths(planRow['Files (fence)']); extension = extensions(progress, progressRow, batchId);
     if (extension.some(p => fence.includes(p) || p === batchFile)) throw new Error('Redundant or ambiguous extension');
@@ -119,7 +124,7 @@ export function checkFence({ repo, integration, batch, ledger: id, 'batch-id': b
         if (!new RegExp(`^# ${batchId} (?:—|-) `).test(baseline)) throw new Error('Batch title does not match ID');
         const fileLines = linesOf(baseline).filter(l => l.startsWith('**Files**: '));
         const branchLines = linesOf(baseline).filter(l => l.startsWith('**Branch**: '));
-        if (fileLines.length !== 1 || branchLines.length !== 1 || branchLines[0] !== `**Branch**: \`${batch.slice('refs/heads/'.length)}\`` || JSON.stringify(exactPaths(fileLines[0].slice(11))) !== JSON.stringify(fence)) throw new Error('Baseline batch Files/Branch must match authoritative plan');
+        if (fileLines.length !== 1 || branchLines.length !== 1 || branchLines[0] !== `**Branch**: \`${branch}\`` || JSON.stringify(exactPaths(fileLines[0].slice(11))) !== JSON.stringify(fence)) throw new Error('Baseline batch Files/Branch must match authoritative plan');
         const batchFindings = validateBatchEdit(baseline, proposed, fence, extension, batchFile);
         unknowns.push(...batchFindings.filter(f => f.code === 'batch-structure'));
         violations.push(...batchFindings.filter(f => f.code !== 'batch-structure'));

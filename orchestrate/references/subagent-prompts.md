@@ -304,10 +304,9 @@ registers nothing does not change the count and reads `SURVIVED`, so before you 
 file name. A `SURVIVED` line says nothing about a test the control skipped
 (`, <n> skipped` on its line), since a mutation of code only that test covers still
 reads `SURVIVED`. Counts are not names: a mutation that skips one test and runs one the
-control skipped changes neither the total nor the skipped count, so its `SURVIVED` or
-`KILLED` line may rest on a test the control never ran — before citing either, compare
-the tests its run and the control ran in the log; where the log does not name each test,
-cite neither.
+control skipped changes neither the total nor the skipped count, so the harness compares
+the tests that ran by name and reads that swap as `CRASHED`; only node's reporters name
+each test, so a jest, pytest or cargo step whose control skipped a test reads `CRASHED` too.
 A run costs the scoped suite once for the control and once per
 mutation; when that may outlast the runtime's command timeout, run it as a background task
 whose completion reports its lines and exit code, or pass `--timeout` and split the
@@ -317,7 +316,7 @@ its lines: `SURVIVED <id>` proves a finding and `KILLED <id>: <tests>` refutes i
 `CONTROL FAILED`, `NOT-APPLIED`, `CRASHED`, `TIMEOUT`, `RESTORE-FAILED` or `UNKNOWN` means
 the proof did not run — say so, never offer it as a finding's proof. For a suite at another
 ref, `node "[SKILL_DIR]/tools/run-at-ref.mjs"` takes the same flags less `--mutations` and
-prints one line, `AT <short sha> <validate.mjs line>`.
+`--memory`, and prints one line, `AT <short sha> <validate.mjs line>`.
 
 OUTPUT: write your full report with the Write tool to "[FINDINGS_FILE]"; besides that
 ONE file you write only your mutations file and your scoped spec, both under

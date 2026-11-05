@@ -437,6 +437,15 @@ const CITED = /^([^\s`]+):(\d+)(?:-(\d+))?$/;
 // A span's text as CommonMark reads it: one space stripped from each side when both carry one.
 const spanText = t => /^ .*\S.* $/.test(t) ? t.slice(1, -1) : t;
 const repoFile = (repo, rel) => path.join(repo, ...rel.split('/'));
+// A repository file's bytes, or null for no file there: only ENOENT and ENOTDIR prove it absent, and a
+// final link or a directory is no file. Any other failure to stat or read it throws Unknown.
+function fileBytes(repo, rel) {
+  let stat;
+  try { stat = fs.lstatSync(repoFile(repo, rel)); }
+  catch (e) { if (e.code === 'ENOENT' || e.code === 'ENOTDIR') return null; throw new Unknown(`cannot stat ${rel} under ${repo}`); }
+  if (!stat.isFile()) return null;
+  try { return fs.readFileSync(repoFile(repo, rel)); } catch { throw new Unknown(`cannot read ${rel} under ${repo}`); }
+}
 function repoRoot(repo) {
   let root = null;
   try { root = fs.statSync(repo); } catch { root = null; }
@@ -452,7 +461,7 @@ function planningDocs(dir) {
 // Every pinned citation of a ledger's planning documents (a `path:line` span, one space, then a
 // symbol span), each checked against the files under the repository root; every other span shaped
 // `path:line` is listed as unpinned. Fenced code blocks are skipped. Throws Unknown when a ledger
-// document or the root cannot be read.
+// document, the root or a cited file cannot be read.
 export function cites(dir, repo) {
   const docs = planningDocs(dir);
   repoRoot(repo);
@@ -460,8 +469,9 @@ export function cites(dir, repo) {
   let pinned = 0;
   const lookup = rel => {
     if (!texts.has(rel)) {
+      const bytes = fileBytes(repo, rel);
       let lines = null;
-      try { if (fs.lstatSync(repoFile(repo, rel)).isFile()) lines = linesOf(decode(fs.readFileSync(repoFile(repo, rel)))); } catch { lines = null; }
+      if (bytes !== null) try { lines = linesOf(decode(bytes)); } catch { throw new Unknown(`not UTF-8: ${rel} under ${repo}`); }
       if (lines && lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
       texts.set(rel, lines);
     }
@@ -518,7 +528,8 @@ function referenceKind(file, text, fenced) {
 // Every tracked file of the repository, outside every fence of the ledger's plan and outside
 // `.agents/`, that references a fenced path of every batch (or of one): by repository-relative
 // path, by a relative specifier resolving to it from the file's directory, or by basename. Sorted
-// strongest kind first. Throws Unknown when the plan, its fences or the repository cannot be read.
+// strongest kind first. Throws Unknown when the plan, its fences, the repository or a tracked file
+// cannot be read.
 export function census(dir, repo, batch) {
   const plan = readText(path.join(dir, PLAN), true);
   repoRoot(repo);
@@ -534,7 +545,8 @@ export function census(dir, repo, batch) {
   const fenced = new Set(fences.flatMap(f => f.paths));
   const files = [...new Set(listing.text.split('\0').filter(Boolean))].filter(f => !fenced.has(f) && !f.startsWith('.agents/')).sort();
   const texts = files.flatMap(file => {
-    try { return fs.lstatSync(repoFile(repo, file)).isFile() ? [[file, fs.readFileSync(repoFile(repo, file)).toString('utf8')]] : []; } catch { return []; }
+    const bytes = fileBytes(repo, file);
+    return bytes === null ? [] : [[file, bytes.toString('utf8')]];
   });
   const references = [];
   for (const { id, paths } of fences) {

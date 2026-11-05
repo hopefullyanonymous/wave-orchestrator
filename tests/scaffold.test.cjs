@@ -446,6 +446,56 @@ test('an existing target directory is refused, and nothing is written', async t 
   await refuses(ctx, both, ['.agents/changes/' + CHANGE_ID + ' already exists', 'foldins[0]: TB-999 occurs on 0 lines']);
 });
 
+// One fs function replaced while `run` runs, then put back: the replacement sees the real function.
+async function replacing(name, make, run) {
+  const real = fs[name];
+  fs[name] = make(real);
+  try { return await run(); } finally { fs[name] = real; }
+}
+test('an id a closed ledger holds under .agents/archive/ is refused, and only a proven absence is absence', async t => {
+  const ctx = await setup(t), archived = path.join(ctx.fx.repo, '.agents', 'archive', CHANGE_ID), ledger = path.join(ctx.fx.repo, ...LEDGER.split('/'));
+  const ARCHIVED = '.agents/archive/' + CHANGE_ID + ' already exists';
+  // A directory, a file and a dangling link each hold the id.
+  fs.mkdirSync(archived, { recursive: true });
+  await refuses(ctx, ctx.answers, [ARCHIVED]);
+  fs.rmSync(archived, { recursive: true }); fs.writeFileSync(archived, 'a stray file');
+  await refuses(ctx, ctx.answers, [ARCHIVED]);
+  // The link is read, never followed (refuses' tree snapshot would follow it).
+  fs.rmSync(archived); fs.symlinkSync(path.join(ctx.fx.dir, 'nowhere'), archived, 'junction');
+  assert.deepEqual((await ctx.run(ctx.answers)).problems, [ARCHIVED]);
+  assert.ok(!fs.existsSync(ledger), 'no ledger written');
+  // Found before staging: reported beside a fold-in problem and the live ledger's own refusal.
+  fs.unlinkSync(archived); fs.mkdirSync(archived); fs.mkdirSync(ledger, { recursive: true });
+  const both = clone(ctx.answers); both.foldins = [{ file: 'BACKLOG.md', id: 'TB-999', batch: 'B01' }];
+  const r = await refuses(ctx, both, ['.agents/changes/' + CHANGE_ID + ' already exists', ARCHIVED, 'foldins[0]: TB-999 occurs on 0 lines']);
+  assert.equal(r.problems.length, 3, JSON.stringify(r.problems));
+  // Archived while the ledger is staged: the check before the write refuses it too, and writes nothing.
+  reset(ctx);
+  const late = await replacing('mkdtempSync', real => (prefix, ...rest) => {
+    if (prefix === path.join(ctx.fx.stage, 'scaffold-')) fs.mkdirSync(archived, { recursive: true });
+    return real(prefix, ...rest);
+  }, () => ctx.run(ctx.answers));
+  assert.deepEqual(late.problems, [ARCHIVED]);
+  assert.ok(fs.lstatSync(archived).isDirectory(), 'the stage hook ran');
+  assert.ok(!fs.existsSync(ledger), 'no ledger written');
+  // ENOTDIR is an absence: a file where .agents/archive would be holds no id.
+  reset(ctx);
+  fs.mkdirSync(path.dirname(path.dirname(archived)), { recursive: true }); fs.writeFileSync(path.dirname(archived), 'not a directory');
+  await accepts(ctx, ctx.answers);
+  // Any other failure to stat either path is UNKNOWN, never an absence, and nothing is written.
+  for (const dir of ['changes', 'archive']) {
+    reset(ctx);
+    const before = snapshot(ctx.fx.repo), target = path.join(ctx.fx.repo, '.agents', dir, CHANGE_ID);
+    let hits = 0;
+    await replacing('lstatSync', real => (p, ...rest) => {
+      if (path.resolve(p) === target) { hits++; throw Object.assign(new Error('EACCES: permission denied, lstat'), { code: 'EACCES' }); }
+      return real(p, ...rest);
+    }, () => assert.rejects(ctx.run(ctx.answers), e => e.message === `cannot stat .agents/${dir}/${CHANGE_ID}`));
+    assert.ok(hits > 0, dir + ': the injected error was raised');
+    assert.deepEqual(snapshot(ctx.fx.repo), before, dir + ': nothing written under --repo');
+  }
+});
+
 test('values and sections holding replacement patterns are written verbatim', async t => {
   const ctx = await setup(t);
   const PATTERNS = "keep $& and $` and $' and $$ and $1 and $<n> literal";

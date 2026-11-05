@@ -44,8 +44,11 @@ section { display: grid; gap: 10px; }
 .note-btn { font-size: .85rem; font-weight: 600; background: transparent; color: var(--accent); border: 1px dashed var(--line); padding: 4px 10px; }
 .note-btn[aria-expanded="true"], .note-btn.has-note { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
 .ruled { border-style: dashed; }
-.out { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / .08); }
-.out-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.out { position: sticky; bottom: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: grid; gap: 6px; box-shadow: 0 6px 20px rgb(0 0 0 / .08); }
+.out-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; }
+.out-row label { font-size: .9rem; color: var(--muted); padding-top: 7px; }
+#note { flex: 1 1 240px; width: auto; min-width: 0; min-height: 36px; max-height: 50vh; resize: vertical; }
+#status:empty { display: none; }
 button { font: inherit; font-weight: 600; background: var(--accent); color: var(--bg); border: 0; border-radius: 6px; padding: 8px 14px; cursor: pointer; }
 button:focus-visible, .choice label:focus-within, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 textarea { font: inherit; width: 100%; box-sizing: border-box; min-height: 44px; background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
@@ -63,12 +66,12 @@ textarea { font: inherit; width: 100%; box-sizing: border-box; min-height: 44px;
   <div class="strip" id="strip"></div>
   <div id="groups"></div>
   <div class="out">
-    <label for="note" class="eyebrow">Anything else (optional)</label>
-    <textarea id="note"></textarea>
     <div class="out-row">
+      <label for="note">Notes:</label>
+      <textarea id="note" rows="1" placeholder="Anything else (optional)"></textarea>
       <button id="copy" type="button">Copy rulings</button>
-      <span id="status"></span>
     </div>
+    <span id="status"></span>
     <textarea id="copybox" hidden readonly aria-label="Rulings text to copy"></textarea>
   </div>
 </main>
@@ -168,6 +171,8 @@ document.getElementById("copy").addEventListener("click", () => {
   if (!navigator.clipboard) return manual();
   navigator.clipboard.writeText(t).then(() => { st.textContent = "Copied. Paste it into the chat."; box.hidden = true; }).catch(manual);
 });
+const noteBox = document.getElementById("note");
+noteBox.addEventListener("input", () => { noteBox.style.height = "auto"; noteBox.style.height = Math.min(noteBox.scrollHeight + 2, 200) + "px"; });
 render();
 </script>
 </body>

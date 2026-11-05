@@ -64,11 +64,12 @@ function emptyFileEntries(lines) {
 
 // node: spec reporter (`✖ name (1.2ms)`, `ℹ tests N`) or TAP (`not ok N - name`, `# tests N`).
 // The summary is the reporter's contiguous block, so a test printing `tests 99` is not one.
+const NODE_SUMMARY = /^(ℹ|#) tests (\d+)\n\1 suites (\d+)\n\1 pass (\d+)\n\1 fail (\d+)\n\1 cancelled (\d+)\n\1 skipped (\d+)\n\1 todo (\d+)$/gm;
 function parseNode(text) {
   const lines = text.split('\n'), entries = [];
   const c = { found: 0, passed: 0, failed: 0, skipped: 0, total: 0 };
-  for (const m of text.matchAll(/^(ℹ|#) tests (\d+)\n\1 suites \d+\n\1 pass (\d+)\n\1 fail (\d+)\n\1 cancelled (\d+)\n\1 skipped (\d+)\n\1 todo (\d+)$/gm)) {
-    c.found++; c.total += +m[2]; c.passed += +m[3]; c.failed += +m[4] + +m[5]; c.skipped += +m[6] + +m[7];
+  for (const m of text.matchAll(NODE_SUMMARY)) {
+    c.found++; c.total += +m[2]; c.passed += +m[4]; c.failed += +m[5] + +m[6]; c.skipped += +m[7] + +m[8];
   }
   // Spec: the trailing "failing tests" block lists each failure once, without the suites the
   // inline tree also marks; outside a block every inline `✖` line is taken.
@@ -101,6 +102,36 @@ function parseNode(text) {
   const loadFailures = entries.filter(e => e.location ? isFileOf(e.name, e.location) : SCRIPT_FILE.test(e.name)).map(e => e.name);
   const names = entries.map(e => e.name), emptyFiles = emptyFileEntries(lines);
   return c.found ? found(c, names, loadFailures, emptyFiles) : missing(names, loadFailures, emptyFiles);
+}
+// Every test and suite node's reporters list, named by its path (`parent > name`): spec indents a
+// result line two spaces a level under `▶ parent`, TAP four under `# Subtest: parent`. A test that
+// passed or failed ran; a skip or a todo did not, as the counts take them. The failing-tests block
+// repeats failures and a TAP YAML block quotes them, so neither is read. Only a listing exactly as
+// long as the summaries' tests plus suites is returned: a line a test printed itself makes null.
+// A name may hold a lone CR (spec prints names raw), so only CRLF ends a line here.
+const tapName = name => name.trimEnd().replace(/\\([\\#])/g, '$1');
+function listNode(text) {
+  let counted = 0, inBlock = false, yamlAt = null, yaml = null;
+  for (const m of text.matchAll(NODE_SUMMARY)) counted += +m[2] + +m[3];
+  const ran = [], skipped = [], groups = [], subtests = [];
+  const add = (stack, depth, name, didRun) => (didRun ? ran : skipped).push([...stack.slice(0, depth), name].join(' > '));
+  for (const line of text.split('\n')) {
+    if (yaml !== null) { if (line === yaml + '...') yaml = null; continue; }
+    if (line === yamlAt) { yaml = line.slice(0, -3); continue; }
+    yamlAt = null;
+    if (line === '✖ failing tests:') { inBlock = true; continue; }
+    if (inBlock && /^[ℹ✔▶﹣]/.test(line)) inBlock = false;
+    if (inBlock) continue;
+    let m;
+    if ((m = /^( *)▶ ([^\n]+)$/.exec(line))) { groups.length = m[1].length >> 1; groups.push(m[2]); }
+    else if ((m = /^( *)([✔✖﹣⚠]) ([^\n]+?) \(\d+(?:\.\d+)?ms\)( # [^\n]*)?$/.exec(line))) add(groups, m[1].length >> 1, m[3], !m[4] && m[2] !== '﹣');
+    else if ((m = /^( *)# Subtest: ([^\n]*)$/.exec(line))) { subtests.length = m[1].length >> 2; subtests.push(tapName(m[2])); }
+    else if ((m = /^( *)(?:not )?ok \d+ - ((?:\\.|[^\\#])*)(#[^\n]*)?$/.exec(line))) {
+      add(subtests, m[1].length >> 2, tapName(m[2]), !/^#\s*(?:SKIP|TODO)\b/i.test(m[3] || ''));
+      yamlAt = m[1] + '  ---';
+    }
+  }
+  return counted > 0 && ran.length + skipped.length === counted ? { ran, skipped } : null;
 }
 
 function parseJest(text) {
@@ -165,6 +196,8 @@ export function parseRunnerOutput(parser, text) {
   if (!PARSERS.includes(parser) || !parse) throw new Error(`Unknown parser: ${parser}`);
   return parse(normalize(String(text)));
 }
+// The tests a step's output names, `{ ran, skipped }`, or null: only node's reporters list each test.
+export const listTests = (parser, text) => parser === 'node' ? listNode(String(text).replace(ANSI, '').replace(/\r\n/g, '\n')) : null;
 
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 function checkSpec(spec) {
@@ -240,7 +273,7 @@ function logWriter(fd) {
   return { fd, data: put, note: text => put((atLineStart ? '' : '\n') + text + '\n') };
 }
 
-function runStep(step, { cwd, env, timeoutMs, log }) {
+function runStep(step, { cwd, env, timeoutMs, log, prefix }) {
   return new Promise(resolve => {
     let resolved = { bash: 'bash', rejected: [] };
     if (step.shell === 'bash') {
@@ -248,7 +281,7 @@ function runStep(step, { cwd, env, timeoutMs, log }) {
       for (const file of resolved.rejected) log.note(`==> step ${step.name}: ${file} does not receive a quoted script intact (a launcher such as WSL's); not used`);
       if (resolved.bash && resolved.bash !== 'bash') log.note(`==> step ${step.name}: bash is ${resolved.bash}`);
     }
-    const [command, ...args] = commandOf(step, resolved.bash), pieces = [];
+    const argv = commandOf(step, resolved.bash), [command, ...args] = argv[0] ? [...prefix, ...argv] : [], pieces = [];
     const decoders = { stdout: new StringDecoder('utf8'), stderr: new StringDecoder('utf8') };
     let child, settled = false, timedOut = false, timer, grace;
     const finish = outcome => {
@@ -278,7 +311,7 @@ function runStep(step, { cwd, env, timeoutMs, log }) {
 
 function classify(step, run, timeoutMs) {
   const parsed = step.parser === 'none' ? empty() : parseRunnerOutput(step.parser, run.text || '');
-  const base = { name: step.name, passed: parsed.passed, failed: parsed.failed, skipped: parsed.skipped, total: parsed.total, names: parsed.names, loadFailures: parsed.loadFailures, emptyFiles: parsed.emptyFiles, exit: run.exit ?? null };
+  const base = { name: step.name, passed: parsed.passed, failed: parsed.failed, skipped: parsed.skipped, total: parsed.total, names: parsed.names, loadFailures: parsed.loadFailures, emptyFiles: parsed.emptyFiles, tests: listTests(step.parser, run.text || ''), exit: run.exit ?? null };
   const shown = parsed.names.map(n => parsed.emptyFiles.includes(n) ? `${n} (ran no tests)` : n);
   const list = shown.length > MAX_NAMES ? `${shown.slice(0, MAX_NAMES).join(', ')} (+${shown.length - MAX_NAMES} more)` : shown.join(', ');
   // Skips show only when there are any, so a run without them keeps the plain `<passed>/<total>`.
@@ -306,8 +339,10 @@ const oneLine = text => SEPARATORS.reduce((t, s) => t.split(s).join(' '), text.r
 
 // Step `result` is PASS, FAIL, NO-TESTS, CRASHED, NO-SUMMARY, TIMEOUT or COULD-NOT-START; counts
 // are null without a summary. `status` is UNKNOWN when a step could not start or the input is invalid.
-// Steps inherit `env` (a caller may pass a scrubbed copy; process.env itself is never changed).
-export async function runSpec(spec, { cwd = process.cwd(), logPath, timeoutMs, env: inherited = process.env } = {}) {
+// `tests` (listTests) is null without a listing.
+// Steps inherit `env` (a caller may pass a scrubbed copy; process.env itself is never changed), and
+// each step's command runs behind `prefix`, a caller's argv such as a memory-capping scope.
+export async function runSpec(spec, { cwd = process.cwd(), logPath, timeoutMs, env: inherited = process.env, prefix = [] } = {}) {
   const unknown = reason => ({ status: 'UNKNOWN', line: oneLine(`UNKNOWN ${reason}`), steps: [] });
   const problem = checkSpec(spec);
   if (problem) return unknown(`spec: ${problem}`);
@@ -322,7 +357,7 @@ export async function runSpec(spec, { cwd = process.cwd(), logPath, timeoutMs, e
   try {
     for (const step of spec.steps) {
       log.note(`==> step ${step.name}: ${step.argv ? 'argv ' + JSON.stringify(step.argv) : 'shell ' + step.shell}`);
-      const run = await runStep(step, { cwd, env, timeoutMs, log });
+      const run = await runStep(step, { cwd, env, timeoutMs, log, prefix });
       if (run.error) log.note(`==> step ${step.name}: COULD-NOT-START (${run.error})`);
       if (run.timedOut) log.note(`==> step ${step.name}: TIMEOUT after ${timeoutMs / 1000}s; process tree killed`);
       const { step: result, text } = classify(step, run, timeoutMs);

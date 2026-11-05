@@ -128,7 +128,7 @@ function fixture(t, { eol = '\n', crlf = false, type = 'feature' } = {}) {
     guardrails: { file: 'CLAUDE.md', heading: '## Bug-class guardrails' },
     // The resumed implementer's context one token under the fresh-implementer line, so every
     // polish and fix-round render below is the tight case of resuming.
-    subagentTokens: 349999,
+    subagentTokens: 199999,
   };
   // The value every slot must render to, keyed by every slot the renderer knows.
   const conventions = contractBody(contract, '## Repo conventions (binding)');
@@ -458,16 +458,16 @@ test('two renders draw two nonces and two files', t => {
 
 // ===== The fresh-implementer line ======================================================
 // A role that resumes an implementer takes that implementer's context, the `subagent_tokens` of
-// its last task notification, as fact subagentTokens. The line is 350000 tokens, written here, not
+// its last task notification, as fact subagentTokens. The line is 200000 tokens, written here, not
 // read from the renderer: below it the role renders; at it and past it the renderer writes nothing,
 // exits 1 and prints one FRESH line naming the route §Spawning rules gives that role's crash respawn.
-const FRESH_LINE = 350000;
+const FRESH_LINE = 200000;
 const FRESH_ROUTE = {
   polish: 'spawn a fresh implementer with its rendered implementer prompt first, then the polish pointer',
   'fix-round': 'spawn a fresh implementer with its rendered rework prompt',
 };
-const freshLine = (role, tokens) => 'FRESH subagentTokens ' + tokens + ' is at or past 350000: ' + FRESH_ROUTE[role] + '\n';
-test('polish and fix-round render below 350000 tokens, and at it or past it write nothing and print one FRESH line naming the fresh route', async t => {
+const freshLine = (role, tokens) => 'FRESH subagentTokens ' + tokens + ' is at or past 200000: ' + FRESH_ROUTE[role] + '\n';
+test('polish and fix-round render below 200000 tokens, and at it or past it write nothing and print one FRESH line naming the fresh route', async t => {
   const fx = fixture(t), { FRESH_AT, TOKENS_FACT, ROLES: roles } = await api();
   assert.deepEqual([FRESH_AT, TOKENS_FACT], [FRESH_LINE, 'subagentTokens']);
   // The resuming roles are exactly those taking the fact, in the renderer's table and in --help's.
@@ -502,7 +502,7 @@ test('subagentTokens: missing is UNKNOWN UNFILLED, no positive integer is UNKNOW
     assert.equal(subagentTokens, FRESH_LINE - 1);
     got.push([role, 'missing', render(fx, role, rest).stdout]); want.push([role, 'missing', 'UNKNOWN UNFILLED subagentTokens\n']);
     // A value that is no positive integer is refused, never read as zero or as past the line.
-    for (const value of [0, -1, -404572, 0.5, 349999.5, 404572.5, '404572', '349999', null, true, [404572], { tokens: 404572 }]) {
+    for (const value of [0, -1, -404572, 0.5, 199999.5, 404572.5, '404572', '199999', null, true, [404572], { tokens: 404572 }]) {
       const r = render(fx, role, { ...rest, subagentTokens: value });
       got.push([role, value, r.stdout, r.status]); want.push([role, value, 'UNKNOWN fact subagentTokens: expected a positive integer\n', 2]);
     }
@@ -526,7 +526,7 @@ test('--help states the FRESH line, its exit code and the subagentTokens fact, a
   const facts = help.indexOf('round, subagentTokens: positive integers; round1Sha: a hex commit id; every other fact: a one-line string.');
   assert.notEqual(facts, -1, 'the typed facts line');
   assert.deepEqual(help.slice(facts + 1, facts + 3), [
-    "subagentTokens is the resumed implementer's subagent_tokens in its last task notification; at or past 350000",
+    "subagentTokens is the resumed implementer's subagent_tokens in its last task notification; at or past 200000",
     "the line is FRESH <route>, naming the fresh implementer that takes the role's work instead."]);
   const stated = Object.fromEntries([...help[at + 3].matchAll(/(\d) (PROMPT|FRESH|UNKNOWN)\b/g)].map(m => [m[2], Number(m[1])]));
   const role = 'fix-round', facts1 = pick(fx.facts, ROLE_FACTS[role]);
@@ -754,12 +754,24 @@ const REPORT_FILE_EDITS = [
     + 'the classes above still apply to them.\n',
   'of maybes.\n'],
 ];
+// The hunter's harness changed on purpose too (BL-039, BL-118): mutate.mjs now reads a swap by name
+// and takes --memory, which run-at-ref.mjs does not.
+const HUNTER_HARNESS_EDITS = [
+  ['control skipped changes neither the total nor the skipped count, so the harness compares\n'
+    + "the tests that ran by name and reads that swap as `CRASHED`; only node's reporters name\n"
+    + 'each test, so a jest, pytest or cargo step whose control skipped a test reads `CRASHED` too.\n',
+  'control skipped changes neither the total nor the skipped count, so its `SURVIVED` or\n'
+    + '`KILLED` line may rest on a test the control never ran — before citing either, compare\n'
+    + 'the tests its run and the control ran in the log; where the log does not name each test,\n'
+    + 'cite neither.\n'],
+  ['`--memory`, and prints one line, `AT <short sha> <validate.mjs line>`.\n', 'prints one line, `AT <short sha> <validate.mjs line>`.\n'],
+];
 const undoEdits = (text, edits) => edits.reduce((t, [now, then]) => {
   assert.equal(t.split(now).length - 1, 1, 'an exempt edit must occur exactly once: ' + JSON.stringify(now.slice(0, 80)));
   return t.replace(now, () => then);
 }, text);
 test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', renders byte-identically to that renderer and its skeletons, the never-open and background-command lines aside', { skip: 'needs history and ledger records that are not in this copy' }, async t => {
-  const fx = fixture(t), base = materializeBase(t), skeletons = read(SKELETONS), undone = undoEdits(skeletons, REPORT_FILE_EDITS);
+  const fx = fixture(t), base = materializeBase(t), skeletons = read(SKELETONS), undone = undoEdits(skeletons, [...REPORT_FILE_EDITS, ...HUNTER_HARNESS_EDITS]);
   const now = await api(), then = await import(pathToFileURL(path.join(base, 'orchestrate', 'tools', 'prompt.mjs')).href);
   const baseSkeletons = fs.readFileSync(path.join(base, ...SKELETONS.split('/')), 'utf8');
   // The base is the pre-change pair, and every role it rendered still renders.
@@ -779,7 +791,7 @@ test('the implementer, and every role the renderer had at ' + PROMPT_BASE + ', r
   }
   // The exemption is needed by every base role it names, and by no other: without it those renders differ from the base.
   const differs = roles.filter(role => neverOpen(renderWith(now, skeletons, role)).rest !== renderWith(then, baseSkeletons, role));
-  assert.deepEqual(differs, ['implementer', 'polish', 'fix-round', 'reviewer', 'reviewer-round2'], 'the base roles the exempt edits reach');
+  assert.deepEqual(differs, ['implementer', 'polish', 'fix-round', 'reviewer', 'reviewer-round2', 'test-hunter'], 'the base roles the exempt edits reach');
   // Live control: one word of the implementer's DO paragraph changed is a different render.
   const changed = undone.replace('DO: implement each checklist item;', () => 'DO: implement every checklist item;');
   assert.notEqual(changed, undone, 'the control anchor must exist');

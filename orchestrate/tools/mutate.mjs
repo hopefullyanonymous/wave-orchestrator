@@ -24,6 +24,7 @@ export const NOT_RUN = ['ANCHOR-MISSING', 'ANCHOR-AMBIGUOUS', 'CONTROL FAILED', 
 const TEST_PARSERS = ['node', 'jest', 'pytest', 'cargo'];
 const MAX_NAMES = 10;
 const MAX_TIMEOUT_S = Math.floor((2 ** 31 - 1) / 1000);
+const MAX_MEMORY_MIB = 2 ** 30;
 // A checkout writes a whole tree; the evidence helpers' 15-second budget is for reads.
 const GIT_TIMEOUT_MS = 10 * 60 * 1000;
 const isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -34,6 +35,11 @@ export function timeoutOf(value) {
   if (value === undefined) return undefined;
   if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_TIMEOUT_S) throw new Unknown(`usage: --timeout must be a positive whole number of seconds, at most ${MAX_TIMEOUT_S}`);
   return Number(value) * 1000;
+}
+export function memoryOf(value) {
+  if (value === undefined) return undefined;
+  if (!/^[1-9]\d*$/.test(value) || Number(value) > MAX_MEMORY_MIB) throw new Unknown(`usage: --memory must be a positive whole number of MiB, at most ${MAX_MEMORY_MIB}`);
+  return Number(value);
 }
 export function readJson(file, flag) {
   let text;
@@ -144,6 +150,26 @@ export async function withDisposableCheckout(repo, ref, fn, { tmpRoot = os.tmpdi
   return value;
 }
 
+// ===== The memory cap ==========================================================================
+// A mutant can make node:assert diff a vast object graph, in buffers outside the V8 heap that
+// --max-old-space-size never limits; the kernel's OOM killer once took a whole terminal. On Linux
+// each step runs in its own systemd user scope: its memory capped, swap barred, and one OOM kill
+// kills its whole tree (OOMPolicy=kill), so the step dies by SIGKILL. A probe scope must first
+// read the cap back from its own cgroup; anywhere else, or when it cannot, steps run uncapped and
+// the log says why.
+export const defaultMemoryMib = () => Math.floor(os.totalmem() / 2 / 1024 / 1024);
+const CAP_PROBE = "const fs = require('fs'), cg = '/sys/fs/cgroup' + /^0::(.*)$/m.exec(fs.readFileSync('/proc/self/cgroup', 'utf8'))[1];"
+  + " process.stdout.write(['memory.max', 'memory.swap.max', 'memory.oom.group'].map(f => fs.readFileSync(cg + '/' + f, 'utf8').trim()).join(' '));";
+export function memoryCap(mib, { platform = process.platform, env = process.env, run = spawnSync } = {}) {
+  if (platform !== 'linux') return { prefix: [], note: `no memory cap: none is set on ${platform}` };
+  const prefix = ['systemd-run', '--user', '--scope', '--quiet', '-p', `MemoryMax=${mib}M`, '-p', 'MemorySwapMax=0', '-p', 'OOMPolicy=kill', '--'];
+  const r = run(prefix[0], [...prefix.slice(1), process.execPath, '-e', CAP_PROBE], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 });
+  const want = `${mib * 1024 * 1024} 0 1`;
+  if (!r.error && r.status === 0 && r.stdout === want) return { prefix, note: `memory cap: ${mib} MiB per step, swap barred (a systemd-run --user scope)` };
+  const how = r.error ? r.error.code || r.error.name : r.status !== 0 ? `exit ${r.status ?? r.signal}` : `its cgroup read ${JSON.stringify(r.stdout)}, not ${JSON.stringify(want)}`;
+  return { prefix: [], note: `no memory cap: a systemd-run --user scope could not be shown to hold one (${how})` };
+}
+
 // ===== Logs and runs ===========================================================================
 // The one log every run of an invocation appends to, outside the checkout, fresh per invocation.
 export function openLog(file) {
@@ -157,11 +183,11 @@ export function openLog(file) {
 }
 // One validate.mjs run in the checkout. Its own log is copied into the invocation's log under a
 // header and its line re-pointed there, so every `log:` path printed outlives the checkout.
-export async function runLogged(spec, { cwd, log, label, scratch, timeoutMs, env }) {
+export async function runLogged(spec, { cwd, log, label, scratch, timeoutMs, env, prefix }) {
   const runLog = path.join(scratch, 'run.log');
   fs.rmSync(runLog, { force: true });
   log.note(label);
-  const result = await runSpec(spec, { cwd, logPath: runLog, timeoutMs, env });
+  const result = await runSpec(spec, { cwd, logPath: runLog, timeoutMs, env, prefix });
   log.append(fs.readFileSync(runLog));
   return { ...result, line: result.line.split(runLog).join(log.path) };
 }
@@ -198,12 +224,15 @@ function anchor(dir, realDir, m, originals) {
 }
 // One mutation run against the control. SURVIVED needs every parsed step to have run and passed
 // what the control's did: the same passed, skipped and total counts. CRASHED means the run proved
-// nothing about the tests: a test step with no parsed summary; a test file that failed to load
+// nothing about the tests: a step killed by a signal (the memory cap's SIGKILL); a test step with
+// no parsed summary, or counts that do not add up; a test file that failed to load
 // (node reports one as a failing test named after the file, WITH a summary, so it would otherwise
 // read as KILLED) or ran no tests (node counts one as a passing test, so the total holds); a test
 // count unlike the control's; a step in which no test passed or failed; a step whose skipped count
 // moved, failing tests or not (a mutation that flips a skip condition changes which tests run, not
-// how many, and a test the control skipped proves nothing by failing). KILLED needs every failing step
+// how many, and a test the control skipped proves nothing by failing); a swap, which keeps every
+// count: a test ran that the control did not run, by name, or, where either run names no tests,
+// the control skipped any. KILLED needs every failing step
 // to count failed tests and name them, which a parser-none step never does: it counts nothing.
 const tests = n => `${n} test${n === 1 ? '' : 's'}`;
 function moved(s, c) {
@@ -211,23 +240,44 @@ function moved(s, c) {
   if (more > 0) return `${tests(more)} skipped that ran in the control`;
   return `${tests(-more)} ran that the control skipped`;
 }
+// The names in `a` that `b` lacks, each name counted as often as it occurs.
+function unmatched(a, b) {
+  const left = new Map();
+  for (const n of b) left.set(n, (left.get(n) || 0) + 1);
+  return a.filter(n => { const k = left.get(n); if (k) left.set(n, k - 1); return !k; });
+}
+const listed = n => n.length > MAX_NAMES ? `${n.slice(0, MAX_NAMES).join(', ')} (+${n.length - MAX_NAMES} more)` : n.join(', ');
+function swapped(s, c) {
+  if (!s.tests || !c.tests) return c.skipped > 0 && `the control skipped ${tests(c.skipped)}, and ${c.tests ? 'this run does' : 'it does'} not name each of its tests: a test that ran here may be one the control skipped`;
+  const extra = unmatched(s.tests.ran, c.tests.ran), gone = unmatched(c.tests.ran, s.tests.ran);
+  return [extra.length && `${tests(extra.length)} ran that the control did not run (${listed(extra)})`,
+    gone.length && `${tests(gone.length)} did not run that ran in the control (${listed(gone)})`].filter(Boolean).join('; ');
+}
 export function classifyRun(control, run, parsers) {
   const steps = run.steps;
   if (steps.length !== parsers.length) return { kind: 'CRASHED', reason: 'the run did not reach its steps' };
   if (steps.some(s => s.result === 'TIMEOUT')) return { kind: 'TIMEOUT', reason: 'a step outlived --timeout' };
+  // A shell reports its child's death by signal n as exit 128 + n: 137 is SIGKILL.
+  const killed = steps.find(s => typeof s.exit === 'string' || s.exit > 128);
+  if (killed) return { kind: 'CRASHED', reason: `step ${killed.name} ended by a signal (${typeof killed.exit === 'string' ? killed.exit : `exit ${killed.exit}`}): over the memory cap, killed from outside, or crashed` };
   for (const [i, s] of steps.entries()) {
     if (parsers[i] === 'none') continue;
     const c = control.steps[i];
     if (s.total === null) return { kind: 'CRASHED', reason: `step ${s.name} printed no parsed summary` };
+    // A parser whose total is not passed + failed + skipped would let a pass count move unseen below.
+    const odd = [s, c].find(x => x.passed + x.failed + x.skipped !== x.total);
+    if (odd) return { kind: 'CRASHED', reason: `step ${s.name}: ${odd === c ? "the control's" : 'its'} counts do not add up (${odd.passed} passed, ${odd.failed} failed, ${odd.skipped} skipped of ${odd.total})` };
     // validate.mjs lists a file that ran no tests among the load failures too: each is named as what it is.
     const loads = s.loadFailures.filter(f => !s.emptyFiles.includes(f));
     const files = [loads.length && `a test file failed to load (${loads.join(', ')})`, s.emptyFiles.length && `a test file ran no tests (${s.emptyFiles.join(', ')})`].filter(Boolean);
     if (files.length) return { kind: 'CRASHED', reason: `step ${s.name}: ${files.join('; ')}` };
     if (s.total !== c.total) return { kind: 'CRASHED', reason: `step ${s.name} ran ${s.total} tests, the control ${c.total}` };
     if (s.result === 'NO-TESTS') return { kind: 'CRASHED', reason: `step ${s.name}: no test passed (${s.passed}/${s.total}${s.skipped ? `, ${s.skipped} skipped` : ''})` };
-    // Every parser's total is passed + failed + skipped (validate.mjs), the totals are equal here and
-    // the control failed nothing: an equal skipped count leaves only failures to move a passed count.
+    // The counts add up (checked above), the totals are equal here and the control failed
+    // nothing: an equal skipped count leaves only failures to move a passed count.
     if (s.skipped !== c.skipped) return { kind: 'CRASHED', reason: `step ${s.name}: ${moved(s, c)}` };
+    const swap = swapped(s, c);
+    if (swap) return { kind: 'CRASHED', reason: `step ${s.name}: ${swap}` };
   }
   if (run.status === 'PASS') return { kind: 'SURVIVED' };
   const failing = steps.filter(s => s.result !== 'PASS');
@@ -237,24 +287,26 @@ export function classifyRun(control, run, parsers) {
 export function verdictLine(id, verdict, runLine) {
   if (verdict.kind === 'CRASHED') return `CRASHED ${id}: ${runLine}`;
   if (verdict.kind !== 'KILLED') return `${verdict.kind} ${id}`;
-  const n = verdict.names;
-  return `KILLED ${id}: ${n.length > MAX_NAMES ? `${n.slice(0, MAX_NAMES).join(', ')} (+${n.length - MAX_NAMES} more)` : n.join(', ')}`;
+  return `KILLED ${id}: ${listed(verdict.names)}`;
 }
 
 // ===== The core ================================================================================
 // Inputs are already checked (the CLI does it). `writeFile` writes a mutation and its restore:
 // a test seam, so a write that does not land or a restore that does not hold can be fed in.
-export async function mutate({ repo, ref, mutations, validate, setup = null, logPath, timeoutMs, tmpRoot, writeFile = fs.writeFileSync, remove, emit = () => {} }) {
+// Every run, setup and control included, runs under the same memory cap.
+export async function mutate({ repo, ref, mutations, validate, setup = null, logPath, timeoutMs, memoryMib = defaultMemoryMib(), tmpRoot, writeFile = fs.writeFileSync, remove, emit = () => {} }) {
   const lines = [], say = text => { const line = oneLine(text); lines.push(line); emit(line); };
   let log;
   try { log = openLog(logPath); } catch (e) { say(`UNKNOWN ${e.message}`); return { code: 2, lines }; }
+  const { prefix, note } = memoryCap(memoryMib);
+  log.note(note);
   const parsers = validate.steps.map(s => s.parser);
   // A write counts only when reading the file back gives exactly the bytes meant.
   const wrote = (file, bytes) => { try { writeFile(file, bytes); return fs.readFileSync(file).equals(bytes); } catch { return false; } };
   let code = 2;
   try {
     code = await withDisposableCheckout(repo, ref, async ({ dir, scratch, env }) => {
-      const run = (label, spec) => runLogged(spec, { cwd: dir, log, label, scratch, timeoutMs, env });
+      const run = (label, spec) => runLogged(spec, { cwd: dir, log, label, scratch, timeoutMs, env, prefix });
       if (setup) {
         const done = await run('setup', setup);
         if (done.status !== 'PASS') { say(`UNKNOWN setup ${done.line}`); return 2; }
@@ -305,7 +357,7 @@ export async function mutate({ repo, ref, mutations, validate, setup = null, log
   return { code, lines };
 }
 
-const HELP = `mutate.mjs --repo <repo> --ref <ref> --mutations <muts.json> --validate <spec.json> --log <file> [--setup <spec.json>] [--timeout <seconds>]
+const HELP = `mutate.mjs --repo <repo> --ref <ref> --mutations <muts.json> --validate <spec.json> --log <file> [--setup <spec.json>] [--timeout <seconds>] [--memory <MiB>]
 Proves each mutation on a disposable checkout of <ref>: a shared clone under the temp directory, removed
 afterwards. The repository itself is never written, and its uncommitted changes are not seen. --setup runs,
 every anchor is checked, then an unmutated control, then one run per mutation, each restored from saved bytes.
@@ -317,10 +369,14 @@ then MUTATE <k> killed, <s> survived, <u> other. An abort prints only its own li
 Exit 0 every mutation killed; 1 at least one survived and nothing else went wrong; 2 anything else.
 KILLED: a step failed, every failing step names its failing tests and no CRASHED cause below holds, so no counted
 step's skipped count moved. SURVIVED: every counted step passed with the control's own passed, skipped and total
-counts, and no CRASHED cause below holds. CRASHED: the run did not reach its steps, a test step with no parsed summary, a test file that failed to
+counts, and no CRASHED cause below holds. CRASHED: the run did not reach its steps, a step ended by a signal (exit above 128
+through a shell: 137 is SIGKILL, the memory cap's), a test step with no parsed summary or whose passed, failed and skipped
+counts do not add up to its total, a test file that failed to
 load or ran no tests, a test count unlike the control's, a counted step in which no test passed or failed, a step whose
 skipped count differs from the control's, failing tests or not (a test skipped that ran in the control, or the
-reverse), or a step that failed without a named failing test; the log records which.
+reverse), a counted step in which a test ran that the control did not run, by name (a swap keeps every count), or,
+where either run does not name each test (only node's reporters do), whose control skipped any, or a step that
+failed without a named failing test; the log records which.
 NOT-APPLIED: the mutated bytes did not read back, or equal the file's own (in a CRLF file, a replace that differs
 from find only in its line breaks). A mutation's line is printed only once its restore holds; RESTORE-FAILED
 replaces it. Git's repository variables (git rev-parse --local-env-vars) are dropped from the environment first.
@@ -332,17 +388,21 @@ exactly once in the file; in a CRLF file the line breaks of find and replace are
 a step whose parser counts tests (node, jest, pytest, cargo), and each such step must pass at least one test
 (one in which none passed, all skipped or todo or none at all, is CONTROL FAILED) in the
 control. --log is written fresh by each invocation, every run appending to it, and must lie outside the
-repository. --timeout (whole seconds, at most ${MAX_TIMEOUT_S}) applies per step of every run.`;
+repository. --timeout (whole seconds, at most ${MAX_TIMEOUT_S}) applies per step of every run. --memory (whole MiB, at
+most ${MAX_MEMORY_MIB}; by default half the machine's memory) caps each step of every run, --setup and the control
+included: on Linux each step runs in a systemd-run --user scope (MemoryMax, MemorySwapMax=0, OOMPolicy=kill) once a
+probe scope reads that cap back from its own cgroup; elsewhere, or when the probe cannot, steps run uncapped. The
+log's first line says which.`;
 
 export async function mutateCli(args, emit = () => {}) {
   if (args.length === 1 && args[0] === '--help') { emit(HELP); return { code: 0, lines: [HELP] }; }
   const refuse = reason => { const line = oneLine(`UNKNOWN ${reason}`); emit(line); return { code: 2, lines: [line] }; };
   let flags;
-  try { flags = parseFlags(args, ['repo', 'ref', 'mutations', 'validate', 'log', 'setup', 'timeout'], ['repo', 'ref', 'mutations', 'validate', 'log']); }
+  try { flags = parseFlags(args, ['repo', 'ref', 'mutations', 'validate', 'log', 'setup', 'timeout', 'memory'], ['repo', 'ref', 'mutations', 'validate', 'log']); }
   catch { return refuse('usage: unknown, missing or duplicate flag; use --help'); }
   try {
     scrubLocalGitEnv();
-    const timeoutMs = timeoutOf(flags.timeout);
+    const timeoutMs = timeoutOf(flags.timeout), memoryMib = memoryOf(flags.memory);
     const doc = readJson(flags.mutations, '--mutations'), problem = checkMutations(doc);
     if (problem) throw new Unknown(`--mutations: ${problem}`);
     const validate = await checkedSpec(readJson(flags.validate, '--validate'), '--validate');
@@ -350,7 +410,7 @@ export async function mutateCli(args, emit = () => {}) {
     const setup = flags.setup === undefined ? null : await checkedSpec(readJson(flags.setup, '--setup'), '--setup');
     const top = topLevel(flags.repo);
     if (inside(top, flags.log)) throw new Unknown(`usage: --log must lie outside the repository ${top}`);
-    return await mutate({ repo: top, ref: flags.ref, mutations: doc.mutations, validate, setup, logPath: flags.log, timeoutMs, emit });
+    return await mutate({ repo: top, ref: flags.ref, mutations: doc.mutations, validate, setup, logPath: flags.log, timeoutMs, memoryMib, emit });
   } catch (e) { return refuse(e instanceof Unknown ? e.message : `internal error: ${e.message}`); }
 }
 
